@@ -1,0 +1,3 @@
+/target/
+*.minigramps.json
+.DS_Store
