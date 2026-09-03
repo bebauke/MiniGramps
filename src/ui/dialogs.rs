@@ -187,6 +187,28 @@ pub fn show_open(app: &mut MiniGramps, ctx: &egui::Context) {
                     app.import_dialog();
                 }
             });
+            ui.separator();
+            ui.label(
+                egui::RichText::new("SERVER")
+                    .small()
+                    .strong()
+                    .color(palette(app.dark_mode).section),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.server_url)
+                    .hint_text("https://host/api/v1 (IP/Domain)")
+                    .desired_width(360.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut app.server_token)
+                    .hint_text("Login/Token")
+                    .password(true),
+            );
+            if ui.button("Vom Server laden").clicked() && !app.server_url.trim().is_empty() {
+                let url = app.server_url.trim().to_string();
+                let token = app.server_token.clone();
+                app.load_from_server(&url, &token);
+            }
         });
     app.show_open = app.show_open && open;
 }

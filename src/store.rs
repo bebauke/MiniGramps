@@ -93,6 +93,15 @@ impl FileSystemStore {
         }
     }
 
+    /// Store für einen Ordner (z. B. die Medien-Basis); Datendatei mit
+    /// Standardnamen.
+    pub fn for_root(root: std::path::PathBuf) -> Self {
+        Self {
+            data_file: root.join("familienbaum.minigramps.json"),
+            root,
+        }
+    }
+
     fn layout_path(&self) -> PathBuf {
         let stem = self
             .data_file

@@ -46,6 +46,7 @@ use crate::import::{
     save_project_manifest,
 };
 use crate::model::{ChildRelation, Gender, Person, TreeData, person};
+use crate::store::{DataStore, FileSystemStore};
 use tree::{RelationKind, TreeAction, TreeOrientation, TreeView};
 
 // Eingebettete Icons (Feather-SVGs) und Logo.
@@ -145,6 +146,9 @@ pub struct MiniGramps {
     pub section_menu_kind: u8,
     /// Schließen angefordert, aber ungespeicherte Änderungen prüfen.
     pub pending_close: bool,
+    /// Server-Verbindung (Öffnen-Dialog): Basis-URL + Token (Sitzung).
+    pub server_url: String,
+    pub server_token: String,
     /// Debug-Log (Leiste unten + Terminal via `log`).
     /// Pfad der aktuell geöffneten Projektdatei (für `<stem>.layout.json`).
     pub current_data_path: Option<PathBuf>,
@@ -196,6 +200,8 @@ impl MiniGramps {
             section_menu: None,
             section_menu_kind: 0,
             pending_close: false,
+            server_url: String::new(),
+            server_token: String::new(),
             current_data_path: None,
             started: std::time::Instant::now(),
         };
@@ -233,8 +239,15 @@ impl MiniGramps {
     pub fn save(&mut self) {
         let path = self.library.join("familienbaum.minigramps.json");
         self.current_data_path = Some(path.clone());
-        match serde_json::to_string_pretty(&self.data)
-            .and_then(|s| fs::write(&path, s).map_err(serde_json::Error::io))
+        let store = FileSystemStore::for_data_file(&path);
+        let entries: Vec<(String, f32)> = self
+            .manual_offsets
+            .iter()
+            .map(|(id, offset)| (id.clone(), *offset))
+            .collect();
+        match store
+            .write_data(&self.data)
+            .and_then(|_| store.write_layout(&entries))
         {
             Ok(_) => {
                 self.status = format!("Gespeichert: {}", path.display());
@@ -248,28 +261,6 @@ impl MiniGramps {
         match save_project_manifest(&path, &self.data) {
             Ok(manifest) => self.log(format!("Manifest gespeichert: {}", manifest.display())),
             Err(error) => self.log(format!("Manifest speichern fehlgeschlagen: {error}")),
-        }
-        let layout = LayoutFile {
-            version: LAYOUT_VERSION,
-            entries: self
-                .manual_offsets
-                .iter()
-                .map(|(id, offset)| LayoutEntry {
-                    id: id.clone(),
-                    offset: *offset,
-                })
-                .collect(),
-        };
-        let layout_file = layout_path(&path);
-        match serde_json::to_string_pretty(&layout)
-            .and_then(|text| fs::write(&layout_file, text).map_err(serde_json::Error::io))
-        {
-            Ok(_) => self.log(format!(
-                "Layout gespeichert: {} ({} Einträge)",
-                layout_file.display(),
-                layout.entries.len()
-            )),
-            Err(e) => self.log(format!("Layout speichern fehlgeschlagen: {e}")),
         }
     }
 
@@ -316,7 +307,7 @@ impl MiniGramps {
                         .to_string();
                 }
                 self.photo_cache.clear();
-                self.manual_offsets = load_layout(path);
+                self.manual_offsets = FileSystemStore::for_data_file(path).read_layout();
                 self.current_data_path = Some(path.to_path_buf());
                 if !self.manual_offsets.is_empty() {
                     self.log(format!(
@@ -338,6 +329,37 @@ impl MiniGramps {
         }
     }
 
+    /// Projekt vom Server laden (Öffnen-Dialog → Server: URL + Login).
+    pub fn load_from_server(&mut self, base_url: &str, token: &str) {
+        let store = crate::store::ServerStore::new(
+            crate::store::UreqTransport,
+            crate::store::ServerConfig {
+                base_url: base_url.to_string(),
+                token: (!token.is_empty()).then(|| token.to_string()),
+            },
+        );
+        match store.read_data() {
+            Ok(mut data) => {
+                if let Some(manifest) = store.read_manifest() {
+                    data.project.name = manifest.name;
+                }
+                self.selected = data.people.first().map(|p| p.id.clone());
+                self.reference = self.selected.clone();
+                self.expanded.clear();
+                self.data = data;
+                self.photo_cache.clear();
+                self.manual_offsets = store.read_layout();
+                self.fit_pending = true;
+                self.show_open = false;
+                self.status = format!("Geöffnet: {base_url}");
+                self.log(format!("Vom Server geladen: {base_url}"));
+            }
+            Err(e) => {
+                self.status = format!("Server-Laden fehlgeschlagen: {e}");
+                self.log(format!("Server-Laden fehlgeschlagen: {e}"));
+            }
+        }
+    }
     /// Person als Referenz setzen (Baum-Wurzel). Genutzt von der
     /// TreeAction-Auswertung, den Listen (Shift/Dreifachklick) und dem
     /// Button "Als Referenz setzen" (sidebar.rs). Das Layout wird live
@@ -367,25 +389,16 @@ impl MiniGramps {
             .current_data_path
             .clone()
             .unwrap_or_else(|| self.library.join("familienbaum.minigramps.json"));
-        let layout = LayoutFile {
-            version: LAYOUT_VERSION,
-            entries: self
-                .manual_offsets
-                .iter()
-                .map(|(id, offset)| LayoutEntry {
-                    id: id.clone(),
-                    offset: *offset,
-                })
-                .collect(),
-        };
-        let file = layout_path(&data_path);
-        match serde_json::to_string_pretty(&layout)
-            .and_then(|text| fs::write(&file, text).map_err(serde_json::Error::io))
-        {
+        let entries: Vec<(String, f32)> = self
+            .manual_offsets
+            .iter()
+            .map(|(id, offset)| (id.clone(), *offset))
+            .collect();
+        match FileSystemStore::for_data_file(&data_path).write_layout(&entries) {
             Ok(_) => self.log(format!(
                 "Layout gesichert: {} ({} Einträge)",
-                file.display(),
-                layout.entries.len()
+                data_path.display(),
+                entries.len()
             )),
             Err(e) => self.log(format!("Layout sichern fehlgeschlagen: {e}")),
         }
@@ -607,59 +620,6 @@ impl eframe::App for MiniGramps {
         dialogs::show_export(self, ctx);
         dialogs::show_image_intent(self, ctx);
     }
-}
-
-// --- Layout-Datei -----------------------------------------------------------
-
-/// Separates Layout-File (`<projekt>.layout.json`) neben den Projektdaten:
-/// manuelle Verschiebungen der Baumkarten, über IDs zugeordnet. Die Offsets
-/// sind relativ zur verhandelten Position (Eltern-Anker) und werden in
-/// horizontaler wie vertikaler Ausrichtung auf die jeweilige
-/// Verteilungsachse angewendet.
-///
-/// Version 2 = hierarchische Vererbung (Offset nur bei der gezogenen Person,
-/// Nachfahren/Vorfahren erben). Version 1 (flache Versätze auf alle
-/// mitgezogenen Karten) ist inkompatibel und wird beim Laden ignoriert.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct LayoutFile {
-    version: u32,
-    entries: Vec<LayoutEntry>,
-}
-
-/// Aktuelle Layout-Dateiversion (hierarchische Versätze).
-const LAYOUT_VERSION: u32 = 2;
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct LayoutEntry {
-    id: String,
-    offset: f32,
-}
-
-fn layout_path(data_path: &Path) -> PathBuf {
-    let stem = data_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("layout");
-    data_path.with_file_name(format!("{stem}.layout.json"))
-}
-
-fn load_layout(data_path: &Path) -> HashMap<String, f32> {
-    let Ok(text) = fs::read_to_string(layout_path(data_path)) else {
-        return HashMap::new();
-    };
-    serde_json::from_str::<LayoutFile>(&text)
-        .map(|file| {
-            // Alte flache Layouts (Version 1) nicht hierarchisch
-            // interpretieren — die Versätze entstehen neu.
-            if file.version < LAYOUT_VERSION {
-                return HashMap::new();
-            }
-            file.entries
-                .into_iter()
-                .map(|entry| (entry.id, entry.offset))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 // --- Icons & Schriften -----------------------------------------------------
