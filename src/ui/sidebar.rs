@@ -182,6 +182,9 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                             }
                             app.photo_cache.remove(&app.draft.id);
                             app.status = "Profil gespeichert".into();
+                            // Auch auf die Festplatte schreiben — sonst sind
+                            // Foto/Änderungen nach Neustart weg.
+                            app.save();
                             app.inline_edit = false;
                             app.relation_picker = None;
                             app.relation_query.clear();

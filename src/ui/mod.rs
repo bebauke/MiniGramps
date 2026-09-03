@@ -127,6 +127,16 @@ pub struct MiniGramps {
     /// Aufgeklappte Beziehungszeile im Beziehungseditor: Kategorie + ID der
     /// Verwandten, deren Beziehungsart bearbeitet wird.
     pub relation_editor: Option<(RelationKind, String)>,
+    /// EINGEKLAPpte Kategorien der rechten Leiste (Sitzungszustand).
+    pub collapsed_sections: HashSet<String>,
+    /// Ausgeblendete Kategorien (Rechtsklick auf Kategorietitel → Häkchen).
+    pub hidden_sections: HashSet<String>,
+    /// Erweiterte Namensfelder im Profil aktiv (Rechtsklick auf Namensfeld).
+    pub name_details: bool,
+    /// Offenes Kontextmenü: Schlüssel + Position (Kategorien oder Namen).
+    pub section_menu: Option<(String, Vec2, egui::Pos2)>,
+    /// 1 = Kategorie-Menü, 2 = Namens-Menü (Schlüssel-Semantik).
+    pub section_menu_kind: u8,
     /// Debug-Log (Leiste unten + Terminal via `log`).
     /// Pfad der aktuell geöffneten Projektdatei (für `<stem>.layout.json`).
     pub current_data_path: Option<PathBuf>,
@@ -172,6 +182,11 @@ impl MiniGramps {
             pending_child_relation: ChildRelation::Birth,
             relation_picker: None,
             relation_editor: None,
+            collapsed_sections: HashSet::new(),
+            hidden_sections: HashSet::new(),
+            name_details: false,
+            section_menu: None,
+            section_menu_kind: 0,
             current_data_path: None,
             started: std::time::Instant::now(),
         };

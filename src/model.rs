@@ -67,6 +67,25 @@ pub struct Person {
     /// Cover-Beschnitt mit Zoom/Verschiebung, siehe `media::cover_uv`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub photo_crop: Option<PhotoCrop>,
+    // Erweiterte Namensbestandteile (Feldauswahl wie in Gramps). Leere
+    // Felder werden nicht serialisiert; Anzeige im Profil, sobald Inhalt
+    // vorhanden oder per Rechtsklick aktiviert.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nick_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub call_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name_prefix: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub surname_prefix: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub suffix: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name_origin: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -561,6 +580,14 @@ pub fn person(
         source: String::new(),
         gallery: Vec::new(),
         photo_crop: None,
+        title: String::new(),
+        nick_name: String::new(),
+        call_name: String::new(),
+        name_prefix: String::new(),
+        surname_prefix: String::new(),
+        suffix: String::new(),
+        name_type: String::new(),
+        name_origin: String::new(),
     }
 }
 
