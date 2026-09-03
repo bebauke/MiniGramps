@@ -119,6 +119,8 @@ pub struct MiniGramps {
     pub relation_query: String,
     /// Per Drag-and-drop eingefügte Datei mit unklarer Verwendung.
     pub pending_image: Option<PathBuf>,
+    /// Vollbildansicht eines Galerie-Bildes.
+    pub lightbox_image: Option<String>,
     /// Zustand des `+ KIND`-Pickers: Bezugsperson, gewählter Partner, Art.
     pub pending_child_for: Option<String>,
     pub pending_child_partner: Option<String>,
@@ -149,6 +151,9 @@ pub struct MiniGramps {
     /// Server-Verbindung (Öffnen-Dialog): Basis-URL + Token (Sitzung).
     pub server_url: String,
     pub server_token: String,
+    /// Verbindungsstatus für das Logo (Hover: Details).
+    pub server_online: bool,
+    pub server_base: Option<String>,
     /// Debug-Log (Leiste unten + Terminal via `log`).
     /// Pfad der aktuell geöffneten Projektdatei (für `<stem>.layout.json`).
     pub current_data_path: Option<PathBuf>,
@@ -189,6 +194,7 @@ impl MiniGramps {
             inline_edit: false,
             relation_query: String::new(),
             pending_image: None,
+            lightbox_image: None,
             pending_child_for: None,
             pending_child_partner: None,
             pending_child_relation: ChildRelation::Birth,
@@ -202,6 +208,8 @@ impl MiniGramps {
             pending_close: false,
             server_url: String::new(),
             server_token: String::new(),
+            server_online: false,
+            server_base: None,
             current_data_path: None,
             started: std::time::Instant::now(),
         };
@@ -338,25 +346,68 @@ impl MiniGramps {
                 token: (!token.is_empty()).then(|| token.to_string()),
             },
         );
+        // Offline-Cache je Server-URL (offline am Online-Projekt arbeiten).
+        let cache_root = default_library().join("server-cache").join(
+            base_url
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>(),
+        );
         match store.read_data() {
             Ok(mut data) => {
                 if let Some(manifest) = store.read_manifest() {
                     data.project.name = manifest.name;
                 }
+                self.manual_offsets = store.read_layout();
+                // Cache schreiben, damit offline weitergearbeitet werden kann.
+                let cache = FileSystemStore::for_root(cache_root);
+                let _ = cache.write_data(&data);
+                let _ = cache.write_layout(
+                    &self
+                        .manual_offsets
+                        .iter()
+                        .map(|(id, offset)| (id.clone(), *offset))
+                        .collect::<Vec<_>>(),
+                );
+                self.server_online = true;
+                self.server_base = Some(base_url.to_string());
                 self.selected = data.people.first().map(|p| p.id.clone());
                 self.reference = self.selected.clone();
                 self.expanded.clear();
                 self.data = data;
                 self.photo_cache.clear();
-                self.manual_offsets = store.read_layout();
                 self.fit_pending = true;
                 self.show_open = false;
                 self.status = format!("Geöffnet: {base_url}");
                 self.log(format!("Vom Server geladen: {base_url}"));
             }
             Err(e) => {
-                self.status = format!("Server-Laden fehlgeschlagen: {e}");
-                self.log(format!("Server-Laden fehlgeschlagen: {e}"));
+                // Offline? Lokale Kopie des Online-Projekts laden.
+                let cache = FileSystemStore::for_root(cache_root);
+                match cache.read_data() {
+                    Ok(mut data) => {
+                        if let Some(manifest) = cache.read_manifest() {
+                            data.project.name = manifest.name;
+                        }
+                        self.manual_offsets = cache.read_layout();
+                        self.server_online = false;
+                        self.server_base = Some(base_url.to_string());
+                        self.selected = data.people.first().map(|p| p.id.clone());
+                        self.reference = self.selected.clone();
+                        self.expanded.clear();
+                        self.data = data;
+                        self.photo_cache.clear();
+                        self.fit_pending = true;
+                        self.show_open = false;
+                        self.current_data_path = None;
+                        self.status = format!("Offline-Kopie geladen: {base_url}");
+                        self.log(format!("Offline-Kopie geladen: {base_url}"));
+                    }
+                    Err(_) => {
+                        self.status = format!("Server-Laden fehlgeschlagen: {e}");
+                        self.log(format!("Server-Laden fehlgeschlagen: {e}"));
+                    }
+                }
             }
         }
     }
@@ -535,7 +586,7 @@ impl eframe::App for MiniGramps {
                     .paint_at(ui, watermark_rect);
                 let scroll = ui.input(|i| i.raw_scroll_delta.y);
                 if response.hovered() && scroll != 0.0 {
-                    self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.15, 1.8);
+                    self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.15, 1.4);
                 }
                 // Lang-Touch-Debouncer und aktiven Karten-Drag zurücksetzen,
                 // wenn nichts gedrückt ist. Drag-Ende → Layout live sichern.
@@ -586,7 +637,7 @@ impl eframe::App for MiniGramps {
                     let size = content_bounds.size();
                     if size.x > 1.0 && size.y > 1.0 {
                         let fit = ((canvas.x / size.x).min(canvas.y / size.y) * 0.92)
-                            .clamp(0.15, 1.8);
+                            .clamp(0.15, 1.4);
                         self.zoom = fit;
                         // Baum-Mitte auf Canvas-Mitte: gezeichnet wird an
                         // center + pan + pos*zoom → pan = -mitte*zoom.
@@ -619,6 +670,7 @@ impl eframe::App for MiniGramps {
         dialogs::show_project(self, ctx);
         dialogs::show_export(self, ctx);
         dialogs::show_image_intent(self, ctx);
+        dialogs::show_lightbox(self, ctx);
     }
 }
 

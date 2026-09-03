@@ -41,15 +41,32 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                         app.log(format!("Projektsuche: {found} Treffer"));
                         app.show_open = true;
                     }
+                    let logo_tint = if app.server_online {
+                        Color32::from_rgb(140, 210, 170)
+                    } else if app.server_base.is_some() {
+                        Color32::from_gray(150)
+                    } else {
+                        ui.visuals().text_color()
+                    };
                     let logo = egui::Image::from_bytes(
                         "bytes://minigramps-project-logo.svg",
                         whitened_logo(),
                     )
                     .fit_to_exact_size(egui::Vec2::splat(25.0))
-                    .tint(ui.visuals().text_color());
+                    .tint(logo_tint);
+                    let logo_tip = if app.server_online {
+                        format!(
+                            "MiniGramps-Projekt\nServer: online\n{}",
+                            app.server_base.as_deref().unwrap_or("-")
+                        )
+                    } else if let Some(base) = &app.server_base {
+                        format!("MiniGramps-Projekt\nServer-Cache: offline\n{}", base)
+                    } else {
+                        "MiniGramps-Projekt".to_string()
+                    };
                     if ui
                         .add(egui::Button::image(logo).min_size(egui::Vec2::new(40.0, 36.0)))
-                        .on_hover_text("MiniGramps-Projekt")
+                        .on_hover_text(logo_tip)
                         .clicked()
                     {
                         app.show_project = !app.show_project;

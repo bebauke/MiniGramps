@@ -14,7 +14,9 @@
 use eframe::egui::{self, Color32, Sense, Stroke, Vec2};
 use rfd::FileDialog;
 
-use crate::media::{avatar_ui, import_media_file};
+use crate::media::{
+    avatar_ui, avatar_ui_preview, clear_person_photo_cache, gallery_thumbnail_ui, import_media_file,
+};
 use crate::model::{ChildRelation, Gender, Person, person};
 use crate::ui::{
     ICON_ADD_PERSON, ICON_CHILD, ICON_EDIT, ICON_PARENT, ICON_PARTNER, ICON_REFERENCE, ICON_SAVE,
@@ -180,7 +182,7 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                             {
                                 *person = app.draft.clone();
                             }
-                            app.photo_cache.remove(&app.draft.id);
+                            clear_person_photo_cache(&mut app.photo_cache, &app.draft.id);
                             app.status = "Profil gespeichert".into();
                             // Auch auf die Festplatte schreiben — sonst sind
                             // Foto/Änderungen nach Neustart weg.
@@ -230,56 +232,75 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
     let partners: Vec<_> = app.data.partners_of(&p.id).into_iter().cloned().collect();
     ui.add_space(18.0);
     if app.inline_edit {
-        // Bearbeitungsmodus: Avatar-Klick wählt ein neues Foto (wird nach
-        // media/ kopiert, siehe `media::import_media_file`); Ziehen auf dem
-        // Avatar verschiebt den Bildausschnitt.
-        let avatar_response = avatar_ui(ui, &app.draft, &mut app.photo_cache, &app.library, 64.0);
-        if avatar_response.dragged() {
-            let delta = avatar_response.drag_delta();
-            let crop = app
-                .draft
-                .photo_crop
-                .get_or_insert_with(crate::model::PhotoCrop::default);
-            crop.x = (crop.x - delta.x / 32.0).clamp(-1.0, 1.0);
-            crop.y = (crop.y - delta.y / 32.0).clamp(-1.0, 1.0);
-        }
-        if avatar_response.clicked() {
-            if let Some(path) = FileDialog::new()
-                .add_filter("Bilder", &["png", "jpg", "jpeg", "webp"])
-                .pick_file()
-            {
-                if let Some(relative) = import_media_file(&app.library, &path) {
-                    app.draft.photo = Some(relative);
+        ui.horizontal_top(|ui| {
+            // Links das Bild, rechts alle editierbaren Felder.
+            let avatar_response =
+                avatar_ui(ui, &app.draft, &mut app.photo_cache, &app.library, 64.0);
+            if avatar_response.dragged() {
+                let delta = avatar_response.drag_delta();
+                let crop = app
+                    .draft
+                    .photo_crop
+                    .get_or_insert_with(crate::model::PhotoCrop::default);
+                crop.x = (crop.x - delta.x / 32.0).clamp(-1.0, 1.0);
+                crop.y = (crop.y - delta.y / 32.0).clamp(-1.0, 1.0);
+            }
+            if avatar_response.clicked() {
+                if let Some(path) = FileDialog::new()
+                    .add_filter("Bilder", &["png", "jpg", "jpeg", "webp"])
+                    .pick_file()
+                {
+                    if let Some(relative) = import_media_file(&app.library, &path) {
+                        app.draft.photo = Some(relative.clone());
+                        if !app.draft.gallery.iter().any(|entry| entry == &relative) {
+                            app.draft.gallery.push(relative);
+                        }
+                        clear_person_photo_cache(&mut app.photo_cache, &app.draft.id);
+                    }
                 }
             }
-        }
-        // Bildausschnitt: Zoom regeln, Reset stellt das volle Bild ein.
-        ui.horizontal(|ui| {
-            ui.label("Ausschnitt");
-            let crop = app
-                .draft
-                .photo_crop
-                .get_or_insert_with(crate::model::PhotoCrop::default);
-            ui.add(
-                egui::Slider::new(&mut crop.zoom, 1.0..=4.0)
-                    .show_value(false)
-                    .text("Zoom"),
-            );
-            if ui.small_button("Reset").clicked() {
-                app.draft.photo_crop = None;
-            }
-        });
-        // Größerer Abstand zwischen Profilbild und Namensfeldern.
-        ui.add_space(8.0);
-        ui.add(egui::TextEdit::singleline(&mut app.draft.given_name).hint_text("Vorname"));
-        ui.add(egui::TextEdit::singleline(&mut app.draft.family_name).hint_text("Nachname"));
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut app.draft.gender, Gender::Female, "W");
-            ui.radio_value(&mut app.draft.gender, Gender::Male, "M");
-            ui.radio_value(&mut app.draft.gender, Gender::Unknown, "?");
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.draft.given_name).hint_text("Vorname"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.draft.family_name)
+                            .hint_text("Nachname"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut app.draft.gender, Gender::Female, "W");
+                    ui.radio_value(&mut app.draft.gender, Gender::Male, "M");
+                    ui.radio_value(&mut app.draft.gender, Gender::Unknown, "?");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Ausschnitt");
+                    let crop = app
+                        .draft
+                        .photo_crop
+                        .get_or_insert_with(crate::model::PhotoCrop::default);
+                    ui.add(
+                        egui::Slider::new(&mut crop.zoom, 1.0..=4.0)
+                            .show_value(false)
+                            .text("Zoom"),
+                    );
+                    if ui.small_button("Reset").clicked() {
+                        app.draft.photo_crop = None;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Foto löschen").clicked() {
+                        app.draft.photo = None;
+                        app.draft.photo_crop = None;
+                        clear_person_photo_cache(&mut app.photo_cache, &app.draft.id);
+                    }
+                });
+            });
         });
     } else {
-        avatar_ui(ui, p, &mut app.photo_cache, &app.library, 64.0);
+        avatar_ui_preview(ui, p, &mut app.photo_cache, &app.library, 64.0);
         // Größerer Abstand zwischen Profilbild und Name.
         ui.add_space(8.0);
         ui.heading(p.display_name());
@@ -590,7 +611,17 @@ fn gallery(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
             let mut gallery_photo = p.clone();
             gallery_photo.id = format!("gallery-{}-{index}", p.id);
             gallery_photo.photo = Some(path.clone());
-            avatar_ui(ui, &gallery_photo, &mut app.photo_cache, &app.library, 42.0);
+            if gallery_thumbnail_ui(
+                ui,
+                &gallery_photo,
+                &mut app.photo_cache,
+                &app.library,
+                Vec2::new(54.0, 42.0),
+            )
+            .clicked()
+            {
+                app.lightbox_image = Some(path.clone());
+            }
         }
     });
 }

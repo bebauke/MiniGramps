@@ -14,9 +14,15 @@
 //!   Galerie) genutzt; `ui::tree` zeichnet Karten mit `photo_texture` und
 //!   `initials` direkt.
 
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+};
 
 use eframe::egui::{self, Align2, Color32, FontId, Sense, TextureHandle, Vec2};
+use image::{GenericImageView, RgbaImage, imageops::FilterType};
 
 use crate::model::{Person, PhotoCrop};
 
@@ -73,7 +79,19 @@ pub fn photo_texture<'a>(
     cache: &'a mut HashMap<String, TextureHandle>,
     media_base: &Path,
 ) -> Option<&'a TextureHandle> {
-    if !cache.contains_key(&person.id) {
+    photo_texture_with_limit(ctx, person, cache, media_base, None, "")
+}
+
+fn photo_texture_with_limit<'a>(
+    ctx: &egui::Context,
+    person: &Person,
+    cache: &'a mut HashMap<String, TextureHandle>,
+    media_base: &Path,
+    max_side: Option<u32>,
+    cache_prefix: &str,
+) -> Option<&'a TextureHandle> {
+    let cache_key = format!("{cache_prefix}{}", person.id);
+    if !cache.contains_key(&cache_key) {
         let photo = person.photo.as_deref()?;
         let raw = Path::new(photo);
         let path = if raw.is_absolute() {
@@ -81,15 +99,167 @@ pub fn photo_texture<'a>(
         } else {
             media_base.join(raw)
         };
+        let image = if let Some(max_side) = max_side {
+            image::open(path)
+                .ok()?
+                .thumbnail(max_side, max_side)
+                .to_rgba8()
+        } else {
+            image::open(path).ok()?.to_rgba8()
+        };
+        let size = [image.width() as usize, image.height() as usize];
+        let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+        let texture_id = cache_key.clone();
+        cache.insert(
+            texture_id.clone(),
+            ctx.load_texture(texture_id, pixels, Default::default()),
+        );
+    }
+    cache.get(&cache_key)
+}
+
+fn media_path(media_base: &Path, photo: &str) -> PathBuf {
+    let raw = Path::new(photo);
+    if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        media_base.join(raw)
+    }
+}
+
+fn thumb_key(person: &Person, size: u32, round: bool) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    person.photo.hash(&mut hasher);
+    size.hash(&mut hasher);
+    round.hash(&mut hasher);
+    if let Some(crop) = &person.photo_crop {
+        crop.x.to_bits().hash(&mut hasher);
+        crop.y.to_bits().hash(&mut hasher);
+        crop.zoom.to_bits().hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn thumb_path(media_base: &Path, key: &str) -> PathBuf {
+    media_base.join("media").join(".thumbs").join(key)
+}
+
+fn ensure_gallery_thumb(media_base: &Path, person: &Person, size: u32) -> Option<PathBuf> {
+    let key = format!("gallery-{}.png", thumb_key(person, size, false));
+    let target = thumb_path(media_base, &key);
+    if target.exists() {
+        return Some(target);
+    }
+    let source = media_path(media_base, person.photo.as_deref()?);
+    let image = image::open(source).ok()?.thumbnail(size, size).to_rgba8();
+    fs::create_dir_all(target.parent()?).ok()?;
+    image.save(&target).ok()?;
+    Some(target)
+}
+
+fn ensure_round_avatar(media_base: &Path, person: &Person, size: u32) -> Option<PathBuf> {
+    let key = format!("avatar-{}.png", thumb_key(person, size, true));
+    let target = thumb_path(media_base, &key);
+    if target.exists() {
+        return Some(target);
+    }
+    let source = media_path(media_base, person.photo.as_deref()?);
+    let image = image::open(source).ok()?;
+    let (w, h) = image.dimensions();
+    let aspect = w as f32 / h.max(1) as f32;
+    let uv = cover_uv(aspect, person.photo_crop.as_ref());
+    let left = (uv.left().clamp(0.0, 1.0) * w as f32).round() as u32;
+    let top = (uv.top().clamp(0.0, 1.0) * h as f32).round() as u32;
+    let right = (uv.right().clamp(0.0, 1.0) * w as f32).round() as u32;
+    let bottom = (uv.bottom().clamp(0.0, 1.0) * h as f32).round() as u32;
+    let crop_w = right.saturating_sub(left).max(1);
+    let crop_h = bottom.saturating_sub(top).max(1);
+    let cropped = image.crop_imm(left, top, crop_w, crop_h);
+    let mut avatar: RgbaImage = image::imageops::resize(&cropped, size, size, FilterType::Lanczos3);
+    let center = (size as f32 - 1.0) / 2.0;
+    let radius = size as f32 / 2.0;
+    for (x, y, pixel) in avatar.enumerate_pixels_mut() {
+        let dx = x as f32 - center;
+        let dy = y as f32 - center;
+        if (dx * dx + dy * dy).sqrt() > radius {
+            pixel.0[3] = 0;
+        }
+    }
+    fs::create_dir_all(target.parent()?).ok()?;
+    avatar.save(&target).ok()?;
+    Some(target)
+}
+
+fn texture_from_file<'a>(
+    ctx: &egui::Context,
+    cache: &'a mut HashMap<String, TextureHandle>,
+    key: String,
+    path: PathBuf,
+) -> Option<&'a TextureHandle> {
+    if !cache.contains_key(&key) {
         let image = image::open(path).ok()?.to_rgba8();
         let size = [image.width() as usize, image.height() as usize];
         let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
         cache.insert(
-            person.id.clone(),
-            ctx.load_texture(format!("photo-{}", person.id), pixels, Default::default()),
+            key.clone(),
+            ctx.load_texture(key.clone(), pixels, Default::default()),
         );
     }
-    cache.get(&person.id)
+    cache.get(&key)
+}
+
+/// Vorschau-Textur für kleine Listen/Thumbnails.
+pub fn photo_preview_texture<'a>(
+    ctx: &egui::Context,
+    person: &Person,
+    cache: &'a mut HashMap<String, TextureHandle>,
+    media_base: &Path,
+) -> Option<&'a TextureHandle> {
+    let path = ensure_gallery_thumb(media_base, person, 256)?;
+    texture_from_file(
+        ctx,
+        cache,
+        format!("preview:{}:{}", person.id, thumb_key(person, 256, false)),
+        path,
+    )
+}
+
+pub fn round_avatar_texture<'a>(
+    ctx: &egui::Context,
+    person: &Person,
+    cache: &'a mut HashMap<String, TextureHandle>,
+    media_base: &Path,
+) -> Option<&'a TextureHandle> {
+    let path = ensure_round_avatar(media_base, person, 512)?;
+    texture_from_file(
+        ctx,
+        cache,
+        format!("avatar:{}:{}", person.id, thumb_key(person, 512, true)),
+        path,
+    )
+}
+
+/// Rechteckige Galerie-Vorschau aus dem Vollbild. Klick öffnet die Lightbox.
+pub fn gallery_thumbnail_ui(
+    ui: &mut egui::Ui,
+    person: &Person,
+    cache: &mut HashMap<String, TextureHandle>,
+    media_base: &Path,
+    size: Vec2,
+) -> egui::Response {
+    if let Some(texture) = photo_preview_texture(ui.ctx(), person, cache, media_base) {
+        let tv = texture.size_vec2();
+        let aspect = tv.x / tv.y.max(1.0);
+        ui.add(
+            egui::Image::from_texture(texture)
+                .fit_to_exact_size(size)
+                .uv(cover_uv(aspect, None))
+                .corner_radius(5.0)
+                .sense(Sense::click()),
+        )
+    } else {
+        ui.allocate_response(size, Sense::click())
+    }
 }
 
 /// Initialen für den Platzhalter-Avatar (maximal 2 Buchstaben).
@@ -111,19 +281,25 @@ pub fn avatar_ui(
     media_base: &Path,
     size: f32,
 ) -> egui::Response {
-    if let Some(texture) = photo_texture(ui.ctx(), person, cache, media_base) {
-        let tv = texture.size_vec2();
-        let aspect = tv.x / tv.y.max(1.0);
-        // Cover-Beschnitt mit runden Ecken — kein Verzerren des Bildes.
-        // Sense click_and_drag, damit der Ausschnitt per Drag verschoben
-        // werden kann (egui-Images sind sonst nur hover-empfindlich).
-        ui.add(
-            egui::Image::from_texture(texture)
-                .fit_to_exact_size(Vec2::splat(size))
-                .uv(cover_uv(aspect, person.photo_crop.as_ref()))
-                .corner_radius(size / 2.0)
-                .sense(Sense::click_and_drag()),
-        )
+    if let Some(texture) = round_avatar_texture(ui.ctx(), person, cache, media_base) {
+        let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click_and_drag());
+        painter.circle_filled(
+            response.rect.center(),
+            size / 2.0,
+            Color32::from_black_alpha(24),
+        );
+        painter.image(
+            texture.id(),
+            response.rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        painter.circle_stroke(
+            response.rect.center(),
+            size / 2.0,
+            egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
+        );
+        response
     } else {
         let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click_and_drag());
         painter.circle_filled(
@@ -140,6 +316,45 @@ pub fn avatar_ui(
         );
         response
     }
+}
+
+/// Avatar-Vorschau: kleiner geladene Textur, sonst wie `avatar_ui`.
+pub fn avatar_ui_preview(
+    ui: &mut egui::Ui,
+    person: &Person,
+    cache: &mut HashMap<String, TextureHandle>,
+    media_base: &Path,
+    size: f32,
+) -> egui::Response {
+    if let Some(texture) = round_avatar_texture(ui.ctx(), person, cache, media_base) {
+        let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click_and_drag());
+        painter.circle_filled(
+            response.rect.center(),
+            size / 2.0,
+            Color32::from_black_alpha(24),
+        );
+        painter.image(
+            texture.id(),
+            response.rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        painter.circle_stroke(
+            response.rect.center(),
+            size / 2.0,
+            egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
+        );
+        response
+    } else {
+        avatar_ui(ui, person, cache, media_base, size)
+    }
+}
+
+/// Alle Texturen einer Person aus dem Cache entfernen.
+pub fn clear_person_photo_cache(cache: &mut HashMap<String, TextureHandle>, person_id: &str) {
+    cache.remove(person_id);
+    cache.remove(&format!("preview:{person_id}"));
+    cache.remove(&format!("avatar:{person_id}"));
 }
 
 #[cfg(test)]

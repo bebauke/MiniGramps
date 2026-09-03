@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 
-use crate::media::{initials, photo_texture};
+use crate::media::{initials, round_avatar_texture};
 use crate::model::TreeData;
 
 /// Ansichtsmodus (Schalter in der Stammbaum-Werkzeugleiste, `ui`).
@@ -1688,14 +1688,22 @@ fn draw_person_card(
         card.left_center() + Vec2::new(35. * zoom, 0.),
         Vec2::splat(avatar_size),
     );
-    if let Some(texture) = photo_texture(painter.ctx(), person, photo_cache, media_base) {
-        let tv = texture.size_vec2();
-        let aspect = tv.x / tv.y.max(1.0);
+    if let Some(texture) = round_avatar_texture(painter.ctx(), person, photo_cache, media_base) {
+        painter.circle_filled(
+            avatar.center(),
+            avatar_size / 2.,
+            Color32::from_black_alpha(24),
+        );
         painter.image(
             texture.id(),
             avatar,
-            crate::media::cover_uv(aspect, person.photo_crop.as_ref()),
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
+        );
+        painter.circle_stroke(
+            avatar.center(),
+            avatar_size / 2.,
+            Stroke::new(1.0, Color32::from_white_alpha(45)),
         );
     } else {
         painter.circle_filled(

@@ -16,8 +16,8 @@ use eframe::egui::{self, Color32};
 use rfd::FileDialog;
 
 use crate::import::{discover_projects, project_display_name};
-use crate::media::import_media_file;
-use crate::model::Gender;
+use crate::media::{clear_person_photo_cache, import_media_file, photo_texture};
+use crate::model::{Gender, person};
 use crate::ui::{ICON_EXPORT, MiniGramps, icon_button, panels::palette, window_title};
 
 pub fn show_project(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -342,7 +342,7 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
                 } else {
                     app.data.people.push(app.draft.clone());
                 }
-                app.photo_cache.remove(&id);
+                clear_person_photo_cache(&mut app.photo_cache, &id);
                 app.selected = Some(id);
                 app.status = "Profil gespeichert".into();
                 app.show_editor = false;
@@ -386,9 +386,12 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
                         if let Some(person) =
                             app.data.people.iter_mut().find(|person| person.id == *id)
                         {
-                            person.photo = Some(relative);
+                            person.photo = Some(relative.clone());
+                            if !person.gallery.iter().any(|entry| entry == &relative) {
+                                person.gallery.push(relative);
+                            }
                         }
-                        app.photo_cache.remove(id);
+                        clear_person_photo_cache(&mut app.photo_cache, id);
                     }
                 }
                 app.pending_image = None;
@@ -405,8 +408,59 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
                 }
                 app.pending_image = None;
             }
+            if ui.button("Profilbild entfernen").clicked() {
+                if let Some(id) = &app.selected {
+                    if let Some(person) = app.data.people.iter_mut().find(|person| person.id == *id)
+                    {
+                        person.photo = None;
+                        person.photo_crop = None;
+                    }
+                    clear_person_photo_cache(&mut app.photo_cache, id);
+                }
+                app.pending_image = None;
+            }
             if ui.button("Abbrechen").clicked() {
                 app.pending_image = None;
             }
         });
+}
+
+pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
+    let Some(path) = app.lightbox_image.clone() else {
+        return;
+    };
+    let mut open = true;
+    egui::Window::new(window_title("Galerie"))
+        .open(&mut open)
+        .resizable(true)
+        .default_width(760.0)
+        .default_height(620.0)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(&path);
+                if ui.button("Schließen").clicked() {
+                    app.lightbox_image = None;
+                }
+            });
+            ui.separator();
+            let mut image_person = person(&format!("lightbox-{path}"), "", "", "", Gender::Unknown);
+            image_person.photo = Some(path.clone());
+            if let Some(texture) =
+                photo_texture(ui.ctx(), &image_person, &mut app.photo_cache, &app.library)
+            {
+                let available = ui.available_size().max(egui::Vec2::splat(1.0));
+                let tv = texture.size_vec2();
+                let scale = (available.x / tv.x.max(1.0)).min(available.y / tv.y.max(1.0));
+                ui.centered_and_justified(|ui| {
+                    ui.add(
+                        egui::Image::from_texture(texture).fit_to_exact_size(tv * scale.min(1.0)),
+                    );
+                });
+            } else {
+                ui.label("Bild konnte nicht geladen werden.");
+            }
+        });
+    if !open {
+        app.lightbox_image = None;
+    }
 }

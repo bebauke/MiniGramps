@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use eframe::egui::{self, TextureHandle};
 
-use crate::media::avatar_ui;
+use crate::media::avatar_ui_preview;
 use crate::model::{ChildRelation, Gender, Person, person};
 use crate::ui::tree::RelationKind;
 use crate::ui::{MiniGramps, icon};
@@ -59,7 +59,7 @@ pub fn relationship_row(
 ) -> bool {
     let mut selected = false;
     ui.horizontal(|ui| {
-        avatar_ui(ui, person, cache, media_base, 27.0);
+        avatar_ui_preview(ui, person, cache, media_base, 27.0);
         icon(ui, icon_bytes, icon_id);
         selected = ui.selectable_label(false, person.display_name()).clicked();
     });
