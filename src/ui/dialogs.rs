@@ -191,6 +191,47 @@ pub fn show_open(app: &mut MiniGramps, ctx: &egui::Context) {
     app.show_open = app.show_open && open;
 }
 
+/// Bestätigung vor dem Schließen bei laufender Bearbeitung: Speichern,
+/// verwerfen oder abbrechen.
+pub fn show_close_confirm(app: &mut MiniGramps, ctx: &egui::Context) {
+    if !app.pending_close {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(window_title("Ungespeicherte Änderungen"))
+        .open(&mut open)
+        .movable(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(360.0)
+        .show(ctx, |ui| {
+            ui.label("Es gibt ungespeicherte Änderungen. Vor dem Schließen speichern?");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Speichern und schließen").clicked() {
+                    app.save();
+                    app.pending_close = false;
+                    app.inline_edit = false;
+                    app.show_editor = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if ui.button("Verwerfen").clicked() {
+                    app.pending_close = false;
+                    app.inline_edit = false;
+                    app.show_editor = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if ui.button("Abbrechen").clicked() {
+                    app.pending_close = false;
+                }
+            });
+        });
+    if !open {
+        app.pending_close = false;
+    }
+}
+
 pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
     if !app.show_editor {
         return;

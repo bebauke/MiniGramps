@@ -82,7 +82,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                 });
                 columns[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if window_button(ui, ICON_CLOSE, "window-close", "Schliessen", true).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        // Nicht direkt schließen: ungespeicherte Änderungen prüfen.
+                        app.pending_close = true;
                     }
                     if window_button(
                         ui,

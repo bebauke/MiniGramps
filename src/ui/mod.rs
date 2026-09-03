@@ -127,16 +127,24 @@ pub struct MiniGramps {
     /// Aufgeklappte Beziehungszeile im Beziehungseditor: Kategorie + ID der
     /// Verwandten, deren Beziehungsart bearbeitet wird.
     pub relation_editor: Option<(RelationKind, String)>,
+    // Kategorie-/Menüzustand der rechten Leiste (Kategorie-Umbau in Arbeit).
+    #[allow(dead_code)]
     /// EINGEKLAPpte Kategorien der rechten Leiste (Sitzungszustand).
     pub collapsed_sections: HashSet<String>,
+    #[allow(dead_code)]
     /// Ausgeblendete Kategorien (Rechtsklick auf Kategorietitel → Häkchen).
     pub hidden_sections: HashSet<String>,
+    #[allow(dead_code)]
     /// Erweiterte Namensfelder im Profil aktiv (Rechtsklick auf Namensfeld).
     pub name_details: bool,
+    #[allow(dead_code)]
     /// Offenes Kontextmenü: Schlüssel + Position (Kategorien oder Namen).
     pub section_menu: Option<(String, Vec2, egui::Pos2)>,
+    #[allow(dead_code)]
     /// 1 = Kategorie-Menü, 2 = Namens-Menü (Schlüssel-Semantik).
     pub section_menu_kind: u8,
+    /// Schließen angefordert, aber ungespeicherte Änderungen prüfen.
+    pub pending_close: bool,
     /// Debug-Log (Leiste unten + Terminal via `log`).
     /// Pfad der aktuell geöffneten Projektdatei (für `<stem>.layout.json`).
     pub current_data_path: Option<PathBuf>,
@@ -187,6 +195,7 @@ impl MiniGramps {
             name_details: false,
             section_menu: None,
             section_menu_kind: 0,
+            pending_close: false,
             current_data_path: None,
             started: std::time::Instant::now(),
         };
@@ -402,6 +411,21 @@ impl eframe::App for MiniGramps {
         }
         ctx.set_style(style);
 
+        // Schließen abfangen: Bei ungespeicherten Änderungen erst nachfragen.
+        let native_close = ctx.input(|i| i.viewport().close_requested());
+        if self.pending_close || native_close {
+            // Ungespeichert = eine Bearbeitung läuft gerade (Profil/Editor).
+            if self.inline_edit || self.show_editor {
+                if native_close {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                self.pending_close = true;
+            } else if self.pending_close {
+                self.pending_close = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
         // Panels in eigenen Modulen; Reihenfolge bestimmt das Layout.
         header::show(self, ctx);
         sidebar::show_left(self, ctx);
@@ -575,6 +599,7 @@ impl eframe::App for MiniGramps {
             });
 
         // Dialoge (fixe Fenster, siehe dialogs.rs).
+        dialogs::show_close_confirm(self, ctx);
         dialogs::show_editor(self, ctx);
         dialogs::show_open(self, ctx);
         dialogs::show_settings(self, ctx);
