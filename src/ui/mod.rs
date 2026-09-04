@@ -68,6 +68,8 @@ pub(crate) const ICON_CHEVRON_LEFT: &[u8] = include_bytes!("../../assets/icons/c
 pub(crate) const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/chevron-right.svg");
 pub(crate) const ICON_TRASH: &[u8] = include_bytes!("../../assets/icons/trash-2.svg");
 pub(crate) const ICON_EXTERNAL_LINK: &[u8] = include_bytes!("../../assets/icons/external-link.svg");
+pub(crate) const ICON_CENTER: &[u8] = include_bytes!("../../assets/icons/crosshair.svg");
+pub(crate) const ICON_RESET: &[u8] = include_bytes!("../../assets/icons/refresh-cw.svg");
 pub(crate) const LOGO: &[u8] = include_bytes!("../../assets/icon.svg");
 
 pub struct MiniGramps {
@@ -546,11 +548,14 @@ impl eframe::App for MiniGramps {
                     self.fit_pending = true;
                 }
                 ui.separator();
-                if ui
-                    .button(egui::RichText::new("Zentrieren").size(11.0))
-                    .on_hover_text(
-                        "Setzt alle manuellen Verschiebungen zurück und zentriert den Stammbaum im Fenster",
-                    )
+                if icon_only_button(ui, ICON_CENTER, "toolbar-center")
+                    .on_hover_text("Stammbaum zentrieren und im Fenster einpassen (Zoom-Fit)")
+                    .clicked()
+                {
+                    self.fit_pending = true;
+                }
+                if icon_only_button(ui, ICON_RESET, "toolbar-reset")
+                    .on_hover_text("Alle manuellen Verschiebungen zurücksetzen (Layout-Reset)")
                     .clicked()
                 {
                     self.manual_offsets.clear();
