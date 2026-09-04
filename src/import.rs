@@ -16,7 +16,7 @@ use std::{
 use directories::ProjectDirs;
 use roxmltree::Document;
 
-use crate::model::{Family, Gender, Person, TreeData, person};
+use crate::model::{EventKind, Family, Gender, Person, TreeData, person};
 
 /// Kleine, schnell lesbare Projektbeschreibung neben der eigentlichen
 /// Datendatei. Spaetere `.mfg`/`.mmg`-Pakete verwenden dieselben Felder in
@@ -311,6 +311,28 @@ fn cp1252_char(byte: u8) -> char {
     }
 }
 
+/// Aktuelles GEDCOM-Ereignis (falls vorhanden) in die Personen-Ereignisse
+/// übernehmen und zurücksetzen.
+fn flush_event(
+    p: &mut Person,
+    current_event: &mut Option<EventKind>,
+    date: &mut String,
+    place: &mut String,
+) {
+    if let Some(kind) = current_event.take() {
+        if !date.is_empty() || !place.is_empty() {
+            p.events.push(crate::model::Event {
+                kind,
+                date: std::mem::take(date),
+                place: std::mem::take(place),
+                description: String::new(),
+            });
+        }
+        date.clear();
+        place.clear();
+    }
+}
+
 /// GEDCOM-Parser: Zeilenzustandsmaschine. Erkennt Personen (INDI), Familien
 /// (FAM), NAME/SEX sowie BIRT/DEAT-Ereignisse mit DATE und PLAC
 /// (Ereignis-Kontext `current_event`).
@@ -318,18 +340,27 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
     let mut data = TreeData::default();
     let mut current_person: Option<Person> = None;
     let mut current_family: Option<usize> = None;
-    let mut current_event: Option<&str> = None;
+    let mut current_event: Option<EventKind> = None;
+    let mut current_event_date = String::new();
+    let mut current_event_place = String::new();
     for line in text.lines() {
         let part: Vec<_> = line.split_whitespace().collect();
         if part.len() < 2 {
             continue;
         }
         if part[0] == "0" {
+            if let Some(ref mut person) = current_person {
+                flush_event(
+                    person,
+                    &mut current_event,
+                    &mut current_event_date,
+                    &mut current_event_place,
+                );
+            }
             if let Some(person) = current_person.take() {
                 data.people.push(person);
             }
             current_family = None;
-            current_event = None;
             if part.get(2) == Some(&"INDI") {
                 current_person = Some(person(
                     part[1].trim_matches('@'),
@@ -351,9 +382,6 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
         } else if let Some(p) = current_person.as_mut() {
             match part.get(1).copied() {
                 Some("NAME") => {
-                    // GEDCOM: "1 NAME Vorname /Nachname/" — Nachname in
-                    // Schrägstrichen; ohne Schrägstriche gilt das letzte
-                    // Wort als Nachname.
                     let raw = part[2..].join(" ");
                     if let Some((given, family)) = raw.split_once('/') {
                         p.given_name = given.trim().to_string();
@@ -374,21 +402,47 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
                         _ => Gender::Unknown,
                     };
                 }
-                Some("BIRT") => current_event = Some("BIRT"),
-                Some("DEAT") => current_event = Some("DEAT"),
-                Some("DATE") => match current_event {
-                    Some("BIRT") => p.birth = part[2..].join(" "),
-                    Some("DEAT") => p.death = part[2..].join(" "),
-                    _ => {}
-                },
-                Some("PLAC") => match current_event {
-                    Some("BIRT") => p.birth_place = part[2..].join(" "),
-                    Some("DEAT") => p.death_place = part[2..].join(" "),
-                    _ => {}
-                },
+                Some(
+                    tag @ ("BIRT" | "DEAT" | "MARR" | "DIV" | "BAPM" | "CHR" | "BURI" | "CREM"
+                    | "OCCU" | "RESI" | "IMMI" | "EMIG" | "CENS" | "GRAD" | "EDUC" | "RETI"),
+                ) => {
+                    flush_event(
+                        p,
+                        &mut current_event,
+                        &mut current_event_date,
+                        &mut current_event_place,
+                    );
+                    current_event = Some(EventKind::from_gedcom(tag));
+                }
+                Some("DATE") => {
+                    if current_event.is_some() {
+                        current_event_date = part[2..].join(" ");
+                        if current_event == Some(EventKind::Birth) {
+                            p.birth = current_event_date.clone();
+                        } else if current_event == Some(EventKind::Death) {
+                            p.death = current_event_date.clone();
+                        }
+                    }
+                }
+                Some("PLAC") => {
+                    if current_event.is_some() {
+                        let place = part[2..].join(" ");
+                        current_event_place = place.clone();
+                        if current_event == Some(EventKind::Birth) {
+                            p.birth_place = place.clone();
+                        } else if current_event == Some(EventKind::Death) {
+                            p.death_place = place.clone();
+                        }
+                    }
+                }
                 _ => {
                     if part[0] == "1" {
-                        current_event = None;
+                        flush_event(
+                            p,
+                            &mut current_event,
+                            &mut current_event_date,
+                            &mut current_event_place,
+                        );
                     }
                 }
             }
@@ -406,7 +460,13 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
             }
         }
     }
-    if let Some(person) = current_person {
+    if let Some(mut person) = current_person {
+        flush_event(
+            &mut person,
+            &mut current_event,
+            &mut current_event_date,
+            &mut current_event_place,
+        );
         data.people.push(person);
     }
     if data.people.is_empty() {
@@ -430,14 +490,24 @@ fn parse_gramps_xml(text: &str) -> Result<TreeData, String> {
     )
     .map_err(|e| e.to_string())?;
     let mut data = TreeData::default();
-    let mut events: HashMap<String, (&str, String)> = HashMap::new();
+    let mut events: HashMap<String, (String, String, String, String)> = HashMap::new();
     for node in doc.descendants().filter(|n| n.has_tag_name("event")) {
         let handle = node.attribute("handle").unwrap_or_default().to_string();
-        let event_type = node.attribute("type").unwrap_or_default();
+        let event_type = node.attribute("type").unwrap_or_default().to_string();
         let date = event_date(node);
-        if let Some(date) = date {
-            events.insert(handle, (event_type, date));
-        }
+        let place = node
+            .descendants()
+            .find(|n| n.has_tag_name("place"))
+            .and_then(|n| n.text())
+            .unwrap_or("")
+            .to_string();
+        let desc = node
+            .descendants()
+            .find(|n| n.has_tag_name("description"))
+            .and_then(|n| n.text())
+            .unwrap_or("")
+            .to_string();
+        events.insert(handle, (event_type, date.unwrap_or_default(), place, desc));
     }
     for node in doc.descendants().filter(|n| n.has_tag_name("person")) {
         let id = node.attribute("handle").unwrap_or_default().to_string();
@@ -458,21 +528,32 @@ fn parse_gramps_xml(text: &str) -> Result<TreeData, String> {
             .unwrap_or("");
         let mut birth = String::new();
         let mut death = String::new();
+        let mut person_events = Vec::new();
         for reference in node.children().filter(|n| n.has_tag_name("eventref")) {
             let Some(link) = reference.attribute("hlink") else {
                 continue;
             };
-            if let Some((event_type, date)) = events.get(link) {
-                if event_type.eq_ignore_ascii_case("Birth") {
+            if let Some((event_type, date, place, desc)) = events.get(link) {
+                let kind = EventKind::from_gramps(event_type);
+                if kind == EventKind::Birth {
                     birth = date.clone();
-                } else if event_type.eq_ignore_ascii_case("Death") {
+                } else if kind == EventKind::Death {
                     death = date.clone();
+                }
+                if !date.is_empty() || !place.is_empty() || !desc.is_empty() {
+                    person_events.push(crate::model::Event {
+                        kind,
+                        date: date.clone(),
+                        place: place.clone(),
+                        description: desc.clone(),
+                    });
                 }
             }
         }
         data.people.push(person(&id, name, surname, &birth, gender));
         if let Some(p) = data.people.last_mut() {
             p.death = death;
+            p.events = person_events;
         }
     }
     for node in doc.descendants().filter(|n| n.has_tag_name("family")) {
@@ -567,6 +648,12 @@ mod tests {
         assert_eq!(data.people[0].gender, Gender::Male);
         assert_eq!(data.people[0].birth, "1971");
         assert_eq!(data.people[0].death, "2020");
+        assert_eq!(data.people[0].events.len(), 2);
+        assert_eq!(
+            data.people[0].events[0].kind,
+            crate::model::EventKind::Birth
+        );
+        assert_eq!(data.people[0].events[0].date, "1971");
     }
 
     #[test]
@@ -581,6 +668,38 @@ mod tests {
         assert_eq!(juergen.birth_place, "Hagen");
         assert_eq!(juergen.death, "2001");
         assert_eq!(data.people[1].gender, Gender::Female);
+    }
+
+    #[test]
+    fn imports_gedcom_multiple_events() {
+        let data = parse_gedcom(
+            "0 @I1@ INDI\n1 NAME Jürgen /Muster/\n1 SEX M\n1 BIRT\n2 DATE 12 MAR 1950\n2 PLAC Hagen\n1 OCCU\n2 DATE 1975\n1 RESI\n2 PLAC Berlin\n0 @I2@ INDI\n1 NAME Anna /Muster/\n1 SEX F\n",
+        )
+        .unwrap();
+        let juergen = &data.people[0];
+        let kinds: Vec<String> = juergen
+            .events
+            .iter()
+            .map(|e| e.kind.label().to_string())
+            .collect();
+        assert!(
+            kinds.contains(&"Geburt".to_string()),
+            "kein Geburtsevent: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"Beruf".to_string()),
+            "kein Berufsevent: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"Wohnort".to_string()),
+            "kein Wohnortevent: {kinds:?}"
+        );
+        let occ = juergen
+            .events
+            .iter()
+            .find(|e| e.kind.label() == "Beruf")
+            .unwrap();
+        assert_eq!(occ.date, "1975");
     }
 
     #[test]

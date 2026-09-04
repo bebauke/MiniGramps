@@ -16,7 +16,7 @@ use eframe::egui::{self, Color32};
 use rfd::FileDialog;
 
 use crate::import::{discover_projects, project_display_name};
-use crate::media::{clear_person_photo_cache, import_media_file, photo_texture};
+use crate::media::{clear_person_photo_cache, import_media_file_async, write_round_avatar_now};
 use crate::model::{Gender, person};
 use crate::ui::{ICON_EXPORT, MiniGramps, icon_button, panels::palette, window_title};
 
@@ -310,7 +310,9 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
                         .add_filter("Bilder", &["png", "jpg", "jpeg", "webp"])
                         .pick_file()
                     {
-                        if let Some(relative) = import_media_file(&app.library, &path) {
+                        if let Some(relative) =
+                            import_media_file_async(ui.ctx(), &app.library, &path)
+                        {
                             app.draft.photo = Some(relative);
                         }
                     }
@@ -342,6 +344,7 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
                 } else {
                     app.data.people.push(app.draft.clone());
                 }
+                let _ = write_round_avatar_now(&app.library, &app.draft);
                 clear_person_photo_cache(&mut app.photo_cache, &id);
                 app.selected = Some(id);
                 app.status = "Profil gespeichert".into();
@@ -382,7 +385,7 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
             ui.label("Wofür soll dieses Foto verwendet werden?");
             if ui.button("Als Profilbild verwenden").clicked() {
                 if let Some(id) = &app.selected {
-                    if let Some(relative) = import_media_file(&app.library, &path) {
+                    if let Some(relative) = import_media_file_async(ui.ctx(), &app.library, &path) {
                         if let Some(person) =
                             app.data.people.iter_mut().find(|person| person.id == *id)
                         {
@@ -398,7 +401,7 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
             }
             if ui.button("Zur Galerie hinzufügen").clicked() {
                 if let Some(id) = &app.selected {
-                    if let Some(relative) = import_media_file(&app.library, &path) {
+                    if let Some(relative) = import_media_file_async(ui.ctx(), &app.library, &path) {
                         if let Some(person) =
                             app.data.people.iter_mut().find(|person| person.id == *id)
                         {
@@ -429,6 +432,13 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
     let Some(path) = app.lightbox_image.clone() else {
         return;
     };
+    let selected_id = app.selected.clone();
+    let gallery = selected_id
+        .as_deref()
+        .and_then(|id| app.data.find(id))
+        .map(|person| person.gallery.clone())
+        .unwrap_or_default();
+    let current_index = gallery.iter().position(|entry| entry == &path);
     let mut open = true;
     egui::Window::new(window_title("Galerie"))
         .open(&mut open)
@@ -438,16 +448,60 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&path);
+                if let Some(index) = current_index {
+                    if ui
+                        .add_enabled(index > 0, egui::Button::new("Zurück"))
+                        .clicked()
+                    {
+                        app.lightbox_image = Some(gallery[index - 1].clone());
+                    }
+                    if ui
+                        .add_enabled(index + 1 < gallery.len(), egui::Button::new("Weiter"))
+                        .clicked()
+                    {
+                        app.lightbox_image = Some(gallery[index + 1].clone());
+                    }
+                    if ui.button("Aus Galerie entfernen").clicked() {
+                        if let Some(id) = &selected_id {
+                            if let Some(person) =
+                                app.data.people.iter_mut().find(|person| person.id == *id)
+                            {
+                                person.gallery.retain(|entry| entry != &path);
+                            }
+                        }
+                        app.photo_cache.remove(&format!("lightbox-{path}"));
+                        app.lightbox_image = gallery
+                            .get(index + 1)
+                            .or_else(|| index.checked_sub(1).and_then(|prev| gallery.get(prev)))
+                            .cloned();
+                        app.status = "Galeriebild entfernt".into();
+                        app.save();
+                    }
+                }
                 if ui.button("Schließen").clicked() {
                     app.lightbox_image = None;
                 }
             });
             ui.separator();
-            let mut image_person = person(&format!("lightbox-{path}"), "", "", "", Gender::Unknown);
+            let mut image_person = person(&path, "", "", "", Gender::Unknown);
             image_person.photo = Some(path.clone());
-            if let Some(texture) =
-                photo_texture(ui.ctx(), &image_person, &mut app.photo_cache, &app.library)
-            {
+            // Asynchron: sofort Vorschau, volles Bild im Hintergrund.
+            crate::media::drain_lightbox_textures(
+                &app.lightbox_rx,
+                &mut app.photo_cache,
+                ui.ctx(),
+                &mut app.lightbox_loading,
+            );
+            let state = crate::media::lightbox_texture_async(
+                ui.ctx(),
+                &image_person,
+                &mut app.photo_cache,
+                &app.library,
+                &mut app.lightbox_loading,
+                &app.lightbox_tx,
+            );
+            let key = format!("lightbox-{path}");
+            if let crate::media::LightboxState::Ready(texture) = state {
                 let available = ui.available_size().max(egui::Vec2::splat(1.0));
                 let tv = texture.size_vec2();
                 let scale = (available.x / tv.x.max(1.0)).min(available.y / tv.y.max(1.0));
@@ -457,7 +511,27 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
                     );
                 });
             } else {
-                ui.label("Bild konnte nicht geladen werden.");
+                // Bild lädt noch -> Ladeanimation anzeigen
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new());
+                    ui.label("Hochauflösendes Bild wird im Hintergrund geladen...");
+                });
+                if let Some(preview) = app.photo_cache.get(&key) {
+                    // Vorschau anzeigen, bis das Vollbild fertig ist.
+                    let available = ui.available_size().max(egui::Vec2::splat(1.0));
+                    let tv = preview.size_vec2();
+                    let scale = (available.x / tv.x.max(1.0)).min(available.y / tv.y.max(1.0));
+                    ui.centered_and_justified(|ui| {
+                        ui.add(
+                            egui::Image::from_texture(preview)
+                                .fit_to_exact_size(tv * scale.min(1.0)),
+                        );
+                    });
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.add(egui::Spinner::new().size(40.0));
+                    });
+                }
             }
         });
     if !open {

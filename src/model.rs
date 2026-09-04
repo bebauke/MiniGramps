@@ -14,6 +14,121 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EventKind {
+    Birth,
+    Death,
+    Marriage,
+    Divorce,
+    Baptism,
+    Burial,
+    Occupation,
+    Residence,
+    Immigration,
+    Emigration,
+    Census,
+    Graduation,
+    Retirement,
+    Custom(String),
+}
+
+impl EventKind {
+    pub fn label(&self) -> &str {
+        match self {
+            EventKind::Birth => "Geburt",
+            EventKind::Death => "Tod",
+            EventKind::Marriage => "Heirat",
+            EventKind::Divorce => "Scheidung",
+            EventKind::Baptism => "Taufe",
+            EventKind::Burial => "Beerdigung",
+            EventKind::Occupation => "Beruf",
+            EventKind::Residence => "Wohnort",
+            EventKind::Immigration => "Einwanderung",
+            EventKind::Emigration => "Auswanderung",
+            EventKind::Census => "Volkszählung",
+            EventKind::Graduation => "Abschluss",
+            EventKind::Retirement => "Ruhestand",
+            EventKind::Custom(s) => s,
+        }
+    }
+
+    pub fn from_gramps(s: &str) -> Self {
+        match s {
+            "Birth" => EventKind::Birth,
+            "Death" => EventKind::Death,
+            "Marriage" | "Marriages" => EventKind::Marriage,
+            "Divorce" | "Divorces" => EventKind::Divorce,
+            "Baptism" | "Christening" => EventKind::Baptism,
+            "Burial" | "Cremation" => EventKind::Burial,
+            "Occupation" => EventKind::Occupation,
+            "Residence" => EventKind::Residence,
+            "Immigration" => EventKind::Immigration,
+            "Emigration" => EventKind::Emigration,
+            "Census" => EventKind::Census,
+            "Graduation" | "Education" => EventKind::Graduation,
+            "Retirement" => EventKind::Retirement,
+            other => EventKind::Custom(other.to_string()),
+        }
+    }
+
+    pub fn from_gedcom(s: &str) -> Self {
+        match s {
+            "BIRT" => EventKind::Birth,
+            "DEAT" => EventKind::Death,
+            "MARR" => EventKind::Marriage,
+            "DIV" => EventKind::Divorce,
+            "BAPM" | "CHR" => EventKind::Baptism,
+            "BURI" | "CREM" => EventKind::Burial,
+            "OCCU" => EventKind::Occupation,
+            "RESI" => EventKind::Residence,
+            "IMMI" => EventKind::Immigration,
+            "EMIG" => EventKind::Emigration,
+            "CENS" => EventKind::Census,
+            "GRAD" | "EDUC" => EventKind::Graduation,
+            "RETI" => EventKind::Retirement,
+            other => EventKind::Custom(other.to_string()),
+        }
+    }
+
+    /// Alle vordefinierten Ereignisarten für das Anlegen neuer Ereignisse.
+    /// Wird vom späteren Ereignis-Editor genutzt.
+    #[allow(dead_code)]
+    pub fn all_variants() -> &'static [EventKind] {
+        &[
+            EventKind::Birth,
+            EventKind::Death,
+            EventKind::Marriage,
+            EventKind::Divorce,
+            EventKind::Baptism,
+            EventKind::Burial,
+            EventKind::Occupation,
+            EventKind::Residence,
+            EventKind::Immigration,
+            EventKind::Emigration,
+            EventKind::Census,
+            EventKind::Graduation,
+            EventKind::Retirement,
+        ]
+    }
+}
+
+impl Default for EventKind {
+    fn default() -> Self {
+        EventKind::Custom(String::new())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Event {
+    pub kind: EventKind,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub place: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PhotoCrop {
     /// Verschiebung des Ausschnitts in [-1, 1] relativ zum Spielraum.
@@ -86,6 +201,9 @@ pub struct Person {
     pub name_type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name_origin: String,
+    /// Ereignisse (Geburt, Tod, Heirat, Beruf …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<Event>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -588,6 +706,7 @@ pub fn person(
         suffix: String::new(),
         name_type: String::new(),
         name_origin: String::new(),
+        events: Vec::new(),
     }
 }
 

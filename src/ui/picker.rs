@@ -97,7 +97,6 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                 });
             ui.separator();
             ui.label("Beziehung");
-            // Dropdown wie beim Elternteil (statt Radiobuttons).
             egui::ComboBox::from_id_salt("child-relation-inline")
                 .selected_text(app.pending_child_relation.label())
                 .show_ui(ui, |ui| {
@@ -111,29 +110,6 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                     }
                 });
         });
-        // Neue Person direkt als Kind anlegen (mit gewähltem Elternteil und
-        // Beziehungsart) und sofort im Bearbeitungsmodus öffnen.
-        if kind == RelationKind::Child && ui.small_button("+ Neu anlegen").clicked() {
-            let new_id = format!("p{}", app.data.people.len() + 1);
-            app.data
-                .people
-                .push(person(&new_id, "Neue", "Person", "", Gender::Unknown));
-            app.data.link_child_to(
-                Some(selected_id),
-                app.pending_child_partner.as_deref(),
-                &new_id,
-                app.pending_child_relation,
-            );
-            app.relation_picker = None;
-            app.relation_query.clear();
-            app.selected = Some(new_id.clone());
-            if let Some(created) = app.data.find(&new_id).cloned() {
-                app.draft = created;
-                app.inline_edit = true;
-            }
-            app.status = "Neues Kind angelegt".into();
-            app.log(format!("Neues Kind angelegt: {new_id}"));
-        }
     }
     ui.text_edit_singleline(&mut app.relation_query);
     let needle = app.relation_query.to_lowercase();
@@ -174,6 +150,50 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
             app.relation_picker = None;
             app.relation_query.clear();
         }
+    }
+    if ui.small_button("+ Neu anlegen").clicked() {
+        let new_id = format!("p{}", app.data.people.len() + 1);
+        app.data
+            .people
+            .push(person(&new_id, "Neue", "Person", "", Gender::Unknown));
+        match kind {
+            RelationKind::Partner => {
+                app.data.link_partner(selected_id, &new_id);
+                app.status = "Neuer Partner angelegt".into();
+            }
+            RelationKind::Parent => {
+                app.data.link_child(&new_id, selected_id);
+                app.status = "Neues Elternteil angelegt".into();
+            }
+            RelationKind::Child => {
+                app.data.link_child_to(
+                    Some(selected_id),
+                    app.pending_child_partner.as_deref(),
+                    &new_id,
+                    app.pending_child_relation,
+                );
+                app.status = "Neues Kind angelegt".into();
+            }
+            RelationKind::Sibling => {
+                let parent_id = app
+                    .data
+                    .parents_of(selected_id)
+                    .first()
+                    .map(|parent| parent.id.clone());
+                if let Some(parent_id) = parent_id {
+                    app.data.link_child(&parent_id, &new_id);
+                }
+                app.status = "Neues Geschwister angelegt".into();
+            }
+        }
+        app.relation_picker = None;
+        app.relation_query.clear();
+        app.selected = Some(new_id.clone());
+        if let Some(created) = app.data.find(&new_id).cloned() {
+            app.draft = created;
+            app.inline_edit = true;
+        }
+        app.log(format!("Neue Person angelegt: {new_id}"));
     }
 }
 

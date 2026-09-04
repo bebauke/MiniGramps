@@ -121,6 +121,12 @@ pub struct MiniGramps {
     pub pending_image: Option<PathBuf>,
     /// Vollbildansicht eines Galerie-Bildes.
     pub lightbox_image: Option<String>,
+    /// Sender für asynchrone Lightbox-Dekodierung (`crate::media::AsyncImage`).
+    pub lightbox_tx: std::sync::mpsc::Sender<crate::media::AsyncImage>,
+    /// Empfänger für fertige asynchrone Lightbox-Bilder.
+    pub lightbox_rx: std::sync::mpsc::Receiver<crate::media::AsyncImage>,
+    /// Cache-Schlüssel der bereits angelaufenen Lightbox-Dekodier-Jobs.
+    pub lightbox_loading: HashSet<String>,
     /// Zustand des `+ KIND`-Pickers: Bezugsperson, gewählter Partner, Art.
     pub pending_child_for: Option<String>,
     pub pending_child_partner: Option<String>,
@@ -130,22 +136,10 @@ pub struct MiniGramps {
     /// Aufgeklappte Beziehungszeile im Beziehungseditor: Kategorie + ID der
     /// Verwandten, deren Beziehungsart bearbeitet wird.
     pub relation_editor: Option<(RelationKind, String)>,
-    // Kategorie-/Menüzustand der rechten Leiste (Kategorie-Umbau in Arbeit).
-    #[allow(dead_code)]
     /// EINGEKLAPpte Kategorien der rechten Leiste (Sitzungszustand).
     pub collapsed_sections: HashSet<String>,
-    #[allow(dead_code)]
     /// Ausgeblendete Kategorien (Rechtsklick auf Kategorietitel → Häkchen).
     pub hidden_sections: HashSet<String>,
-    #[allow(dead_code)]
-    /// Erweiterte Namensfelder im Profil aktiv (Rechtsklick auf Namensfeld).
-    pub name_details: bool,
-    #[allow(dead_code)]
-    /// Offenes Kontextmenü: Schlüssel + Position (Kategorien oder Namen).
-    pub section_menu: Option<(String, Vec2, egui::Pos2)>,
-    #[allow(dead_code)]
-    /// 1 = Kategorie-Menü, 2 = Namens-Menü (Schlüssel-Semantik).
-    pub section_menu_kind: u8,
     /// Schließen angefordert, aber ungespeicherte Änderungen prüfen.
     pub pending_close: bool,
     /// Server-Verbindung (Öffnen-Dialog): Basis-URL + Token (Sitzung).
@@ -164,6 +158,7 @@ impl MiniGramps {
     pub fn new() -> Self {
         let library = default_library();
         let _ = fs::create_dir_all(&library);
+        let (lightbox_tx, lightbox_rx) = std::sync::mpsc::channel();
         let mut app = Self {
             data: TreeData::demo(),
             selected: Some("p5".into()),
@@ -195,6 +190,9 @@ impl MiniGramps {
             relation_query: String::new(),
             pending_image: None,
             lightbox_image: None,
+            lightbox_tx,
+            lightbox_rx,
+            lightbox_loading: HashSet::new(),
             pending_child_for: None,
             pending_child_partner: None,
             pending_child_relation: ChildRelation::Birth,
@@ -202,9 +200,6 @@ impl MiniGramps {
             relation_editor: None,
             collapsed_sections: HashSet::new(),
             hidden_sections: HashSet::new(),
-            name_details: false,
-            section_menu: None,
-            section_menu_kind: 0,
             pending_close: false,
             server_url: String::new(),
             server_token: String::new(),
