@@ -542,6 +542,20 @@ impl eframe::App for MiniGramps {
                     self.fit_pending = true;
                 }
                 ui.separator();
+                if ui
+                    .button(egui::RichText::new("Zentrieren").size(11.0))
+                    .on_hover_text(
+                        "Setzt alle manuellen Verschiebungen zurück und zentriert den Stammbaum im Fenster",
+                    )
+                    .clicked()
+                {
+                    self.manual_offsets.clear();
+                    self.persist_layout();
+                    self.zoom = 1.0;
+                    self.pan = egui::Vec2::ZERO;
+                    self.fit_pending = true;
+                }
+                ui.separator();
                     // Hinweis nur, wenn genug Platz (sonst automatisch aus).
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);

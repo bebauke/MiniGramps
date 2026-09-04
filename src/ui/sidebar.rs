@@ -148,12 +148,7 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("PERSON")
-                        .small()
-                        .strong()
-                        .color(colors.section),
-                );
+                section_title(ui, "PERSON", colors.section, app);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Stift (Bearbeiten starten) / Diskette (speichern).
                     let icon = if app.inline_edit {
@@ -232,8 +227,6 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
     let siblings: Vec<_> = app.data.siblings_of(&p.id).into_iter().cloned().collect();
     let children: Vec<_> = app.data.children_of(&p.id).into_iter().cloned().collect();
     let partners: Vec<_> = app.data.partners_of(&p.id).into_iter().cloned().collect();
-    ui.add_space(18.0);
-    section_title(ui, "PERSON", section_accent, app);
     {
         if app.inline_edit {
             ui.horizontal_top(|ui| {
