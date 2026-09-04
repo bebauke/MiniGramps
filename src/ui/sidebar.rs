@@ -233,21 +233,8 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
     let children: Vec<_> = app.data.children_of(&p.id).into_iter().cloned().collect();
     let partners: Vec<_> = app.data.partners_of(&p.id).into_iter().cloned().collect();
     ui.add_space(18.0);
-    let person_collapsed = app.collapsed_sections.contains("PERSON");
-    ui.horizontal(|ui| {
-        section_title(ui, "PERSON", section_accent, app);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let r = ui.small_button(if person_collapsed { "▸" } else { "▾" });
-            if r.clicked() {
-                if person_collapsed {
-                    app.collapsed_sections.remove("PERSON");
-                } else {
-                    app.collapsed_sections.insert("PERSON".into());
-                }
-            }
-        });
-    });
-    if !person_collapsed && !is_hidden(app, "PERSON") {
+    section_title(ui, "PERSON", section_accent, app);
+    {
         if app.inline_edit {
             ui.horizontal_top(|ui| {
                 // Links das Bild, rechts Foto-Aktionen und Ausschnitt.
@@ -365,302 +352,277 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
             ui.label(&p.notes);
         }
     } // Ende PERSON
-    ui.separator();
-    ui.horizontal(|ui| {
-        section_title(ui, "NAMEN", section_accent, app);
-    });
     if !is_hidden(app, "NAMEN") {
-        let mut name_entries: Vec<(String, String)> = Vec::new();
-        if !p.title.is_empty() {
-            name_entries.push(("Titel".into(), p.title.clone()));
-        }
-        if !p.nick_name.is_empty() {
-            name_entries.push(("Spitzname".into(), p.nick_name.clone()));
-        }
-        if !p.call_name.is_empty() {
-            name_entries.push(("Rufname".into(), p.call_name.clone()));
-        }
-        if !p.suffix.is_empty() {
-            name_entries.push(("Namenszusatz".into(), p.suffix.clone()));
-        }
-        if !p.name_prefix.is_empty() {
-            name_entries.push(("Namenspräfix".into(), p.name_prefix.clone()));
-        }
-        if !p.surname_prefix.is_empty() {
-            name_entries.push(("Namenspräfix".into(), p.surname_prefix.clone()));
-        }
-        if !p.name_type.is_empty() {
-            name_entries.push(("Namensart".into(), p.name_type.clone()));
-        }
-        if !p.name_origin.is_empty() {
-            name_entries.push(("Herkunft".into(), p.name_origin.clone()));
-        }
-        if name_entries.is_empty() {
-            ui.label(
-                egui::RichText::new("Keine weiteren Namen")
-                    .italics()
-                    .color(crate::ui::panels::dim_text(ui)),
-            );
-        } else {
-            for (label, value) in name_entries {
-                picker::info_row(ui, &label, &value);
+        ui.separator();
+        section_title(ui, "NAMEN", section_accent, app);
+        if !app.collapsed_sections.contains("NAMEN") {
+            let mut name_entries: Vec<(String, String)> = Vec::new();
+            if !p.title.is_empty() {
+                name_entries.push(("Titel".into(), p.title.clone()));
             }
-        }
-    }
-    ui.separator();
-    ui.horizontal(|ui| {
-        section_title(ui, "EREIGNISSE", section_accent, app);
-    });
-    if !is_hidden(app, "EREIGNISSE") {
-        let mut events: Vec<&crate::model::Event> = Vec::new();
-        events.extend(p.events.iter());
-        events.extend(
-            partners
-                .iter()
-                .flat_map(|partner| partner.events.iter())
-                .filter(|e| e.kind.label() == "Heirat" || e.kind.label() == "Scheidung"),
-        );
-        if events.is_empty() && p.birth.is_empty() && p.death.is_empty() {
-            ui.label(
-                egui::RichText::new("Keine Ereignisse")
-                    .italics()
-                    .color(crate::ui::panels::dim_text(ui)),
-            );
-        } else {
-            for event in events {
-                let value = picker::dated_place(&event.date, &event.place);
-                picker::info_row(ui, event.kind.label(), &value);
+            if !p.nick_name.is_empty() {
+                name_entries.push(("Spitzname".into(), p.nick_name.clone()));
             }
-        }
-    }
-    ui.separator();
-    let family_collapsed = app.collapsed_sections.contains("FAMILIE");
-    ui.horizontal(|ui| {
-        section_title(ui, "FAMILIE", section_accent, app);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button(if family_collapsed { "▸" } else { "▾" })
-                .clicked()
-            {
-                if family_collapsed {
-                    app.collapsed_sections.remove("FAMILIE");
-                } else {
-                    app.collapsed_sections.insert("FAMILIE".into());
+            if !p.call_name.is_empty() {
+                name_entries.push(("Rufname".into(), p.call_name.clone()));
+            }
+            if !p.suffix.is_empty() {
+                name_entries.push(("Namenszusatz".into(), p.suffix.clone()));
+            }
+            if !p.name_prefix.is_empty() {
+                name_entries.push(("Namenspräfix".into(), p.name_prefix.clone()));
+            }
+            if !p.surname_prefix.is_empty() {
+                name_entries.push(("Namenspräfix".into(), p.surname_prefix.clone()));
+            }
+            if !p.name_type.is_empty() {
+                name_entries.push(("Namensart".into(), p.name_type.clone()));
+            }
+            if !p.name_origin.is_empty() {
+                name_entries.push(("Herkunft".into(), p.name_origin.clone()));
+            }
+            if name_entries.is_empty() {
+                ui.label(
+                    egui::RichText::new("Keine weiteren Namen")
+                        .italics()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+            } else {
+                for (label, value) in name_entries {
+                    picker::info_row(ui, &label, &value);
                 }
             }
-        });
-    });
-    if !family_collapsed && !is_hidden(app, "FAMILIE") {
-        relation_section(
-            app,
-            ui,
-            "PARTNER",
-            crate::ui::tree::RelationKind::Partner,
-            &partners,
-            ICON_PARTNER,
-        );
-        relation_section(
-            app,
-            ui,
-            "ELTERN",
-            crate::ui::tree::RelationKind::Parent,
-            &parents,
-            ICON_PARENT,
-        );
-        relation_section(
-            app,
-            ui,
-            "GESCHWISTER",
-            crate::ui::tree::RelationKind::Sibling,
-            &siblings,
-            ICON_SIBLING,
-        );
-        ui.add_space(7.0);
-        picker::relation_header(
-            ui,
-            "KINDER",
-            crate::ui::tree::RelationKind::Child,
-            &mut app.relation_picker,
-            app.inline_edit,
-        );
-        if children.is_empty() {
-            ui.label(
-                egui::RichText::new("Nicht hinterlegt")
-                    .italics()
-                    .color(crate::ui::panels::dim_text(ui)),
-            );
         }
-        for child in &children {
-            let relation = app.data.relation_of_child(&p.id, &child.id);
-            let mut display = child.clone();
-            if relation != ChildRelation::Birth {
-                display.name = format!("{} · {}", display.display_name(), relation.label());
+    }
+    if !is_hidden(app, "EREIGNISSE") {
+        ui.separator();
+        section_title(ui, "EREIGNISSE", section_accent, app);
+        if !app.collapsed_sections.contains("EREIGNISSE") {
+            let mut events: Vec<&crate::model::Event> = Vec::new();
+            events.extend(p.events.iter());
+            events.extend(
+                partners
+                    .iter()
+                    .flat_map(|partner| partner.events.iter())
+                    .filter(|e| e.kind.label() == "Heirat" || e.kind.label() == "Scheidung"),
+            );
+            if events.is_empty() && p.birth.is_empty() && p.death.is_empty() {
+                ui.label(
+                    egui::RichText::new("Keine Ereignisse")
+                        .italics()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+            } else {
+                for event in events {
+                    let value = picker::dated_place(&event.date, &event.place);
+                    picker::info_row(ui, event.kind.label(), &value);
+                }
             }
-            ui.horizontal(|ui| {
-                if app.inline_edit {
-                    let clicked = picker::relationship_row(
+        }
+    }
+    if !is_hidden(app, "FAMILIE") {
+        ui.separator();
+        section_title(ui, "FAMILIE", section_accent, app);
+        if !app.collapsed_sections.contains("FAMILIE") {
+            relation_section(
+                app,
+                ui,
+                "PARTNER",
+                crate::ui::tree::RelationKind::Partner,
+                &partners,
+                ICON_PARTNER,
+            );
+            relation_section(
+                app,
+                ui,
+                "ELTERN",
+                crate::ui::tree::RelationKind::Parent,
+                &parents,
+                ICON_PARENT,
+            );
+            relation_section(
+                app,
+                ui,
+                "GESCHWISTER",
+                crate::ui::tree::RelationKind::Sibling,
+                &siblings,
+                ICON_SIBLING,
+            );
+            ui.add_space(7.0);
+            picker::relation_header(
+                ui,
+                "KINDER",
+                crate::ui::tree::RelationKind::Child,
+                &mut app.relation_picker,
+                app.inline_edit,
+            );
+            if children.is_empty() {
+                ui.label(
+                    egui::RichText::new("Nicht hinterlegt")
+                        .italics()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+            }
+            for child in &children {
+                let relation = app.data.relation_of_child(&p.id, &child.id);
+                let mut display = child.clone();
+                if relation != ChildRelation::Birth {
+                    display.name = format!("{} · {}", display.display_name(), relation.label());
+                }
+                ui.horizontal(|ui| {
+                    if app.inline_edit {
+                        let clicked = picker::relationship_row(
+                            ui,
+                            ICON_CHILD,
+                            "child",
+                            &display,
+                            &mut app.photo_cache,
+                            &app.library,
+                        );
+                        if clicked {
+                            app.relation_editor = match app.relation_editor.take() {
+                                Some((crate::ui::tree::RelationKind::Child, open_id))
+                                    if open_id == child.id =>
+                                {
+                                    None
+                                }
+                                _ => Some((crate::ui::tree::RelationKind::Child, child.id.clone())),
+                            };
+                        }
+                        if ui.small_button("✕").clicked() {
+                            app.data.unlink_child(&p.id, &child.id);
+                            app.relation_editor = None;
+                        }
+                    } else if picker::relationship_row(
                         ui,
                         ICON_CHILD,
                         "child",
                         &display,
                         &mut app.photo_cache,
                         &app.library,
+                    ) {
+                        let child_id = child.id.clone();
+                        app.selected = Some(child_id.clone());
+                        if picker::wants_reference(ui) {
+                            app.set_reference(&child_id);
+                        }
+                    }
+                });
+                if app
+                    .relation_editor
+                    .as_ref()
+                    .is_some_and(|(open_kind, open_id)| {
+                        *open_kind == crate::ui::tree::RelationKind::Child
+                            && open_id == child.id.as_str()
+                    })
+                {
+                    picker::relation_options(
+                        app,
+                        ui,
+                        crate::ui::tree::RelationKind::Child,
+                        &p.id,
+                        &child.id,
                     );
-                    if clicked {
-                        app.relation_editor = match app.relation_editor.take() {
-                            Some((crate::ui::tree::RelationKind::Child, open_id))
-                                if open_id == child.id =>
-                            {
-                                None
-                            }
-                            _ => Some((crate::ui::tree::RelationKind::Child, child.id.clone())),
-                        };
+                }
+            }
+            if app.relation_picker == Some(crate::ui::tree::RelationKind::Child) {
+                if app.pending_child_for.as_deref() != Some(&p.id) {
+                    app.pending_child_for = Some(p.id.clone());
+                    app.pending_child_partner = app
+                        .data
+                        .partners_of(&p.id)
+                        .first()
+                        .map(|partner| partner.id.clone());
+                    app.pending_child_relation = ChildRelation::Birth;
+                }
+                let partners: Vec<_> = app.data.partners_of(&p.id).into_iter().cloned().collect();
+                if let Some(id) = &app.pending_child_partner {
+                    if !partners.iter().any(|partner| &partner.id == id) {
+                        app.pending_child_partner = None;
                     }
-                    if ui.small_button("✕").clicked() {
-                        app.data.unlink_child(&p.id, &child.id);
-                        app.relation_editor = None;
+                }
+                picker::suggestions(app, ui, crate::ui::tree::RelationKind::Child, &p.id);
+            }
+        }
+    }
+    if !is_hidden(app, "REFERENZEN") {
+        ui.separator();
+        section_title(ui, "REFERENZEN", section_accent, app);
+        if !app.collapsed_sections.contains("REFERENZEN") {
+            let mut refs: Vec<(String, String)> = Vec::new();
+            for partner in &partners {
+                refs.push(("Partner".into(), partner.display_name()));
+            }
+            for parent in &parents {
+                refs.push(("Elternteil".into(), parent.display_name()));
+            }
+            for child in &children {
+                refs.push(("Kind".into(), child.display_name()));
+            }
+            for sibling in &siblings {
+                refs.push(("Geschwister".into(), sibling.display_name()));
+            }
+            if refs.is_empty() {
+                ui.label(
+                    egui::RichText::new("Keine Referenzen")
+                        .italics()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+            } else {
+                for (label, value) in refs {
+                    picker::info_row(ui, &label, &value);
+                }
+            }
+        }
+    }
+    if !is_hidden(app, "GALERIE") {
+        ui.separator();
+        section_title(ui, "GALERIE", section_accent, app);
+        if !app.collapsed_sections.contains("GALERIE") {
+            let (drop_response, _) =
+                ui.allocate_painter(Vec2::new(ui.available_width(), 70.0), Sense::hover());
+            ui.painter().rect_stroke(
+                drop_response.rect,
+                6.0,
+                Stroke::new(1.0, crate::ui::panels::dim_text(ui)),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().text(
+                drop_response.rect.center(),
+                eframe::egui::Align2::CENTER_CENTER,
+                "Foto hier ablegen",
+                eframe::egui::FontId::proportional(12.0),
+                crate::ui::panels::dim_text(ui),
+            );
+            for file in ui.ctx().input(|input| input.raw.dropped_files.clone()) {
+                if drop_response.hovered() {
+                    if let Some(path) = file.path {
+                        app.pending_image = Some(path);
                     }
-                } else if picker::relationship_row(
-                    ui,
-                    ICON_CHILD,
-                    "child",
-                    &display,
-                    &mut app.photo_cache,
-                    &app.library,
-                ) {
-                    let child_id = child.id.clone();
-                    app.selected = Some(child_id.clone());
-                    if picker::wants_reference(ui) {
-                        app.set_reference(&child_id);
+                }
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (index, path) in p.gallery.iter().enumerate() {
+                    let mut gallery_photo = p.clone();
+                    gallery_photo.id = format!("gallery-{}-{index}", p.id);
+                    gallery_photo.photo = Some(path.clone());
+                    // Proaktiv 720p-Kopie im Hintergrund generieren, damit das Vollbild beim ersten Klick absolut verzögerungsfrei öffnet!
+                    let _ =
+                        crate::media::ensure_large_thumb(ui.ctx(), &app.library, &gallery_photo);
+                    if gallery_thumbnail_ui(
+                        ui,
+                        &gallery_photo,
+                        &mut app.photo_cache,
+                        &app.library,
+                        Vec2::new(54.0, 42.0),
+                    )
+                    .clicked()
+                    {
+                        app.lightbox_image = Some(path.clone());
                     }
                 }
             });
-            if app
-                .relation_editor
-                .as_ref()
-                .is_some_and(|(open_kind, open_id)| {
-                    *open_kind == crate::ui::tree::RelationKind::Child
-                        && open_id == child.id.as_str()
-                })
-            {
-                picker::relation_options(
-                    app,
-                    ui,
-                    crate::ui::tree::RelationKind::Child,
-                    &p.id,
-                    &child.id,
-                );
-            }
         }
-        if app.relation_picker == Some(crate::ui::tree::RelationKind::Child) {
-            if app.pending_child_for.as_deref() != Some(&p.id) {
-                app.pending_child_for = Some(p.id.clone());
-                app.pending_child_partner = app
-                    .data
-                    .partners_of(&p.id)
-                    .first()
-                    .map(|partner| partner.id.clone());
-                app.pending_child_relation = ChildRelation::Birth;
-            }
-            let partners: Vec<_> = app.data.partners_of(&p.id).into_iter().cloned().collect();
-            if let Some(id) = &app.pending_child_partner {
-                if !partners.iter().any(|partner| &partner.id == id) {
-                    app.pending_child_partner = None;
-                }
-            }
-            picker::suggestions(app, ui, crate::ui::tree::RelationKind::Child, &p.id);
-        }
-    }
-    ui.separator();
-    ui.horizontal(|ui| {
-        section_title(ui, "REFERENZEN", section_accent, app);
-    });
-    if !is_hidden(app, "REFERENZEN") {
-        let mut refs: Vec<(String, String)> = Vec::new();
-        for partner in &partners {
-            refs.push(("Partner".into(), partner.display_name()));
-        }
-        for parent in &parents {
-            refs.push(("Elternteil".into(), parent.display_name()));
-        }
-        for child in &children {
-            refs.push(("Kind".into(), child.display_name()));
-        }
-        for sibling in &siblings {
-            refs.push(("Geschwister".into(), sibling.display_name()));
-        }
-        if refs.is_empty() {
-            ui.label(
-                egui::RichText::new("Keine Referenzen")
-                    .italics()
-                    .color(crate::ui::panels::dim_text(ui)),
-            );
-        } else {
-            for (label, value) in refs {
-                picker::info_row(ui, &label, &value);
-            }
-        }
-    }
-    ui.separator();
-    let gallery_collapsed = app.collapsed_sections.contains("GALERIE");
-    ui.horizontal(|ui| {
-        section_title(ui, "GALERIE", section_accent, app);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button(if gallery_collapsed { "▸" } else { "▾" })
-                .clicked()
-            {
-                if gallery_collapsed {
-                    app.collapsed_sections.remove("GALERIE");
-                } else {
-                    app.collapsed_sections.insert("GALERIE".into());
-                }
-            }
-        });
-    });
-    if !gallery_collapsed && !is_hidden(app, "GALERIE") {
-        let (drop_response, _) =
-            ui.allocate_painter(Vec2::new(ui.available_width(), 70.0), Sense::hover());
-        ui.painter().rect_stroke(
-            drop_response.rect,
-            6.0,
-            Stroke::new(1.0, crate::ui::panels::dim_text(ui)),
-            egui::StrokeKind::Inside,
-        );
-        ui.painter().text(
-            drop_response.rect.center(),
-            eframe::egui::Align2::CENTER_CENTER,
-            "Foto hier ablegen",
-            eframe::egui::FontId::proportional(12.0),
-            crate::ui::panels::dim_text(ui),
-        );
-        for file in ui.ctx().input(|input| input.raw.dropped_files.clone()) {
-            if drop_response.hovered() {
-                if let Some(path) = file.path {
-                    app.pending_image = Some(path);
-                }
-            }
-        }
-        ui.horizontal_wrapped(|ui| {
-            for (index, path) in p.gallery.iter().enumerate() {
-                let mut gallery_photo = p.clone();
-                gallery_photo.id = format!("gallery-{}-{index}", p.id);
-                gallery_photo.photo = Some(path.clone());
-                // Proaktiv 720p-Kopie im Hintergrund generieren, damit das Vollbild beim ersten Klick absolut verzögerungsfrei öffnet!
-                let _ = crate::media::ensure_large_thumb(ui.ctx(), &app.library, &gallery_photo);
-                if gallery_thumbnail_ui(
-                    ui,
-                    &gallery_photo,
-                    &mut app.photo_cache,
-                    &app.library,
-                    Vec2::new(54.0, 42.0),
-                )
-                .clicked()
-                {
-                    app.lightbox_image = Some(path.clone());
-                }
-            }
-        });
     }
 }
 
@@ -669,37 +631,68 @@ fn is_hidden(app: &MiniGramps, name: &str) -> bool {
     app.hidden_sections.contains(name)
 }
 
-/// Kategorieüberschrift mit Rechtsklick-Ausblendmenü (wie in Gramps).
+/// Zeigt ein Kontextmenü mit allen verfügbaren Panels und Markierungen (Häkchen) für die angezeigten Panels.
+fn show_panes_context_menu(ui: &mut egui::Ui, app: &mut MiniGramps) {
+    ui.label(egui::RichText::new("Panels anzeigen/ausblenden").strong());
+    ui.separator();
+
+    // PERSON ist immer sichtbar und kann nicht ausgeblendet werden
+    let mut person_visible = true;
+    ui.add_enabled_ui(false, |ui| {
+        ui.checkbox(&mut person_visible, "PERSON");
+    });
+
+    let all_panes = ["NAMEN", "EREIGNISSE", "FAMILIE", "REFERENZEN", "GALERIE"];
+    for pane in all_panes {
+        let visible = !is_hidden(app, pane);
+        let mut check = visible;
+        if ui.checkbox(&mut check, pane).clicked() {
+            if check {
+                app.hidden_sections.remove(pane);
+            } else {
+                app.hidden_sections.insert(pane.to_string());
+            }
+            ui.close();
+        }
+    }
+}
+
+/// Kategorieüberschrift mit Rechtsklick-Menü für alle Panels (wie in Gramps).
+/// Ein Klick klappt die Sektion ein/aus (außer bei PERSON).
 fn section_title(ui: &mut egui::Ui, name: &str, accent: Color32, app: &mut MiniGramps) {
     let hidden = is_hidden(app, name);
-    let label = egui::RichText::new(if hidden {
-        format!("{name} (aus)")
-    } else {
+    if hidden && name != "PERSON" {
+        return;
+    }
+
+    let collapsed = app.collapsed_sections.contains(name);
+    let display_name = if name == "PERSON" {
         name.to_string()
-    })
-    .small()
-    .strong()
-    .color(if hidden {
-        crate::ui::panels::dim_text(ui)
+    } else if collapsed {
+        format!("▸ {name}")
     } else {
-        accent
-    });
+        format!("▾ {name}")
+    };
+
+    let label = egui::RichText::new(display_name)
+        .small()
+        .strong()
+        .color(accent);
+
     let response = ui.add(egui::Label::new(label).sense(Sense::click()));
+
+    // Linksklick: Einklappen togglen (PERSON lässt sich weder einklappen noch ausblenden)
+    if response.clicked() && name != "PERSON" {
+        if collapsed {
+            app.collapsed_sections.remove(name);
+        } else {
+            app.collapsed_sections.insert(name.to_string());
+        }
+    }
+
+    // Rechtsklick: Zeigt eine Liste aller verfügbaren Panes mit Haken
     egui::Popup::context_menu(&response).show(|ui| {
-        ui.label(egui::RichText::new(name).strong());
-        ui.separator();
-        if ui
-            .selectable_label(hidden, "Anzeigen")
-            .on_hover_text("Kategorie wieder einblenden")
-            .clicked()
-        {
-            app.hidden_sections.remove(name);
-            ui.close();
-        }
-        if ui.selectable_label(!hidden, "Ausblenden").clicked() {
-            app.hidden_sections.insert(name.to_string());
-            ui.close();
-        }
+        show_panes_context_menu(ui, app);
     });
 }
 
