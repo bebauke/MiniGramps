@@ -668,9 +668,9 @@ fn section_title(ui: &mut egui::Ui, name: &str, accent: Color32, app: &mut MiniG
     let display_name = if name == "PERSON" {
         name.to_string()
     } else if collapsed {
-        format!("▸ {name}")
+        format!("> {name}")
     } else {
-        format!("▾ {name}")
+        format!("v {name}")
     };
 
     let label = egui::RichText::new(display_name)

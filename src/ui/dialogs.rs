@@ -18,7 +18,10 @@ use rfd::FileDialog;
 use crate::import::{discover_projects, project_display_name};
 use crate::media::{clear_person_photo_cache, import_media_file_async, write_round_avatar_now};
 use crate::model::{Gender, person};
-use crate::ui::{ICON_EXPORT, MiniGramps, icon_button, panels::palette, window_title};
+use crate::ui::{
+    ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_EXPORT, ICON_EXTERNAL_LINK, ICON_TRASH, MiniGramps,
+    icon_button, icon_only_button, panels::palette, window_title,
+};
 
 pub fn show_project(app: &mut MiniGramps, ctx: &egui::Context) {
     if !app.show_project {
@@ -457,51 +460,69 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&path);
-                if let Some(index) = current_index {
-                    if ui
-                        .add_enabled(index > 0, egui::Button::new("Zurück"))
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_only_button(ui, ICON_EXTERNAL_LINK, "lightbox-external")
+                        .on_hover_text(
+                            "Original in voller Auflösung im System-Bildbetrachter öffnen",
+                        )
                         .clicked()
                     {
-                        app.lightbox_image = Some(gallery[index - 1].clone());
+                        let raw = std::path::Path::new(&path);
+                        let original_path = if raw.is_absolute() {
+                            raw.to_path_buf()
+                        } else {
+                            app.library.join(raw)
+                        };
+                        let _ = open_in_default_viewer(&original_path);
                     }
-                    if ui
-                        .add_enabled(index + 1 < gallery.len(), egui::Button::new("Weiter"))
-                        .clicked()
-                    {
-                        app.lightbox_image = Some(gallery[index + 1].clone());
-                    }
-                    if ui.button("Aus Galerie entfernen").clicked() {
-                        if let Some(id) = &selected_id {
-                            if let Some(person) =
-                                app.data.people.iter_mut().find(|person| person.id == *id)
-                            {
-                                person.gallery.retain(|entry| entry != &path);
+                    if let Some(index) = current_index {
+                        if icon_only_button(ui, ICON_TRASH, "lightbox-trash")
+                            .on_hover_text("Dieses Bild aus der Galerie entfernen")
+                            .clicked()
+                        {
+                            if let Some(id) = &selected_id {
+                                if let Some(person) =
+                                    app.data.people.iter_mut().find(|person| person.id == *id)
+                                {
+                                    person.gallery.retain(|entry| entry != &path);
+                                }
                             }
+                            app.photo_cache.remove(&format!("lightbox-{path}"));
+                            app.lightbox_image = gallery
+                                .get(index + 1)
+                                .or_else(|| index.checked_sub(1).and_then(|prev| gallery.get(prev)))
+                                .cloned();
+                            app.status = "Galeriebild entfernt".into();
+                            app.save();
                         }
-                        app.photo_cache.remove(&format!("lightbox-{path}"));
-                        app.lightbox_image = gallery
-                            .get(index + 1)
-                            .or_else(|| index.checked_sub(1).and_then(|prev| gallery.get(prev)))
-                            .cloned();
-                        app.status = "Galeriebild entfernt".into();
-                        app.save();
+
+                        let mut next_clicked = false;
+                        ui.add_enabled_ui(index + 1 < gallery.len(), |ui| {
+                            if icon_only_button(ui, ICON_CHEVRON_RIGHT, "lightbox-next")
+                                .on_hover_text("Nächstes Bild")
+                                .clicked()
+                            {
+                                next_clicked = true;
+                            }
+                        });
+                        if next_clicked {
+                            app.lightbox_image = Some(gallery[index + 1].clone());
+                        }
+
+                        let mut prev_clicked = false;
+                        ui.add_enabled_ui(index > 0, |ui| {
+                            if icon_only_button(ui, ICON_CHEVRON_LEFT, "lightbox-prev")
+                                .on_hover_text("Vorheriges Bild")
+                                .clicked()
+                            {
+                                prev_clicked = true;
+                            }
+                        });
+                        if prev_clicked {
+                            app.lightbox_image = Some(gallery[index - 1].clone());
+                        }
                     }
-                }
-                if ui.button("Original öffnen ↗")
-                    .on_hover_text("Öffnet das originale Vollbild im Standard-Bildbetrachter deines Betriebssystems")
-                    .clicked()
-                {
-                    let raw = std::path::Path::new(&path);
-                    let original_path = if raw.is_absolute() {
-                        raw.to_path_buf()
-                    } else {
-                        app.library.join(raw)
-                    };
-                    let _ = open_in_default_viewer(&original_path);
-                }
-                if ui.button("Schließen").clicked() {
-                    app.lightbox_image = None;
-                }
+                });
             });
             ui.separator();
             let mut image_person = person(&path, "", "", "", Gender::Unknown);

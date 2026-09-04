@@ -64,6 +64,10 @@ pub(crate) const ICON_SIBLING: &[u8] = include_bytes!("../../assets/icons/git-br
 pub(crate) const ICON_CHILD: &[u8] = include_bytes!("../../assets/icons/arrow-down.svg");
 pub(crate) const ICON_EDIT: &[u8] = include_bytes!("../../assets/icons/edit-3.svg");
 pub(crate) const ICON_REFERENCE: &[u8] = include_bytes!("../../assets/icons/star.svg");
+pub(crate) const ICON_CHEVRON_LEFT: &[u8] = include_bytes!("../../assets/icons/chevron-left.svg");
+pub(crate) const ICON_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/chevron-right.svg");
+pub(crate) const ICON_TRASH: &[u8] = include_bytes!("../../assets/icons/trash-2.svg");
+pub(crate) const ICON_EXTERNAL_LINK: &[u8] = include_bytes!("../../assets/icons/external-link.svg");
 pub(crate) const LOGO: &[u8] = include_bytes!("../../assets/icon.svg");
 
 pub struct MiniGramps {
