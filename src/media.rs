@@ -310,6 +310,38 @@ fn ensure_gallery_thumb(
     None
 }
 
+/// Sichert eine 720p-Kopie (max. 1280px an der längeren Kante) als dauerhaftes Thumbnail auf der Festplatte.
+fn ensure_large_thumb(ctx: &egui::Context, media_base: &Path, person: &Person) -> Option<PathBuf> {
+    let size = 1280;
+    let key = format!("large-720p-{}.png", thumb_key(person, size, false));
+    let target = thumb_path(media_base, &key);
+    if target.exists() {
+        return Some(target);
+    }
+    let source = media_path(media_base, person.photo.as_deref()?);
+    let request_key = format!("job:{key}");
+    let target_for_job = target.clone();
+    spawn_thumb_job(request_key, ctx.clone(), move || {
+        if let Some(parent) = target_for_job.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(image) = image::open(source) {
+            let (w, h) = image.dimensions();
+            let max_side = w.max(h);
+            let resized = if max_side > size {
+                let scale = size as f32 / max_side as f32;
+                let nw = (w as f32 * scale).round() as u32;
+                let nh = (h as f32 * scale).round() as u32;
+                image.resize(nw, nh, FilterType::Triangle)
+            } else {
+                image
+            };
+            let _ = resized.save(target_for_job);
+        }
+    });
+    None
+}
+
 fn ensure_round_avatar(
     ctx: &egui::Context,
     media_base: &Path,
@@ -487,7 +519,12 @@ pub fn lightbox_texture_async<'a>(
         let Some(photo) = person.photo.as_deref() else {
             return LightboxState::Loading;
         };
-        let path = media_path(media_base, photo);
+        // Prüfen, ob die 720p-Kopie schon auf der Platte liegt, sonst im Hintergrund generieren.
+        let path = if let Some(large_path) = ensure_large_thumb(ctx, media_base, person) {
+            large_path
+        } else {
+            media_path(media_base, photo)
+        };
         if let Some(guard) = load_guard() {
             loading.insert(cache_key.clone());
             let tx = tx.clone();
