@@ -520,12 +520,7 @@ pub fn draw_tree(
                 // Mittelwert entspricht exakt der Junction-Bewegung.
                 let path_shifts: Vec<f32> = parents
                     .iter()
-                    .filter_map(|parent| {
-                        path_nodes
-                            .contains(*parent)
-                            .then(|| eff.get(*parent).copied())
-                            .flatten()
-                    })
+                    .filter_map(|parent| eff.get(*parent).copied())
                     .collect();
                 let jshift = if path_shifts.is_empty() {
                     0.0
