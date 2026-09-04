@@ -483,6 +483,18 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
                         app.save();
                     }
                 }
+                if ui.button("Original öffnen ↗")
+                    .on_hover_text("Öffnet das originale Vollbild im Standard-Bildbetrachter deines Betriebssystems")
+                    .clicked()
+                {
+                    let raw = std::path::Path::new(&path);
+                    let original_path = if raw.is_absolute() {
+                        raw.to_path_buf()
+                    } else {
+                        app.library.join(raw)
+                    };
+                    let _ = open_in_default_viewer(&original_path);
+                }
                 if ui.button("Schließen").clicked() {
                     app.lightbox_image = None;
                 }
@@ -542,4 +554,23 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
     if !open {
         app.lightbox_image = None;
     }
+}
+
+/// Öffnet einen Pfad im Standard-Bildbetrachter des Betriebssystems.
+fn open_in_default_viewer(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
+    }
+    Ok(())
 }

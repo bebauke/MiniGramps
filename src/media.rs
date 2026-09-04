@@ -516,32 +516,27 @@ pub fn lightbox_texture_async<'a>(
     photo_preview_texture(ctx, person, cache, media_base);
     // Noch kein Job angelaufen → Vollbild im Hintergrund dekodieren.
     if !loading.contains(&cache_key) {
-        let Some(photo) = person.photo.as_deref() else {
-            return LightboxState::Loading;
-        };
-        // Prüfen, ob die 720p-Kopie schon auf der Platte liegt, sonst im Hintergrund generieren.
-        let path = if let Some(large_path) = ensure_large_thumb(ctx, media_base, person) {
-            large_path
-        } else {
-            media_path(media_base, photo)
-        };
-        if let Some(guard) = load_guard() {
-            loading.insert(cache_key.clone());
-            let tx = tx.clone();
-            let key = cache_key.clone();
-            let ctx_clone = ctx.clone();
-            thread::spawn(move || {
-                let _guard = guard;
-                if let Ok(image) = image::open(&path) {
-                    // Auf max 1200px herunterskalieren, um GPU-Upload und Speicher extrem zu beschleunigen.
-                    let resized = image.thumbnail(1200, 1200);
-                    let size = [resized.width() as usize, resized.height() as usize];
-                    let rgba = resized.to_rgba8();
-                    let ci = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                    let _ = tx.send(AsyncImage { key, image: ci });
-                }
-                ctx_clone.request_repaint();
-            });
+        // Wir laden AUSSCHLIESSLICH die HD-Variante (720p) für die Galerie.
+        // Falls sie noch nicht existiert, stößt ensure_large_thumb die Generierung an.
+        if let Some(large_path) = ensure_large_thumb(ctx, media_base, person) {
+            if let Some(guard) = load_guard() {
+                loading.insert(cache_key.clone());
+                let tx = tx.clone();
+                let key = cache_key.clone();
+                let ctx_clone = ctx.clone();
+                thread::spawn(move || {
+                    let _guard = guard;
+                    if let Ok(image) = image::open(&large_path) {
+                        // Da die Datei selbst schon 720p (1280px max) ist, können wir sie direkt als ColorImage laden
+                        // (kein weiteres resizen im RAM nötig, da sie schon perfekt skaliert ist!).
+                        let size = [image.width() as usize, image.height() as usize];
+                        let rgba = image.to_rgba8();
+                        let ci = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        let _ = tx.send(AsyncImage { key, image: ci });
+                    }
+                    ctx_clone.request_repaint();
+                });
+            }
         }
     }
     LightboxState::Loading
