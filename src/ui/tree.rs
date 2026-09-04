@@ -603,7 +603,7 @@ pub fn draw_tree(
     // Richtung ihrer Junction verschoben — Kinder hängen so weit wie möglich
     // senkrecht unter dem Elternpaar, Eltern-Paare über ihrem Kind. Manuell
     // verschobene Personen blockieren ihre Gruppe (bleibt, wo hingeschoben).
-    {
+    if view != TreeView::Ancestors {
         let manual_ids: HashSet<&str> = manual_offsets.keys().map(|key| key.as_str()).collect();
         let mut anchors: HashMap<&str, f32> = HashMap::new();
         let mut group_key_of: HashMap<&str, &str> = HashMap::new();
@@ -1093,6 +1093,10 @@ pub fn draw_tree(
                         (b.x, wb, a.x, wa)
                     };
                     let jx = (left_x + left_w * zoom / 2.0 + right_x - right_w * zoom / 2.0) / 2.0;
+                    println!(
+                        "LINE_ALIGN: parent_a_id={}, parent_b_id={}, left_x={}, left_w={}, right_x={}, right_w={}, jx={}",
+                        id_a, id_b, left_x, left_w, right_x, right_w, jx
+                    );
                     Pos2::new(jx, (a.y + b.y) / 2.0)
                 } else {
                     Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
@@ -1103,6 +1107,12 @@ pub fn draw_tree(
         };
         for child in &family.children {
             if let Some(c) = pos(child) {
+                if view == TreeView::Ancestors {
+                    println!(
+                        "LINE_ALIGN_CHILD: child_id={}, c.x={}, junction.x={}",
+                        child, c.x, junction.x
+                    );
+                }
                 painter.line_segment(
                     [junction, c],
                     Stroke::new(2.0, Color32::from_rgb(74, 111, 119)),
