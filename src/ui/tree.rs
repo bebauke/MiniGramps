@@ -441,14 +441,16 @@ pub fn draw_tree(
     // Endgültige Positionen (Layout-Koordinaten → beim Zeichnen skaliert).
     // Zeilen nach der Verhandlung neu zentrieren – das monotone
     // Rechts-Schieben der Abstoßung verschiebt die Zeilen nach rechts.
-    for ids in rows.iter() {
-        if view == TreeView::Fan || ids.is_empty() {
-            continue;
-        }
-        let mean = ids.iter().map(|id| spread[*id]).sum::<f32>() / ids.len() as f32;
-        for id in ids {
-            if let Some(value) = spread.get_mut(*id) {
-                *value -= mean;
+    if view != TreeView::Ancestors {
+        for ids in rows.iter() {
+            if view == TreeView::Fan || ids.is_empty() {
+                continue;
+            }
+            let mean = ids.iter().map(|id| spread[*id]).sum::<f32>() / ids.len() as f32;
+            for id in ids {
+                if let Some(value) = spread.get_mut(*id) {
+                    *value -= mean;
+                }
             }
         }
     }
