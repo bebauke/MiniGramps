@@ -1080,7 +1080,24 @@ pub fn draw_tree(
             painter.line_segment([a, b], Stroke::new(2.0, Color32::from_rgb(120, 170, 160)));
         }
         let junction = match (pa, pb) {
-            (Some(a), Some(b)) => Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0),
+            (Some(a), Some(b)) => {
+                if view == TreeView::Ancestors {
+                    let id_a = family.parent_a.as_deref().unwrap_or("");
+                    let id_b = family.parent_b.as_deref().unwrap_or("");
+                    let wa = card_w(levels.get(id_a).copied().unwrap_or(0), id_a);
+                    let wb = card_w(levels.get(id_b).copied().unwrap_or(0), id_b);
+
+                    let (left_x, left_w, right_x, right_w) = if a.x < b.x {
+                        (a.x, wa, b.x, wb)
+                    } else {
+                        (b.x, wb, a.x, wa)
+                    };
+                    let jx = (left_x + left_w * zoom / 2.0 + right_x - right_w * zoom / 2.0) / 2.0;
+                    Pos2::new(jx, (a.y + b.y) / 2.0)
+                } else {
+                    Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+                }
+            }
             (Some(a), None) | (None, Some(a)) => a,
             (None, None) => continue,
         };
@@ -1287,11 +1304,23 @@ pub fn draw_tree(
             if let Some((_, members)) = card_drag {
                 // Laufender Drag: bekannte Menge verschieben.
                 for id in members.clone() {
-                    *manual_offsets.entry(id).or_insert(0.0) += layout_delta;
+                    *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
+                    println!(
+                        "DRAG (active): id={}, delta={}, val={}",
+                        id,
+                        layout_delta,
+                        manual_offsets.get(&id).copied().unwrap_or(0.0)
+                    );
                 }
             } else {
                 for id in &move_set {
                     *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
+                    println!(
+                        "DRAG (start): id={}, delta={}, val={}",
+                        id,
+                        layout_delta,
+                        manual_offsets.get(id).copied().unwrap_or(0.0)
+                    );
                 }
                 *card_drag = Some((person.id.clone(), move_set));
             }
