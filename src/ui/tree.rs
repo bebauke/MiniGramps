@@ -566,8 +566,11 @@ pub fn draw_tree(
                         .sum::<f32>()
                         / parents.len() as f32;
                     for child in children {
-                        // Der Versatz des Kindes wird exakt durch die Eltern bestimmt!
-                        eff.insert(child, pshift);
+                        // Wenn das Kind selbst direkt verschoben wurde, behält es seinen Versatz.
+                        // Andernfalls wird der Versatz durch die Eltern bestimmt!
+                        if !manual_offsets.contains_key(*child) {
+                            eff.insert(child, pshift);
+                        }
                     }
                 }
             }
