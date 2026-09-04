@@ -566,9 +566,8 @@ pub fn draw_tree(
                         .sum::<f32>()
                         / parents.len() as f32;
                     for child in children {
-                        // Der Versatz des Kindes wird durch seine eigene manuelle Verschiebung PLUS die der Eltern bestimmt!
-                        let own_offset = manual_offsets.get(*child).copied().unwrap_or(0.0);
-                        eff.insert(child, own_offset + pshift);
+                        // Der Versatz des Kindes wird exakt durch die Eltern bestimmt!
+                        eff.insert(child, pshift);
                     }
                 }
             }
@@ -1915,9 +1914,10 @@ fn layout_ancestors<'a>(
             let default_sep = (wf + wm) / 2.0 + gap;
             let sep = min_distance.max(default_sep);
 
-            // Vater-Teilbaum nach links verschieben, Mutter-Teilbaum nach rechts verschieben (Zentrierung)
-            let shift_f = -sep / 2.0;
-            let shift_m = sep / 2.0;
+            // Zentrierung relativ zur Lücke (Zwischenraum) zwischen den beiden Eltern:
+            // (c1.r + c2.l)/2 = d1.c -> shift_f + shift_m = (wm - wf) / 2
+            let shift_f = -sep / 2.0 + (wm - wf) / 4.0;
+            let shift_m = sep / 2.0 + (wm - wf) / 4.0;
 
             for (fid, f_offset) in f_layout {
                 layout.insert(fid, f_offset + shift_f);
