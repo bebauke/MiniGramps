@@ -12,7 +12,7 @@ use eframe::egui::{self, Color32};
 use crate::import::discover_projects;
 use crate::ui::{
     ICON_CLOSE, ICON_MAXIMIZE, ICON_MINIMIZE, ICON_OPEN, ICON_SAVE, ICON_SETTINGS, MiniGramps,
-    icon_button_big, panels::palette, whitened_logo,
+    icon_button_big, icon_only_button, panels::palette, whitened_logo,
 };
 
 pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -122,7 +122,10 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
-                    if icon_button_big(ui, ICON_SETTINGS, "settings", "Einstellungen").clicked() {
+                    if icon_only_button(ui, ICON_SETTINGS, "settings")
+                        .on_hover_text("Einstellungen")
+                        .clicked()
+                    {
                         app.show_settings = !app.show_settings;
                     }
                     // Status ABSCHNEIDEN statt überlaufen: langer Pfad kollidiert

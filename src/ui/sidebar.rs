@@ -328,17 +328,6 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                     .hint_text("Notizen")
                     .desired_rows(2),
             );
-        } else {
-            picker::info_row(
-                ui,
-                "GEBOREN",
-                &picker::dated_place(&p.birth, &p.birth_place),
-            );
-            picker::info_row(
-                ui,
-                "GESTORBEN",
-                &picker::dated_place(&p.death, &p.death_place),
-            );
         }
         if !p.source.is_empty() {
             picker::info_row(ui, "QUELLE", &p.source);
@@ -398,25 +387,50 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
         ui.separator();
         section_title(ui, "EREIGNISSE", section_accent, app);
         if !app.collapsed_sections.contains("EREIGNISSE") {
-            let mut events: Vec<&crate::model::Event> = Vec::new();
-            events.extend(p.events.iter());
-            events.extend(
-                partners
-                    .iter()
-                    .flat_map(|partner| partner.events.iter())
-                    .filter(|e| e.kind.label() == "Heirat" || e.kind.label() == "Scheidung"),
-            );
-            if events.is_empty() && p.birth.is_empty() && p.death.is_empty() {
+            let mut has_any = false;
+
+            // 1. Geburt (Birth)
+            if !p.birth.is_empty() || !p.birth_place.is_empty() {
+                picker::info_row(ui, "Geburt", &picker::dated_place(&p.birth, &p.birth_place));
+                has_any = true;
+            }
+
+            // 2. Tod (Death)
+            if !p.death.is_empty() || !p.death_place.is_empty() {
+                picker::info_row(ui, "Tod", &picker::dated_place(&p.death, &p.death_place));
+                has_any = true;
+            }
+
+            // 3. Andere Ereignisse (die nicht Geburt/Tod sind, um Duplikate zu vermeiden!)
+            for event in &p.events {
+                if event.kind != crate::model::EventKind::Birth
+                    && event.kind != crate::model::EventKind::Death
+                {
+                    let value = picker::dated_place(&event.date, &event.place);
+                    picker::info_row(ui, event.kind.label(), &value);
+                    has_any = true;
+                }
+            }
+
+            // 4. Heirat / Scheidung von Partnern (falls nicht schon gelistet)
+            for partner in &partners {
+                for event in &partner.events {
+                    if event.kind == crate::model::EventKind::Marriage
+                        || event.kind == crate::model::EventKind::Divorce
+                    {
+                        let value = picker::dated_place(&event.date, &event.place);
+                        picker::info_row(ui, event.kind.label(), &value);
+                        has_any = true;
+                    }
+                }
+            }
+
+            if !has_any {
                 ui.label(
                     egui::RichText::new("Keine Ereignisse")
                         .italics()
                         .color(crate::ui::panels::dim_text(ui)),
                 );
-            } else {
-                for event in events {
-                    let value = picker::dated_place(&event.date, &event.place);
-                    picker::info_row(ui, event.kind.label(), &value);
-                }
             }
         }
     }
@@ -543,34 +557,26 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                 }
                 picker::suggestions(app, ui, crate::ui::tree::RelationKind::Child, &p.id);
             }
-        }
-    }
-    if !is_hidden(app, "REFERENZEN") {
-        ui.separator();
-        section_title(ui, "REFERENZEN", section_accent, app);
-        if !app.collapsed_sections.contains("REFERENZEN") {
-            let mut refs: Vec<(String, String)> = Vec::new();
-            for partner in &partners {
-                refs.push(("Partner".into(), partner.display_name()));
-            }
-            for parent in &parents {
-                refs.push(("Elternteil".into(), parent.display_name()));
-            }
-            for child in &children {
-                refs.push(("Kind".into(), child.display_name()));
-            }
-            for sibling in &siblings {
-                refs.push(("Geschwister".into(), sibling.display_name()));
-            }
-            if refs.is_empty() {
+
+            // Sonstige (falls vorhanden und nicht familiär abgedeckt)
+            let sonstige: Vec<&Person> = Vec::new();
+            // (Muster-Prüfung: Falls wir künftig sonstige Verknüpfungen haben, listen wir sie hier)
+            if !sonstige.is_empty() {
+                ui.add_space(5.0);
                 ui.label(
-                    egui::RichText::new("Keine Referenzen")
-                        .italics()
+                    egui::RichText::new("SONSTIGE")
+                        .small()
                         .color(crate::ui::panels::dim_text(ui)),
                 );
-            } else {
-                for (label, value) in refs {
-                    picker::info_row(ui, &label, &value);
+                for entry in sonstige {
+                    picker::relationship_row(
+                        ui,
+                        ICON_SIBLING,
+                        "sonstige",
+                        entry,
+                        &mut app.photo_cache,
+                        &app.library,
+                    );
                 }
             }
         }
