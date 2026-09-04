@@ -510,6 +510,8 @@ impl eframe::App for MiniGramps {
                     ui.separator();
                 // Manuelle Offsets gelten in BEIDEN Ausrichtungen (Layout-
                 // Datei) und bleiben beim Ansichtwechsel erhalten.
+                let old_view = self.tree_view;
+                let old_orientation = self.tree_orientation;
                 ui.selectable_value(
                     &mut self.tree_view,
                     TreeView::Descendants,
@@ -536,6 +538,9 @@ impl eframe::App for MiniGramps {
                     TreeOrientation::Horizontal,
                     egui::RichText::new("Horizontal").size(11.0),
                 );
+                if self.tree_view != old_view || self.tree_orientation != old_orientation {
+                    self.fit_pending = true;
+                }
                 ui.separator();
                     // Hinweis nur, wenn genug Platz (sonst automatisch aus).
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
