@@ -430,8 +430,13 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
 
 pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
     let Some(path) = app.lightbox_image.clone() else {
+        // Lightbox geschlossen -> GPU-Speicher für Vollbilder freigeben!
+        crate::media::clear_lightbox_cache(&mut app.photo_cache, None);
         return;
     };
+    // Nur das aktuell angezeigte Vollbild im Cache behalten, andere sofort verwerfen!
+    crate::media::clear_lightbox_cache(&mut app.photo_cache, Some(&path));
+
     let selected_id = app.selected.clone();
     let gallery = selected_id
         .as_deref()

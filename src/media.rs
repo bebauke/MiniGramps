@@ -496,8 +496,10 @@ pub fn lightbox_texture_async<'a>(
             thread::spawn(move || {
                 let _guard = guard;
                 if let Ok(image) = image::open(&path) {
-                    let size = [image.width() as usize, image.height() as usize];
-                    let rgba = image.to_rgba8();
+                    // Auf max 1200px herunterskalieren, um GPU-Upload und Speicher extrem zu beschleunigen.
+                    let resized = image.thumbnail(1200, 1200);
+                    let size = [resized.width() as usize, resized.height() as usize];
+                    let rgba = resized.to_rgba8();
                     let ci = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
                     let _ = tx.send(AsyncImage { key, image: ci });
                 }
@@ -672,6 +674,22 @@ pub fn clear_person_photo_cache(cache: &mut HashMap<String, TextureHandle>, pers
             && !key.starts_with(&format!("preview:{person_id}:"))
             && !key.starts_with(&format!("avatar:{person_id}:"))
             && !key.starts_with(&format!("gallery-{person_id}-"))
+    });
+}
+
+/// Entfernt ungenutzte Lightbox-Vollbilder aus dem Cache, um GPU-Speicher freizugeben.
+pub fn clear_lightbox_cache(cache: &mut HashMap<String, TextureHandle>, keep_path: Option<&str>) {
+    let keep_key = keep_path.map(|path| format!("lightbox-{path}"));
+    cache.retain(|key, _| {
+        if key.starts_with("lightbox-") {
+            if let Some(ref keep) = keep_key {
+                key == keep
+            } else {
+                false
+            }
+        } else {
+            true
+        }
     });
 }
 
