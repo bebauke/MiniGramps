@@ -240,6 +240,9 @@ impl MiniGramps {
     /// Verschiebungen, über IDs zugeordnet, relativ zum Eltern-Anker —
     /// angewendet in horizontaler wie vertikaler Ausrichtung.
     pub fn save(&mut self) {
+        // Erst verwaiste Mediendateien und Cache-Bilder bereinigen, um Plattenplatz zu sparen!
+        crate::media::cleanup_unused_media(&self.library, &self.data);
+
         let path = self.library.join("familienbaum.minigramps.json");
         self.current_data_path = Some(path.clone());
         let store = FileSystemStore::for_data_file(&path);

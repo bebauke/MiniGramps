@@ -28,7 +28,7 @@ use std::{
 use eframe::egui::{self, Align2, Color32, FontId, Sense, TextureHandle, Vec2};
 use image::{GenericImageView, RgbaImage, imageops::FilterType};
 
-use crate::model::{Person, PhotoCrop};
+use crate::model::{Person, PhotoCrop, TreeData};
 
 static PENDING_THUMBS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
 static ACTIVE_THUMBS: AtomicUsize = AtomicUsize::new(0);
@@ -742,6 +742,64 @@ pub fn clear_lightbox_cache(
             true
         }
     });
+}
+
+/// Scannt das Medienverzeichnis und löscht alle verwaisten (nicht mehr referenzierten) Originaldateien und Thumbnails.
+pub fn cleanup_unused_media(media_base: &Path, data: &TreeData) {
+    let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut valid_thumbs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for p in &data.people {
+        if let Some(ref photo) = p.photo {
+            if let Some(filename) = Path::new(photo).file_name().and_then(|n| n.to_str()) {
+                referenced.insert(filename.to_string());
+            }
+            // Berechne valide Thumbnail-Dateinamen für das Profilbild
+            valid_thumbs.insert(format!("gallery-{}.png", thumb_key(p, 150, false)));
+            valid_thumbs.insert(format!("avatar-{}.png", thumb_key(p, 100, true)));
+            valid_thumbs.insert(format!("large-720p-{}.png", thumb_key(p, 1280, false)));
+        }
+        for entry in &p.gallery {
+            if let Some(filename) = Path::new(entry).file_name().and_then(|n| n.to_str()) {
+                referenced.insert(filename.to_string());
+            }
+            let mut gp = p.clone();
+            gp.photo = Some(entry.clone());
+            // Berechne valide Thumbnail-Dateinamen für dieses Galeriebild
+            valid_thumbs.insert(format!("gallery-{}.png", thumb_key(&gp, 150, false)));
+            valid_thumbs.insert(format!("large-720p-{}.png", thumb_key(&gp, 1280, false)));
+        }
+    }
+
+    // 1. Verwaiste Originaldateien löschen
+    let media_dir = media_base.join("media");
+    if let Ok(entries) = std::fs::read_dir(&media_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    if !referenced.contains(filename) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Verwaiste Thumbnails und Cache-Bilder löschen
+    let thumbs_dir = media_dir.join(".thumbs");
+    if let Ok(entries) = std::fs::read_dir(&thumbs_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    if !valid_thumbs.contains(filename) {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
