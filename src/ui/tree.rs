@@ -576,21 +576,23 @@ pub fn draw_tree(
             }
         }
     }
-    repel_pass(
-        &mut spread,
-        &rows,
-        &row_order,
-        data,
-        &levels,
-        view,
-        orientation,
-        card_h,
-        &widths,
-        gap,
-        couple_gap,
-        &group_of,
-        &shown_partners,
-    );
+    if view != TreeView::Ancestors {
+        repel_pass(
+            &mut spread,
+            &rows,
+            &row_order,
+            data,
+            &levels,
+            view,
+            orientation,
+            card_h,
+            &widths,
+            gap,
+            couple_gap,
+            &group_of,
+            &shown_partners,
+        );
+    }
 
     // Finale Zentrierung: Gruppen werden minimal (kollisionsfrei) in
     // Richtung ihrer Junction verschoben — Kinder hängen so weit wie möglich
