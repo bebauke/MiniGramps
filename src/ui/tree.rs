@@ -497,14 +497,42 @@ pub fn draw_tree(
                     *eff.entry(child).or_insert(0.0) += jshift;
                 }
             } else {
-                // Vorfahren erben den Versatz der Kind-Gruppe.
-                let cshift = children
-                    .iter()
-                    .map(|child| eff.get(*child).copied().unwrap_or(0.0))
-                    .sum::<f32>()
-                    / children.len() as f32;
-                for parent in parents {
-                    *eff.entry(parent).or_insert(0.0) += cshift;
+                // Vorfahrengraf (TreeView::Ancestors):
+                // 1. Aufwärtspass (Bottom-to-Top, d.h. von kleineren Ebenen zu größeren):
+                //    Vorfahren werden 1:1 mitverschoben, wenn das Kind verschoben wurde.
+                //    Da wir von Level 0 aufwärts gehen, propagiert sich das bis ganz nach oben.
+                let mut ordered_up = ordered_families.clone();
+                ordered_up.sort_by_key(|(level, _, _)| *level);
+                for (_level, children, parents) in &ordered_up {
+                    // Wenn Kinder dieser Familie verschoben sind, vererben sie ihren Versatz nach oben.
+                    let cshift = children
+                        .iter()
+                        .map(|child| eff.get(*child).copied().unwrap_or(0.0))
+                        .sum::<f32>()
+                        / children.len() as f32;
+                    if cshift != 0.0 {
+                        for parent in parents {
+                            *eff.entry(parent).or_insert(0.0) += cshift;
+                        }
+                    }
+                }
+
+                // 2. Abwärtspass (Top-to-Bottom, d.h. von großen Ebenen zu kleinen):
+                //    Kinder müssen exakt mittig zwischen ihren Eltern stehen.
+                //    Ein Klick/Verschiebung am Elternteil schiebt das Kind zur Hälfte,
+                //    und das trickelt sich nach unten fort.
+                let mut ordered_down = ordered_families.clone();
+                ordered_down.sort_by_key(|(level, _, _)| std::cmp::Reverse(*level));
+                for (_level, children, parents) in &ordered_down {
+                    let pshift = parents
+                        .iter()
+                        .map(|parent| eff.get(*parent).copied().unwrap_or(0.0))
+                        .sum::<f32>()
+                        / parents.len() as f32;
+                    for child in children {
+                        // Der Versatz des Kindes wird exakt durch die Eltern bestimmt!
+                        eff.insert(child, pshift);
+                    }
                 }
             }
         }
@@ -1182,6 +1210,9 @@ pub fn draw_tree(
             // bei Sichtabstand ≤ 10 px zwischen den Karten, sonst bleibt er
             // stehen. In der Nachfahrensicht zieht der Partner immer mit.
             let partner_follows = |base_center: Pos2, base_width: f32, partner_id: &str| -> bool {
+                if view == TreeView::Ancestors {
+                    return false; // Im Vorfahrenbaum bleibt der Partner immer stehen!
+                }
                 if view != TreeView::Ancestors {
                     return true;
                 }
