@@ -311,7 +311,11 @@ fn ensure_gallery_thumb(
 }
 
 /// Sichert eine 720p-Kopie (max. 1280px an der längeren Kante) als dauerhaftes Thumbnail auf der Festplatte.
-fn ensure_large_thumb(ctx: &egui::Context, media_base: &Path, person: &Person) -> Option<PathBuf> {
+pub fn ensure_large_thumb(
+    ctx: &egui::Context,
+    media_base: &Path,
+    person: &Person,
+) -> Option<PathBuf> {
     let size = 1280;
     let key = format!("large-720p-{}.png", thumb_key(person, size, false));
     let target = thumb_path(media_base, &key);
@@ -710,9 +714,24 @@ pub fn clear_person_photo_cache(cache: &mut HashMap<String, TextureHandle>, pers
 }
 
 /// Entfernt ungenutzte Lightbox-Vollbilder aus dem Cache, um GPU-Speicher freizugeben.
-pub fn clear_lightbox_cache(cache: &mut HashMap<String, TextureHandle>, keep_path: Option<&str>) {
+pub fn clear_lightbox_cache(
+    cache: &mut HashMap<String, TextureHandle>,
+    loading: &mut std::collections::HashSet<String>,
+    keep_path: Option<&str>,
+) {
     let keep_key = keep_path.map(|path| format!("lightbox-{path}"));
     cache.retain(|key, _| {
+        if key.starts_with("lightbox-") {
+            if let Some(ref keep) = keep_key {
+                key == keep
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    });
+    loading.retain(|key| {
         if key.starts_with("lightbox-") {
             if let Some(ref keep) = keep_key {
                 key == keep

@@ -646,6 +646,8 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                 let mut gallery_photo = p.clone();
                 gallery_photo.id = format!("gallery-{}-{index}", p.id);
                 gallery_photo.photo = Some(path.clone());
+                // Proaktiv 720p-Kopie im Hintergrund generieren, damit das Vollbild beim ersten Klick absolut verzögerungsfrei öffnet!
+                let _ = crate::media::ensure_large_thumb(ui.ctx(), &app.library, &gallery_photo);
                 if gallery_thumbnail_ui(
                     ui,
                     &gallery_photo,
