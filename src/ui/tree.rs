@@ -277,126 +277,165 @@ pub fn draw_tree(
         HashMap::new()
     };
 
-    // Startpaketierung je Zeile (zentriert)    // Startpaketierung je Zeile (zentriert), danach Verhandlung:
-    // 1) Partner-Pseudokarten folgen ihrer Person,
-    // 2) Kinder ziehen zum Eltern-Junction (in Gruppen), Eltern folgen,
-    // 3) Abstoßung innerhalb der Gruppen und zwischen den Gruppen.
+    // Startpaketierung je Zeile (zentriert) oder perfektes rekursives Vorfahren-Layout:
     let mut spread: HashMap<&str, f32> = HashMap::new();
-    for (row, ids) in rows.iter().enumerate() {
-        if view == TreeView::Fan {
-            continue;
-        }
-        let mut footprints: Vec<(&str, f32)> = Vec::new();
-        let mut total = 0.0f32;
-        for id in ids {
-            let mut footprint = own_extent(row, id);
-            for partner in data.partners_of(id) {
-                if !visible(&partner.id) && shown_partners.contains(partner.id.as_str()) {
-                    footprint += partner_extent(row, &partner.id) + couple_gap;
+    if view == TreeView::Ancestors {
+        // Berechne das perfekte, überschneidungsfreie Vorfahren-Layout rekursiv!
+        spread = layout_ancestors(root, data, &levels, &widths, gap);
+
+        // Partner-Pseudokarten einmalig an ihre Person koppeln.
+        for (row, ids) in rows.iter().enumerate() {
+            for id in ids {
+                if orientation == TreeOrientation::Vertical {
+                    if let Some(&sx) = spread.get(id) {
+                        let mut px = sx + card_w(row, id) / 2.0 + couple_gap;
+                        for partner in data.partners_of(id) {
+                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
+                            {
+                                continue;
+                            }
+                            spread.insert(partner.id.as_str(), px + card_w(row, &partner.id) / 2.0);
+                            px += card_w(row, &partner.id) + couple_gap;
+                        }
+                    }
+                } else {
+                    if let Some(&sy) = spread.get(id) {
+                        let mut py = sy + card_h / 2.0 + couple_gap;
+                        for partner in data.partners_of(id) {
+                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
+                            {
+                                continue;
+                            }
+                            spread.insert(partner.id.as_str(), py + card_h / 2.0);
+                            py += card_h + couple_gap;
+                        }
+                    }
                 }
             }
-            footprints.push((*id, footprint));
-            total += footprint;
         }
-        total += gap * footprints.len().saturating_sub(1) as f32;
-        let mut cursor = -total / 2.0;
-        for (id, footprint) in footprints {
-            spread.insert(id, cursor + own_extent(row, id) / 2.0);
-            cursor += footprint + gap;
-        }
-    }
-    for _ in 0..12 {
-        // 1) Partner-Pseudokarten an ihre Person koppeln.
+    } else {
+        // Standard-Paketierung für andere Ansichten
         for (row, ids) in rows.iter().enumerate() {
             if view == TreeView::Fan {
                 continue;
             }
+            let mut footprints: Vec<(&str, f32)> = Vec::new();
+            let mut total = 0.0f32;
             for id in ids {
-                if orientation == TreeOrientation::Vertical {
-                    let mut px = spread[*id] + card_w(row, id) / 2.0 + couple_gap;
-                    for partner in data.partners_of(id) {
-                        if visible(&partner.id) || !shown_partners.contains(partner.id.as_str()) {
-                            continue;
-                        }
-                        spread.insert(partner.id.as_str(), px + card_w(row, &partner.id) / 2.0);
-                        px += card_w(row, &partner.id) + couple_gap;
+                let mut footprint = own_extent(row, id);
+                for partner in data.partners_of(id) {
+                    if !visible(&partner.id) && shown_partners.contains(partner.id.as_str()) {
+                        footprint += partner_extent(row, &partner.id) + couple_gap;
                     }
-                } else {
-                    let mut py = spread[*id] + card_h / 2.0 + couple_gap;
-                    for partner in data.partners_of(id) {
-                        if visible(&partner.id) || !shown_partners.contains(partner.id.as_str()) {
-                            continue;
+                }
+                footprints.push((*id, footprint));
+                total += footprint;
+            }
+            total += gap * footprints.len().saturating_sub(1) as f32;
+            let mut cursor = -total / 2.0;
+            for (id, footprint) in footprints {
+                spread.insert(id, cursor + own_extent(row, id) / 2.0);
+                cursor += footprint + gap;
+            }
+        }
+        for _ in 0..12 {
+            // 1) Partner-Pseudokarten an ihre Person koppeln.
+            for (row, ids) in rows.iter().enumerate() {
+                if view == TreeView::Fan {
+                    continue;
+                }
+                for id in ids {
+                    if orientation == TreeOrientation::Vertical {
+                        let mut px = spread[*id] + card_w(row, id) / 2.0 + couple_gap;
+                        for partner in data.partners_of(id) {
+                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
+                            {
+                                continue;
+                            }
+                            spread.insert(partner.id.as_str(), px + card_w(row, &partner.id) / 2.0);
+                            px += card_w(row, &partner.id) + couple_gap;
                         }
-                        spread.insert(partner.id.as_str(), py + card_h / 2.0);
-                        py += card_h + couple_gap;
+                    } else {
+                        let mut py = spread[*id] + card_h / 2.0 + couple_gap;
+                        for partner in data.partners_of(id) {
+                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
+                            {
+                                continue;
+                            }
+                            spread.insert(partner.id.as_str(), py + card_h / 2.0);
+                            py += card_h + couple_gap;
+                        }
                     }
                 }
             }
-        }
-        // 2) Attraktion: Kinder → Eltern-Junction, Eltern → Kinder-Mittelwert.
-        for family in &data.families {
-            let children: Vec<&str> = family
-                .children
-                .iter()
-                .filter(|child| spread.contains_key(child.as_str()))
-                .map(|child| child.as_str())
-                .collect();
-            if children.is_empty() {
-                continue;
-            }
-            let parents: Vec<&str> = [&family.parent_a, &family.parent_b]
-                .into_iter()
-                .flatten()
-                .filter(|parent| spread.contains_key(parent.as_str()))
-                .map(|parent| parent.as_str())
-                .collect();
-            if parents.is_empty() {
-                continue;
-            }
-            let junction = parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
-            if view == TreeView::Descendants {
-                // Geschwister bewegen sich als starre Gruppe (Container).
-                let mean = children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
-                let delta = 0.5 * (junction - mean);
-                for child in &children {
-                    if let Some(value) = spread.get_mut(child) {
+            // 2) Attraktion: Kinder → Eltern-Junction, Eltern → Kinder-Mittelwert.
+            for family in &data.families {
+                let children: Vec<&str> = family
+                    .children
+                    .iter()
+                    .filter(|child| spread.contains_key(child.as_str()))
+                    .map(|child| child.as_str())
+                    .collect();
+                if children.is_empty() {
+                    continue;
+                }
+                let parents: Vec<&str> = [&family.parent_a, &family.parent_b]
+                    .into_iter()
+                    .flatten()
+                    .filter(|parent| spread.contains_key(parent.as_str()))
+                    .map(|parent| parent.as_str())
+                    .collect();
+                if parents.is_empty() {
+                    continue;
+                }
+                let junction =
+                    parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
+                if view == TreeView::Descendants {
+                    // Geschwister bewegen sich als starre Gruppe (Container).
+                    let mean =
+                        children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
+                    let delta = 0.5 * (junction - mean);
+                    for child in &children {
+                        if let Some(value) = spread.get_mut(child) {
+                            *value += delta;
+                        }
+                    }
+                } else {
+                    for child in &children {
+                        if let Some(value) = spread.get_mut(child) {
+                            *value += 0.5 * (junction - *value);
+                        }
+                    }
+                }
+                let target =
+                    children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
+                let parent_mean =
+                    parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
+                let delta = 0.4 * (target - parent_mean);
+                for parent in &parents {
+                    if let Some(value) = spread.get_mut(parent) {
                         *value += delta;
                     }
                 }
-            } else {
-                for child in &children {
-                    if let Some(value) = spread.get_mut(child) {
-                        *value += 0.5 * (junction - *value);
-                    }
-                }
             }
-            let target = children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
-            let parent_mean =
-                parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
-            let delta = 0.4 * (target - parent_mean);
-            for parent in &parents {
-                if let Some(value) = spread.get_mut(parent) {
-                    *value += delta;
-                }
-            }
+            // 3) Abstoßung: innerhalb der Gruppen (Karten) und zwischen den
+            //    Gruppen (Container) als starre Blöcke (siehe `repel` oben).
+            repel_pass(
+                &mut spread,
+                &rows,
+                &row_order,
+                data,
+                &levels,
+                view,
+                orientation,
+                card_h,
+                &widths,
+                gap,
+                couple_gap,
+                &group_of,
+                &shown_partners,
+            );
         }
-        // 3) Abstoßung: innerhalb der Gruppen (Karten) und zwischen den
-        //    Gruppen (Container) als starre Blöcke (siehe `repel` oben).
-        repel_pass(
-            &mut spread,
-            &rows,
-            &row_order,
-            data,
-            &levels,
-            view,
-            orientation,
-            card_h,
-            &widths,
-            gap,
-            couple_gap,
-            &group_of,
-            &shown_partners,
-        );
     }
 
     // Endgültige Positionen (Layout-Koordinaten → beim Zeichnen skaliert).
@@ -1773,4 +1812,129 @@ fn draw_person_card(
     painter.ctx().input(|i| {
         i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|q| card.contains(q))
     })
+}
+
+/// Berechnet rekursiv ein absolut überschneidungsfreies, mathematisch perfektes Vorfahren-Layout (Binärbaum).
+/// - Väter stehen immer links, Mütter immer rechts.
+/// - Das Kind steht genau zentriert im Abstand zwischen Vater und Mutter.
+/// - Subtree-Abstände werden ebenenweise verhandelt, damit sich auch entfernte Zweige niemals überlagern.
+fn layout_ancestors<'a>(
+    id: &'a str,
+    data: &'a TreeData,
+    levels: &HashMap<&str, usize>,
+    widths: &HashMap<&str, f32>,
+    gap: f32,
+) -> HashMap<&'a str, f32> {
+    let mut layout = HashMap::new();
+    layout.insert(id, 0.0);
+
+    // Wenn der Knoten nicht sichtbar ist (Limit erreicht), sind wir fertig.
+    if !levels.contains_key(id) {
+        return layout;
+    }
+
+    // Finde Väter (männlich/links) und Mütter (weiblich/rechts) im sichtbaren Baum
+    let parents = data.parents_of(id);
+    let mut father = None;
+    let mut mother = None;
+    for p in parents {
+        if levels.contains_key(p.id.as_str()) {
+            if p.gender == crate::model::Gender::Male {
+                father = Some(p.id.as_str());
+            } else if p.gender == crate::model::Gender::Female {
+                mother = Some(p.id.as_str());
+            } else if father.is_none() {
+                father = Some(p.id.as_str());
+            } else {
+                mother = Some(p.id.as_str());
+            }
+        }
+    }
+
+    match (father, mother) {
+        (Some(f), Some(m)) => {
+            // Rekursiv die Layouts für Vater- und Mutter-Teilbäume berechnen (jeweils mit 0.0 als lokales Zentrum)
+            let f_layout = layout_ancestors(f, data, levels, widths, gap);
+            let m_layout = layout_ancestors(m, data, levels, widths, gap);
+
+            // Bestimme den minimalen Abstand, den wir zwischen dem Vater-Teilbaum und dem Mutter-Teilbaum brauchen,
+            // damit sich auf KEINER Ebene (Generation) die Karten überlappen.
+            let mut min_distance = 0.0f32;
+
+            // Sammle alle Generationenebenen (Level), die in beiden Teilbäumen vorkommen
+            let mut levels_in_subtrees: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
+            for &fid in f_layout.keys() {
+                if let Some(&lvl) = levels.get(fid) {
+                    levels_in_subtrees.insert(lvl);
+                }
+            }
+            for &mid in m_layout.keys() {
+                if let Some(&lvl) = levels.get(mid) {
+                    levels_in_subtrees.insert(lvl);
+                }
+            }
+
+            for lvl in levels_in_subtrees {
+                // Maximale rechte Position im Vater-Teilbaum auf dieser Ebene finden
+                let mut max_f_right = None;
+                for (&fid, &f_offset) in &f_layout {
+                    if levels.get(fid) == Some(&lvl) {
+                        let w = widths.get(fid).copied().unwrap_or(215.0);
+                        let right = f_offset + w / 2.0;
+                        if max_f_right.is_none() || right > max_f_right.unwrap() {
+                            max_f_right = Some(right);
+                        }
+                    }
+                }
+
+                // Minimale linke Position im Mutter-Teilbaum auf dieser Ebene finden
+                let mut min_m_left = None;
+                for (&mid, &m_offset) in &m_layout {
+                    if levels.get(mid) == Some(&lvl) {
+                        let w = widths.get(mid).copied().unwrap_or(215.0);
+                        let left = m_offset - w / 2.0;
+                        if min_m_left.is_none() || left < min_m_left.unwrap() {
+                            min_m_left = Some(left);
+                        }
+                    }
+                }
+
+                if let (Some(f_right), Some(m_left)) = (max_f_right, min_m_left) {
+                    // Der benötigte Abstand auf dieser Ebene: rechter Rand Vater + Mindestabstand - linker Rand Mutter
+                    let needed_sep = f_right - m_left + gap;
+                    if needed_sep > min_distance {
+                        min_distance = needed_sep;
+                    }
+                }
+            }
+
+            // Standardabstand aus Kartenbreiten, falls keine gemeinsamen Ebenen vorliegen
+            let wf = widths.get(f).copied().unwrap_or(215.0);
+            let wm = widths.get(m).copied().unwrap_or(215.0);
+            let default_sep = (wf + wm) / 2.0 + gap;
+            let sep = min_distance.max(default_sep);
+
+            // Vater-Teilbaum nach links verschieben, Mutter-Teilbaum nach rechts verschieben (Zentrierung)
+            let shift_f = -sep / 2.0;
+            let shift_m = sep / 2.0;
+
+            for (fid, f_offset) in f_layout {
+                layout.insert(fid, f_offset + shift_f);
+            }
+            for (mid, m_offset) in m_layout {
+                layout.insert(mid, m_offset + shift_m);
+            }
+        }
+        (Some(p_id), None) | (None, Some(p_id)) => {
+            // Nur ein Elternteil vorhanden -> Direkt zentriert darüber platzieren
+            let p_layout = layout_ancestors(p_id, data, levels, widths, gap);
+            for (id, offset) in p_layout {
+                layout.insert(id, offset);
+            }
+        }
+        (None, None) => {}
+    }
+
+    layout
 }
