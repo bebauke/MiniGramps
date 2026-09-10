@@ -19,8 +19,8 @@ use crate::import::{discover_projects, project_display_name};
 use crate::media::{clear_person_photo_cache, import_media_file_async, write_round_avatar_now};
 use crate::model::{Gender, person};
 use crate::ui::{
-    ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_EXPORT, ICON_EXTERNAL_LINK, ICON_TRASH, MiniGramps,
-    icon_button, icon_only_button, panels::palette, window_title,
+    CardLayout, ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_EXPORT, ICON_EXTERNAL_LINK,
+    ICON_TRASH, MiniGramps, icon_button, icon_only_button, panels::palette, window_title,
 };
 
 pub fn show_project(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -45,10 +45,24 @@ pub fn show_project(app: &mut MiniGramps, ctx: &egui::Context) {
             );
             ui.horizontal(|ui| {
                 ui.label("Name");
-                ui.add(
+                let name_before = app.data.project.name.clone();
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut app.data.project.name)
                         .desired_width(320.0),
                 );
+                if response.gained_focus() {
+                    app.project_name_before_edit = Some(name_before);
+                }
+                if response.lost_focus() {
+                    if let Some(previous_name) = app.project_name_before_edit.take() {
+                        if previous_name != app.data.project.name {
+                            let new_name = app.data.project.name.clone();
+                            app.data.project.name = previous_name;
+                            app.snapshot(format!("Projektname ändern: {new_name}"));
+                            app.data.project.name = new_name;
+                        }
+                    }
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Datenformat");
@@ -128,6 +142,15 @@ pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
                 ui.selectable_value(&mut app.dark_mode, true, "Dunkel");
                 ui.selectable_value(&mut app.dark_mode, false, "Hell");
             });
+            let old_card_layout = app.card_layout;
+            ui.horizontal(|ui| {
+                ui.label("Kartenlayout");
+                ui.selectable_value(&mut app.card_layout, CardLayout::Compact, "Kompakt");
+                ui.selectable_value(&mut app.card_layout, CardLayout::Portrait, "Großes Foto");
+            });
+            if app.card_layout != old_card_layout {
+                app.fit_pending = true;
+            }
             ui.horizontal(|ui| {
                 ui.label("Generationen");
                 for limit in [3, 5, 7] {
@@ -381,7 +404,13 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
             ui.separator();
             if ui.button("Speichern").clicked() {
                 let id = app.draft.id.clone();
-                app.snapshot();
+                let name = app.draft.display_name();
+                let action = if app.editing.is_some() {
+                    format!("Profil bearbeiten: {name}")
+                } else {
+                    format!("Person anlegen: {name}")
+                };
+                app.snapshot(action);
                 if let Some(existing) = &app.editing {
                     if let Some(person) = app
                         .data
@@ -405,7 +434,12 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
                     .button(egui::RichText::new("Person löschen").color(Color32::LIGHT_RED))
                     .clicked()
                 {
-                    app.snapshot();
+                    let name = app
+                        .data
+                        .find(&id)
+                        .map(|person| person.display_name())
+                        .unwrap_or_else(|| id.clone());
+                    app.snapshot(format!("Person löschen: {name}"));
                     app.data.people.retain(|person| person.id != id);
                     app.data.families.iter_mut().for_each(|family| {
                         if family.parent_a.as_deref() == Some(&id) {
@@ -438,7 +472,12 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
             if ui.button("Als Profilbild verwenden").clicked() {
                 if let Some(id) = &selected_id {
                     if let Some(relative) = import_media_file_async(ui.ctx(), &app.library, &path) {
-                        app.snapshot();
+                        let name = app
+                            .data
+                            .find(id)
+                            .map(|person| person.display_name())
+                            .unwrap_or_else(|| id.clone());
+                        app.snapshot(format!("Profilbild ändern: {name}"));
                         if let Some(person) =
                             app.data.people.iter_mut().find(|person| person.id == *id)
                         {
@@ -455,7 +494,12 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
             if ui.button("Zur Galerie hinzufügen").clicked() {
                 if let Some(id) = &selected_id {
                     if let Some(relative) = import_media_file_async(ui.ctx(), &app.library, &path) {
-                        app.snapshot();
+                        let name = app
+                            .data
+                            .find(id)
+                            .map(|person| person.display_name())
+                            .unwrap_or_else(|| id.clone());
+                        app.snapshot(format!("Galeriebild hinzufügen: {name}"));
                         if let Some(person) =
                             app.data.people.iter_mut().find(|person| person.id == *id)
                         {
@@ -467,7 +511,12 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
             }
             if ui.button("Profilbild entfernen").clicked() {
                 if let Some(id) = &selected_id {
-                    app.snapshot();
+                    let name = app
+                        .data
+                        .find(id)
+                        .map(|person| person.display_name())
+                        .unwrap_or_else(|| id.clone());
+                    app.snapshot(format!("Profilbild entfernen: {name}"));
                     if let Some(person) = app.data.people.iter_mut().find(|person| person.id == *id)
                     {
                         person.photo = None;
@@ -533,7 +582,12 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
                             .clicked()
                         {
                             if let Some(id) = &selected_id {
-                                app.snapshot();
+                                let name = app
+                                    .data
+                                    .find(id)
+                                    .map(|person| person.display_name())
+                                    .unwrap_or_else(|| id.clone());
+                                app.snapshot(format!("Galeriebild entfernen: {name}"));
                                 if let Some(person) =
                                     app.data.people.iter_mut().find(|person| person.id == *id)
                                 {

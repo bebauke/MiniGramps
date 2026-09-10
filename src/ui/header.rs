@@ -11,8 +11,8 @@ use eframe::egui::{self, Color32};
 
 use crate::import::discover_projects;
 use crate::ui::{
-    ICON_CLOSE, ICON_MAXIMIZE, ICON_MINIMIZE, ICON_OPEN, ICON_SAVE, ICON_SETTINGS, MiniGramps,
-    icon_button_big, icon_only_button, panels::palette, whitened_logo,
+    ICON_CLOSE, ICON_MAXIMIZE, ICON_MINIMIZE, ICON_OPEN, ICON_REDO, ICON_SAVE, ICON_SETTINGS,
+    ICON_UNDO, MiniGramps, icon_button_big, icon_only_button, panels::palette, whitened_logo,
 };
 
 pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -73,6 +73,43 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     }
                     if icon_button_big(ui, ICON_SAVE, "save", "Projekt speichern").clicked() {
                         app.save();
+                    }
+                    let undo_tip = app
+                        .undo_action_name()
+                        .map(|name| format!("Rückgängig: {name} (Strg+Z)"))
+                        .unwrap_or_else(|| "Nichts rückgängig zu machen".into());
+                    let undo_response = ui
+                        .add_enabled_ui(app.undo_action_name().is_some(), |ui| {
+                            icon_only_button(ui, ICON_UNDO, "global-undo")
+                                .on_hover_text(undo_tip)
+                        })
+                        .inner;
+                    if undo_response.clicked() {
+                        app.undo();
+                    }
+                    egui::Popup::context_menu(&undo_response).show(|ui| {
+                        ui.label(egui::RichText::new("Rückgängig-Historie").strong());
+                        ui.separator();
+                        for (index, entry) in app.undo_stack.iter().rev().take(30).enumerate() {
+                            ui.label(format!("{}. {}", index + 1, entry.name));
+                        }
+                        if app.undo_stack.len() > 30 {
+                            ui.label(format!("… und {} weitere", app.undo_stack.len() - 30));
+                        }
+                    });
+                    let redo_tip = app
+                        .redo_action_name()
+                        .map(|name| format!("Wiederholen: {name} (Strg+Y)"))
+                        .unwrap_or_else(|| "Nichts zu wiederholen".into());
+                    let redo_clicked = ui
+                        .add_enabled_ui(app.redo_action_name().is_some(), |ui| {
+                            icon_only_button(ui, ICON_REDO, "global-redo")
+                                .on_hover_text(redo_tip)
+                                .clicked()
+                        })
+                        .inner;
+                    if redo_clicked {
+                        app.redo();
                     }
                     // Projektname hinter dem Speichern-Button (etwas größer
                     // als Kleinschrift, damit er als Titel erkennbar ist).

@@ -489,9 +489,12 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                             };
                         }
                         if ui.small_button("✕").clicked() {
+                            app.snapshot(format!(
+                                "Kind-Verknüpfung lösen: {}",
+                                child.display_name()
+                            ));
                             app.data.unlink_child(&p.id, &child.id);
                             app.relation_editor = None;
-                            app.snapshot();
                         }
                     } else if picker::relationship_row(
                         ui,
@@ -730,7 +733,13 @@ fn relation_section(
                     };
                 }
                 if ui.small_button("✕").clicked() {
-                    app.snapshot();
+                    let relation = match kind {
+                        crate::ui::tree::RelationKind::Partner => "Partner-Verknüpfung",
+                        crate::ui::tree::RelationKind::Parent => "Eltern-Verknüpfung",
+                        crate::ui::tree::RelationKind::Sibling => "Geschwister-Verknüpfung",
+                        crate::ui::tree::RelationKind::Child => "Kind-Verknüpfung",
+                    };
+                    app.snapshot(format!("{relation} lösen: {}", entry.display_name()));
                     match kind {
                         crate::ui::tree::RelationKind::Partner => app
                             .data

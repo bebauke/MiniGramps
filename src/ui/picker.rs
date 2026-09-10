@@ -146,7 +146,16 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
         ui.text_edit_singleline(&mut app.relation_family_name);
         if ui.button("+").on_hover_text("Person anlegen und direkt verknüpfen").clicked() {
             let new_id = format!("p{}", app.data.people.len() + 1);
-            app.snapshot();
+            let relation = match kind {
+                RelationKind::Partner => "Partner",
+                RelationKind::Parent => "Elternteil",
+                RelationKind::Child => "Kind",
+                RelationKind::Sibling => "Geschwister",
+            };
+            app.snapshot(format!(
+                "{relation} anlegen: {} {}",
+                app.relation_query, app.relation_family_name
+            ));
             app.data
                 .people
                 .push(person(&new_id, &app.relation_query, &app.relation_family_name, "", Gender::Unknown));
@@ -204,7 +213,16 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
             ui.label("Existierende Person verknüpfen:");
             for candidate in suggestions {
                 if ui.small_button(candidate.display_name()).clicked() {
-                    app.snapshot();
+                    let relation = match kind {
+                        RelationKind::Partner => "Partner",
+                        RelationKind::Parent => "Elternteil",
+                        RelationKind::Child => "Kind",
+                        RelationKind::Sibling => "Geschwister",
+                    };
+                    app.snapshot(format!(
+                        "{relation} verknüpfen: {}",
+                        candidate.display_name()
+                    ));
                     match kind {
                         RelationKind::Partner => app.data.link_partner(selected_id, &candidate.id),
                         RelationKind::Parent => app.data.link_child(&candidate.id, selected_id),
@@ -292,7 +310,12 @@ pub fn relation_options(
                 ] {
                     let active = app.data.partner_relation_of(person_id, relative_id) == relation;
                     if ui.selectable_label(active, relation.label()).clicked() {
-                        app.snapshot();
+                        let name = app
+                            .data
+                            .find(relative_id)
+                            .map(|person| person.display_name())
+                            .unwrap_or_else(|| relative_id.to_string());
+                        app.snapshot(format!("Partnerbeziehung ändern: {name}"));
                         app.data
                             .set_partner_relation(person_id, relative_id, relation);
                     }
@@ -309,7 +332,12 @@ pub fn relation_options(
                 ] {
                     let active = app.data.relation_of_child(relative_id, person_id) == relation;
                     if ui.selectable_label(active, relation.label()).clicked() {
-                        app.snapshot();
+                        let name = app
+                            .data
+                            .find(relative_id)
+                            .map(|person| person.display_name())
+                            .unwrap_or_else(|| relative_id.to_string());
+                        app.snapshot(format!("Elternbeziehung ändern: {name}"));
                         app.data
                             .set_child_relation(relative_id, person_id, relation);
                     }
@@ -325,6 +353,12 @@ pub fn relation_options(
                 ] {
                     let active = app.data.relation_of_child(person_id, relative_id) == relation;
                     if ui.selectable_label(active, relation.label()).clicked() {
+                        let name = app
+                            .data
+                            .find(relative_id)
+                            .map(|person| person.display_name())
+                            .unwrap_or_else(|| relative_id.to_string());
+                        app.snapshot(format!("Kindbeziehung ändern: {name}"));
                         app.data
                             .set_child_relation(person_id, relative_id, relation);
                     }

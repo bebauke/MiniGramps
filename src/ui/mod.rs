@@ -72,13 +72,44 @@ pub(crate) const ICON_CENTER: &[u8] = include_bytes!("../../assets/icons/crossha
 pub(crate) const ICON_RESET: &[u8] = include_bytes!("../../assets/icons/refresh-cw.svg");
 pub(crate) const ICON_UNDO: &[u8] = include_bytes!("../../assets/icons/rotate-ccw.svg");
 pub(crate) const ICON_REDO: &[u8] = include_bytes!("../../assets/icons/rotate-cw.svg");
+pub(crate) const ICON_POINTER: &[u8] = include_bytes!("../../assets/icons/mouse-pointer.svg");
+pub(crate) const ICON_ZOOM: &[u8] = include_bytes!("../../assets/icons/zoom-in.svg");
 pub(crate) const LOGO: &[u8] = include_bytes!("../../assets/icon.svg");
+const MAX_INTERACTIVE_ZOOM: f32 = 8.0;
 
 /// Angefragter Personenwechsel während offener ungespeicherter Bearbeitung.
 #[derive(Clone, Debug)]
 pub struct PendingSelect {
     pub target: String,
     pub set_reference: bool,
+}
+
+#[derive(Clone)]
+pub struct HistoryEntry {
+    pub name: String,
+    pub data: TreeData,
+    pub manual_offsets: HashMap<String, f32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TreeTool {
+    Cursor,
+    Zoom,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CardLayout {
+    Compact,
+    Portrait,
+}
+
+impl CardLayout {
+    pub(crate) fn height(self) -> f32 {
+        match self {
+            Self::Compact => 78.0,
+            Self::Portrait => 158.0,
+        }
+    }
 }
 
 pub struct MiniGramps {
@@ -114,6 +145,9 @@ pub struct MiniGramps {
     pub show_settings: bool,
     /// Projekteigenschaften hinter dem Logo in der Titelleiste.
     pub show_project: bool,
+    /// Projektname beim Beginn der Texteingabe, damit die komplette Änderung
+    /// als ein Undo-Schritt gespeichert wird.
+    pub project_name_before_edit: Option<String>,
     /// Auswahl der kuenftigen Exportformate, geoeffnet aus dem Projektfenster.
     pub show_export: bool,
     /// Sortierung der Personenliste: nach Anzahl (true) oder Alphabet.
@@ -125,6 +159,8 @@ pub struct MiniGramps {
     /// Im Öffnen-Dialog ausgewähltes Projekt (wird mit "Laden" geöffnet).
     pub selected_project: Option<PathBuf>,
     pub dark_mode: bool,
+    /// Darstellung der Personenkarten im Stammbaum.
+    pub card_layout: CardLayout,
     pub tree_orientation: TreeOrientation,
     /// ID der im Modal-Editor geöffneten Person (None = neue Person).
     pub editing: Option<String>,
@@ -165,9 +201,13 @@ pub struct MiniGramps {
     /// (Wechsel-Dialog in `dialogs::show_pending_select_confirm`).
     pub pending_select: Option<PendingSelect>,
     /// Undo-Verlauf: Datenschnappschüsse VOR jeder Mutation (max. 100).
-    pub undo_stack: Vec<TreeData>,
+    pub undo_stack: Vec<HistoryEntry>,
     /// Redo-Verlauf: verlassene Zustände für Strg+Umschalt+Z / Strg+Y.
-    pub redo_stack: Vec<TreeData>,
+    pub redo_stack: Vec<HistoryEntry>,
+    /// Aktives Werkzeug auf der Baumzeichenfläche.
+    pub tree_tool: TreeTool,
+    /// Startpunkt des Auswahlrahmens des Lupenwerkzeugs (Bildschirmkoordinaten).
+    pub zoom_selection_start: Option<egui::Pos2>,
     /// Server-Verbindung (Öffnen-Dialog): Basis-URL + Token (Sitzung).
     pub server_url: String,
     pub server_token: String,
@@ -204,12 +244,14 @@ impl MiniGramps {
             show_open: false,
             show_settings: false,
             show_project: false,
+            project_name_before_edit: None,
             show_export: false,
             group_by_count: true,
             photo_cache: HashMap::new(),
             tree_view: TreeView::Descendants,
             selected_project: None,
             dark_mode: true,
+            card_layout: CardLayout::Compact,
             tree_orientation: TreeOrientation::Vertical,
             editing: None,
             draft: person("", "", "", "", Gender::Unknown),
@@ -232,6 +274,8 @@ impl MiniGramps {
             pending_select: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            tree_tool: TreeTool::Cursor,
+            zoom_selection_start: None,
             server_url: String::new(),
             server_token: String::new(),
             server_online: false,
@@ -494,32 +538,73 @@ impl MiniGramps {
 
     /// Zustand VOR einer Datenänderung sichern (Undo). Jede neue Änderung
     /// leert den Redo-Verlauf; die Historie ist auf 100 Schritte begrenzt.
-    pub fn snapshot(&mut self) {
+    pub fn snapshot(&mut self, name: impl Into<String>) {
         while self.undo_stack.len() >= 100 {
             self.undo_stack.remove(0);
         }
-        self.undo_stack.push(self.data.clone());
+        self.undo_stack.push(HistoryEntry {
+            name: name.into(),
+            data: self.data.clone(),
+            manual_offsets: self.manual_offsets.clone(),
+        });
         self.redo_stack.clear();
+    }
+
+    /// Snapshot für eine gerade begonnene Layoutänderung; die Daten sind noch
+    /// unverändert, der vorherige Offset-Zustand kommt aus dem Drag-Startframe.
+    fn snapshot_layout_before(
+        &mut self,
+        name: impl Into<String>,
+        manual_offsets: HashMap<String, f32>,
+    ) {
+        while self.undo_stack.len() >= 100 {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(HistoryEntry {
+            name: name.into(),
+            data: self.data.clone(),
+            manual_offsets,
+        });
+        self.redo_stack.clear();
+    }
+
+    pub fn undo_action_name(&self) -> Option<&str> {
+        self.undo_stack.last().map(|entry| entry.name.as_str())
+    }
+
+    pub fn redo_action_name(&self) -> Option<&str> {
+        self.redo_stack.last().map(|entry| entry.name.as_str())
     }
 
     pub fn undo(&mut self) {
         let Some(previous) = self.undo_stack.pop() else {
             return;
         };
-        self.redo_stack
-            .push(std::mem::replace(&mut self.data, previous));
+        let name = previous.name;
+        self.redo_stack.push(HistoryEntry {
+            name: name.clone(),
+            data: std::mem::replace(&mut self.data, previous.data),
+            manual_offsets: std::mem::replace(
+                &mut self.manual_offsets,
+                previous.manual_offsets,
+            ),
+        });
         self.refresh_after_rollback();
-        self.status = "Rückgängig".into();
+        self.status = format!("Rückgängig: {name}");
     }
 
     pub fn redo(&mut self) {
         let Some(next) = self.redo_stack.pop() else {
             return;
         };
-        self.undo_stack
-            .push(std::mem::replace(&mut self.data, next));
+        let name = next.name;
+        self.undo_stack.push(HistoryEntry {
+            name: name.clone(),
+            data: std::mem::replace(&mut self.data, next.data),
+            manual_offsets: std::mem::replace(&mut self.manual_offsets, next.manual_offsets),
+        });
         self.refresh_after_rollback();
-        self.status = "Wiederholt".into();
+        self.status = format!("Wiederholt: {name}");
     }
 
     /// Nach Undo/Redo: Bearbeitung beenden, Auswahl an die Daten angleichen.
@@ -554,7 +639,8 @@ impl MiniGramps {
     /// wird gesichert). Gemeinsame Logik von Diskette, Editor und
     /// Personenwechsel-Dialog.
     pub fn commit_draft(&mut self) {
-        self.snapshot();
+        let name = self.draft.display_name();
+        self.snapshot(format!("Profil bearbeiten: {name}"));
         if let Some(person) = self
             .data
             .people
@@ -619,6 +705,34 @@ impl MiniGramps {
         } else if redo {
             self.redo();
         }
+    }
+
+    /// Zoomt um den Mauspunkt, sodass derselbe Layoutpunkt unter dem Cursor
+    /// bleibt. Faktor > 1 zoomt hinein, Faktor < 1 heraus.
+    fn zoom_at(&mut self, canvas: egui::Rect, pointer: egui::Pos2, factor: f32) {
+        let old_zoom = self.zoom;
+        let new_zoom = (old_zoom * factor).clamp(0.15, MAX_INTERACTIVE_ZOOM);
+        if (new_zoom - old_zoom).abs() < f32::EPSILON {
+            return;
+        }
+        let pointer_from_center = pointer - canvas.center();
+        let layout_point = (pointer_from_center - self.pan) / old_zoom;
+        self.zoom = new_zoom;
+        self.pan = pointer_from_center - layout_point * new_zoom;
+    }
+
+    /// Passt einen auf der Zeichenfläche aufgespannten Bildschirmrahmen in
+    /// den Viewport ein und hält dessen Mitte im Zentrum.
+    fn fit_screen_selection(&mut self, canvas: egui::Rect, selection: egui::Rect) {
+        let old_zoom = self.zoom;
+        let layout_center =
+            (selection.center() - canvas.center() - self.pan) / old_zoom;
+        let scale = ((canvas.width() / selection.width())
+            .min(canvas.height() / selection.height())
+            * 0.92)
+            .max(0.01);
+        self.zoom = (old_zoom * scale).clamp(0.15, MAX_INTERACTIVE_ZOOM);
+        self.pan = layout_center * -self.zoom;
     }
 
     /// Layout (manuelle Offsets) sofort in die `.layout.json` schreiben.
@@ -749,6 +863,9 @@ impl eframe::App for MiniGramps {
                 {
                     println!("RESET: clearing {} offsets, zoom={:.3} pan=({:.1},{:.1})",
                         self.manual_offsets.len(), self.zoom, self.pan.x, self.pan.y);
+                    if !self.manual_offsets.is_empty() {
+                        self.snapshot("Layout zurücksetzen");
+                    }
                     self.manual_offsets.clear();
                     self.persist_layout();
                     self.zoom = 1.0;
@@ -756,34 +873,41 @@ impl eframe::App for MiniGramps {
                     self.fit_pending = true;
                 }
                 ui.separator();
-                let undo_enabled = !self.undo_stack.is_empty();
-                if ui
-                    .add_enabled_ui(undo_enabled, |ui| {
-                        icon_only_button(ui, ICON_UNDO, "toolbar-undo")
-                            .on_hover_text("Rückgängig (Strg+Z)")
-                            .clicked()
-                    })
-                    .inner == true
+                if icon_toggle_button(
+                    ui,
+                    ICON_POINTER,
+                    "toolbar-pointer",
+                    self.tree_tool == TreeTool::Cursor,
+                )
+                .on_hover_text("Standardwerkzeug: auswählen und Baum verschieben")
+                .clicked()
                 {
-                    self.undo();
+                    self.tree_tool = TreeTool::Cursor;
+                    self.zoom_selection_start = None;
                 }
-                let redo_enabled = !self.redo_stack.is_empty();
-                if ui
-                    .add_enabled_ui(redo_enabled, |ui| {
-                        icon_only_button(ui, ICON_REDO, "toolbar-redo")
-                            .on_hover_text("Wiederholen (Strg+Y / Strg+Umschalt+Z)")
-                            .clicked()
-                    })
-                    .inner == true
+                if icon_toggle_button(
+                    ui,
+                    ICON_ZOOM,
+                    "toolbar-zoom",
+                    self.tree_tool == TreeTool::Zoom,
+                )
+                .on_hover_text(
+                    "Lupe: Linksklick hinein · Rechtsklick heraus · Linksklick-Ziehen: Bereich einpassen",
+                )
+                .clicked()
                 {
-                    self.redo();
+                    self.tree_tool = TreeTool::Zoom;
+                    self.card_drag = None;
                 }
                 ui.separator();
                     // Hinweis nur, wenn genug Platz (sonst automatisch aus).
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        let hint =
-                            "Mausrad: Zoom · Ziehen: Baum verschieben · Klick: Person · Shift+Klick: Referenz · Shift+Ziehen: Karte/Zweig/Partner-Tausch";
+                        let hint = if self.tree_tool == TreeTool::Zoom {
+                            "Lupe: Linksklick hinein · Rechtsklick heraus · Ziehen: Bereich einpassen"
+                        } else {
+                            "Mausrad: Zoom · Ziehen: Baum verschieben · Klick: Person · Shift+Klick: Referenz · Shift+Ziehen: Karte/Zweig/Partner-Tausch"
+                        };
                         let hint_width = ui
                             .painter()
                             .layout_no_wrap(
@@ -805,6 +929,9 @@ impl eframe::App for MiniGramps {
                 ui.add_space(14.0);
                 let available = ui.available_size();
                 let (response, painter) = ui.allocate_painter(available, egui::Sense::drag());
+                if self.tree_tool == TreeTool::Zoom && response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
                 // Dezentes Marken-Wasserzeichen unter allen Verbindungen und
                 // Karten. Bei schmalen Flaechen wird es zusaetzlich begrenzt,
                 // damit das quadratische Logo nicht abgeschnitten wird.
@@ -826,13 +953,17 @@ impl eframe::App for MiniGramps {
                     .paint_at(ui, watermark_rect);
                 let scroll = ui.input(|i| i.raw_scroll_delta.y);
                 if response.hovered() && scroll != 0.0 {
-                    self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.15, 1.4);
+                    self.zoom = (self.zoom * (1.0 + scroll * 0.001))
+                        .clamp(0.15, MAX_INTERACTIVE_ZOOM);
                 }
                 // Maus-Transitions-Erkennung für Drag-Logging.
                 let mouse_is_down = ui.input(|i| i.pointer.primary_down());
                 let drag_started = mouse_is_down && !self.drag_mouse_was_down;
                 let drag_ended = !mouse_is_down && self.drag_mouse_was_down;
                 self.drag_mouse_was_down = mouse_is_down;
+                // Beim Laden/Zentrieren und nach einem Drag genau einen
+                // Layout-Diagnoseblock ausgeben, nicht in jedem Frame.
+                let log_layout = self.fit_pending || drag_ended;
                 // Lang-Touch-Debouncer und aktiven Karten-Drag zurücksetzen,
                 // wenn nichts gedrückt ist. Drag-Ende → Layout live sichern.
                 if !mouse_is_down {
@@ -847,6 +978,8 @@ impl eframe::App for MiniGramps {
                 let reference = self.reference.clone();
                     let expanded = self.expanded.clone();
                     let mut long_press_used = self.long_press_used;
+                    let previous_manual_offsets = self.manual_offsets.clone();
+                    let card_drag_was_active = self.card_drag.is_some();
                     let mut manual_offsets = self.manual_offsets.clone();
                     let mut card_drag = self.card_drag.take();
                     let mut frame_drag = false;
@@ -867,14 +1000,39 @@ impl eframe::App for MiniGramps {
                         &mut self.photo_cache,
                         self.tree_view,
                         self.tree_orientation,
+                        self.card_layout,
                         self.zoom,
                         self.pan,
                         drag_started,
                         drag_ended,
+                        log_layout,
                     );
                     self.long_press_used = long_press_used;
-                    self.manual_offsets = manual_offsets;
-                    self.card_drag = card_drag;
+                    if self.tree_tool == TreeTool::Cursor {
+                        if !card_drag_was_active
+                            && card_drag.is_some()
+                            && manual_offsets != previous_manual_offsets
+                        {
+                            let drag_id = card_drag
+                                .as_ref()
+                                .map(|(id, _)| id.as_str())
+                                .unwrap_or_default();
+                            let name = self
+                                .data
+                                .find(drag_id)
+                                .map(|person| person.display_name())
+                                .unwrap_or_else(|| drag_id.to_string());
+                            self.snapshot_layout_before(
+                                format!("Baumposition verschieben: {name}"),
+                                previous_manual_offsets,
+                            );
+                        }
+                        self.manual_offsets = manual_offsets;
+                        self.card_drag = card_drag;
+                    } else {
+                        action = None;
+                        self.card_drag = None;
+                    }
                 // Zoom-Fit: den gelieferten Inhaltsbereich (Layout-Koordo-
                 // dinaten) passend in die Zeichenfläche skalieren und mittig
                 // setzen — einmalig nach Laden/Referenzwechsel.
@@ -891,11 +1049,60 @@ impl eframe::App for MiniGramps {
                         self.pan = content_bounds.center().to_vec2() * -fit;
                     }
                 }
-                // Canvas-Pan NACH dem Zeichnen auswerten: Ein Drag innerhalb
-                // eines Paarrahmens verschiebt den Zweig (frame_drag) und
-                // darf die Zeichenfläche nicht mitschieben.
-                if response.dragged() && !ui.input(|i| i.modifiers.shift) && !frame_drag {
-                    self.pan += response.drag_delta();
+                if self.tree_tool == TreeTool::Zoom {
+                    let pointer = ui.input(|input| input.pointer.interact_pos());
+                    let primary_pressed = ui.input(|input| {
+                        input.pointer.button_pressed(egui::PointerButton::Primary)
+                    });
+                    let primary_released = ui.input(|input| {
+                        input.pointer.button_released(egui::PointerButton::Primary)
+                    });
+                    let secondary_released = ui.input(|input| {
+                        input.pointer.button_released(egui::PointerButton::Secondary)
+                    });
+                    if primary_pressed && pointer.is_some_and(|at| response.rect.contains(at)) {
+                        self.zoom_selection_start = pointer;
+                    }
+                    if let (Some(start), Some(current)) = (self.zoom_selection_start, pointer) {
+                        let selection = egui::Rect::from_two_pos(start, current)
+                            .intersect(response.rect);
+                        if ui.input(|input| {
+                            input.pointer.button_down(egui::PointerButton::Primary)
+                        }) {
+                            painter.rect_filled(
+                                selection,
+                                0.0,
+                                Color32::from_rgba_unmultiplied(80, 150, 220, 28),
+                            );
+                            painter.rect_stroke(
+                                selection,
+                                0.0,
+                                egui::Stroke::new(1.5, Color32::from_rgb(90, 170, 235)),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if primary_released {
+                            self.zoom_selection_start = None;
+                            if selection.width() >= 8.0 && selection.height() >= 8.0 {
+                                self.fit_screen_selection(response.rect, selection);
+                            } else {
+                                self.zoom_at(response.rect, current, 1.25);
+                            }
+                        }
+                    }
+                    if secondary_released
+                        && pointer.is_some_and(|at| response.rect.contains(at))
+                    {
+                        self.zoom_selection_start = None;
+                        self.zoom_at(response.rect, pointer.unwrap(), 0.8);
+                    }
+                } else {
+                    // Canvas-Pan NACH dem Zeichnen auswerten: Ein Drag innerhalb
+                    // eines Paarrahmens verschiebt den Zweig (frame_drag) und
+                    // darf die Zeichenfläche nicht mitschieben.
+                    if response.dragged() && !ui.input(|i| i.modifiers.shift) && !frame_drag {
+                        self.pan += response.drag_delta();
+                    }
                 }
                 match action {
                     Some(TreeAction::View(id)) => self.request_select(&id, false),
@@ -910,7 +1117,12 @@ impl eframe::App for MiniGramps {
                         partner_id,
                         direction,
                     }) => {
-                        self.snapshot();
+                        let name = self
+                            .data
+                            .find(&partner_id)
+                            .map(|person| person.display_name())
+                            .unwrap_or_else(|| partner_id.clone());
+                        self.snapshot(format!("Partnerreihenfolge ändern: {name}"));
                         self.data.swap_partner(&person_id, &partner_id, direction);
                         self.log(format!(
                             "Partner getauscht: {person_id} <-> {partner_id} ({direction})"
@@ -986,6 +1198,18 @@ pub(crate) fn icon_only_button(
         .fit_to_exact_size(Vec2::splat(16.0))
         .tint(ui.visuals().text_color());
     ui.add(egui::Button::image(image))
+}
+
+pub(crate) fn icon_toggle_button(
+    ui: &mut egui::Ui,
+    bytes: &'static [u8],
+    id: &'static str,
+    selected: bool,
+) -> egui::Response {
+    let image = egui::Image::from_bytes(format!("bytes://{id}.svg"), whitened_svg(bytes))
+        .fit_to_exact_size(Vec2::splat(16.0))
+        .tint(ui.visuals().text_color());
+    ui.add(egui::Button::image(image).selected(selected))
 }
 
 pub(crate) fn icon_button_big(
