@@ -96,7 +96,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                         egui::Vec2::new(96.0, 34.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
-                            ui.spacing_mut().item_spacing.y = 10.0;
+                            ui.spacing_mut().item_spacing.y = 2.0;
                             ui.spacing_mut().button_padding = egui::vec2(5.0, 0.0);
                             ui.horizontal(|ui| {
                                 let undo_response = ui
