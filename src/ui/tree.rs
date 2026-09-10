@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 
-use crate::media::{initials, photo_preview_texture, round_avatar_texture_cached};
+use crate::media::{cover_uv_to, initials, photo_preview_texture, round_avatar_texture_cached};
 use crate::model::{Person, TreeData};
 use crate::ui::CardLayout;
 
@@ -2632,31 +2632,23 @@ fn draw_person_card(
         egui::StrokeKind::Outside,
     );
     if zoom < CARD_DETAIL_MIN_ZOOM {
-        // Statt leerer Farbfläche das Profilbild vollständig in den Rahmen
-        // EINPASSEN (kein Strecken, kein Zuschneiden; frei bleibende Ränder
-        // zeigen die Kartenfarbe). Ohne Foto stehen die Initialen in der
-        // Kartenmitte.
+        // Statt leerer Farbfläche füllt das Profilbild die Karte, ohne sie zu
+        // verzerren: Cover-Beschnitt mit dem KARTEN-Seitenverhältnis, sodass
+        // die Box vollständig und ungestreckt gefüllt ist. Ohne Foto stehen
+        // dezente Initialen in der Kartenmitte.
         if let Some(texture) =
             photo_preview_texture(painter.ctx(), person, photo_cache, media_base)
         {
             let tv = texture.size_vec2();
-            let tex_aspect = tv.x / tv.y.max(1.0);
             let card_aspect = card.width() / card.height().max(1.0);
-            let image_rect = if tex_aspect > card_aspect {
-                let w = card.width();
-                Rect::from_center_size(card.center(), Vec2::new(w, w / tex_aspect))
-            } else {
-                let h = card.height();
-                Rect::from_center_size(card.center(), Vec2::new(h * tex_aspect, h))
-            };
+            let uv = cover_uv_to(
+                tv.x / tv.y.max(1.0),
+                card_aspect,
+                person.photo_crop.as_ref(),
+            );
             painter
                 .with_clip_rect(card)
-                .image(
-                    texture.id(),
-                    image_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                .image(texture.id(), card, uv, Color32::WHITE);
             painter.rect(
                 card,
                 10. * zoom,
@@ -2678,8 +2670,8 @@ fn draw_person_card(
                 card.center(),
                 Align2::CENTER_CENTER,
                 initials(person),
-                FontId::proportional((card.height() * 0.4).max(6.0)),
-                Color32::WHITE,
+                FontId::proportional((card.height() * 0.32).max(5.0)),
+                Color32::from_rgba_unmultiplied(225, 232, 232, 130),
             );
         }
         return painter.ctx().input(|i| {
