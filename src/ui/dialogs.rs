@@ -142,15 +142,13 @@ pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
                 ui.selectable_value(&mut app.dark_mode, true, "Dunkel");
                 ui.selectable_value(&mut app.dark_mode, false, "Hell");
             });
-            let old_card_layout = app.card_layout;
+            // Einstellungsänderungen behalten den aktuellen Ausschnitt (pan/zoom);
+            // neu zentriert wird nur beim Wechsel der Referenzperson.
             ui.horizontal(|ui| {
                 ui.label("Kartenlayout");
                 ui.selectable_value(&mut app.card_layout, CardLayout::Compact, "Kompakt");
                 ui.selectable_value(&mut app.card_layout, CardLayout::Portrait, "Großes Foto");
             });
-            if app.card_layout != old_card_layout {
-                app.fit_pending = true;
-            }
             ui.horizontal(|ui| {
                 ui.label("Generationen");
                 for limit in [3, 5, 7] {
@@ -158,7 +156,6 @@ pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
                 }
                 ui.selectable_value(&mut app.max_generations, 0, "Alle");
             });
-            let old_gap = app.layout_gap;
             ui.horizontal(|ui| {
                 ui.label("Baum-Abstand");
                 ui.add(
@@ -171,9 +168,6 @@ pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
                      (bei Platzmangel rücken Karten näher zusammen).",
                 );
             });
-            if app.layout_gap != old_gap {
-                app.fit_pending = true;
-            }
             ui.separator();
             ui.label(
                 egui::RichText::new("SPEICHERORT")

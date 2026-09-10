@@ -652,6 +652,10 @@ pub fn draw_tree(
         peak_eff = peak_eff.max(value.abs());
     }
     if view != TreeView::Ancestors {
+        // Finaler Abstoßungspass NACH den manuellen Versätzen: nur noch
+        // Überlappungen auflösen (MIN_CARD_GAP), damit selbst eng zusammen
+        // geschobene Karten so stehen bleiben – der Baum-Abstand ist hier
+        // bewusst kein erzwungenes Minimum.
         repel_pass(
             &mut spread,
             &rows,
@@ -663,7 +667,7 @@ pub fn draw_tree(
             orientation,
             card_h,
             &widths,
-            gap,
+            MIN_CARD_GAP,
             sibling_container_padding,
             couple_gap,
             &group_of,
@@ -2391,10 +2395,13 @@ fn repel_pass<'a>(
                     key_a.cmp(&key_b)
                 });
                 for window in inner.windows(2) {
-                    // Karten nie berühren lassen; der konfigurierte
-                    // Baum-Abstand ist nur der DEFAULT (Zielabstand) – der
-                    // feste MIN_CARD_GAP bleibt als Mindestabstand.
-                    let need = right_offsets[window[0].0] + left_offsets[window[1].0] + MIN_CARD_GAP;
+                    // In der AUTOMATIK gilt der konfigurierte Baum-Abstand als
+                    // Kartenabstand (`gap`). Beim finalen Pass nach manuellen
+                    // Versätzen wird stattdessen nur noch `MIN_CARD_GAP`
+                    // übergeben, damit selbst verschobene Karten eng stehen
+                    // dürfen.
+                    let need =
+                        right_offsets[window[0].0] + left_offsets[window[1].0] + gap;
                     let actual = window[1].1 - window[0].1;
                     if actual < need {
                         // Nur nach rechts schieben: monotone Platzierung,
@@ -2435,9 +2442,10 @@ fn repel_pass<'a>(
                 .collect();
             spans.sort_by(|a, b| a.1.total_cmp(&b.1));
             for window in spans.windows(2) {
-                // Container: gezeichneter Innen-Rand plus fester Mindestabstand
-                // (Baum-Abstand ist nur Default, kein Zwangs-Mindestabstand).
-                let need = MIN_CARD_GAP
+                // Container: gezeichneter Innen-Rand plus übergebenem Abstand
+                // (Automatik: Baum-Abstand; final nach manuellen Versätzen:
+                // nur MIN_CARD_GAP, damit enges manuelles Platzieren bleibt).
+                let need = gap
                     + if window[0].0.len() > 1 {
                         sibling_container_padding
                     } else {
