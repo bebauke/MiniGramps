@@ -38,6 +38,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
             }
             ui.columns(3, |columns| {
                 columns[0].with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add_space(2.0);
                     if icon_button_big(ui, ICON_OPEN, "open", "Projekt öffnen").clicked() {
                         let found = discover_projects(&app.library).len();
                         app.log(format!("Projektsuche: {found} Treffer"));
