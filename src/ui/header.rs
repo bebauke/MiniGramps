@@ -38,7 +38,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
             }
             ui.columns(3, |columns| {
                 columns[0].with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add_space(2.0);
+                    ui.add_space(6.0);
                     if icon_button_big(ui, ICON_OPEN, "open", "Projekt öffnen").clicked() {
                         let found = discover_projects(&app.library).len();
                         app.log(format!("Projektsuche: {found} Treffer"));
@@ -89,10 +89,10 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     let nav_forward_ok = app.can_navigate_forward();
                     // Undo/Redo und Referenz-Pfeile als kompakte zweizeilige
                     // Befehlsgruppe (Zeile 1 = Rückgängig/Wiederholen, Zeile 2
-                    // = Zurück/Vor direkt darunter), vertikal zentriert zu den
-                    // großen Buttons.
+                    // = Zurück/Vor direkt darunter), oben bündig zu den großen
+                    // Buttons.
                     ui.allocate_ui_with_layout(
-                        egui::Vec2::new(96.0, 22.0),
+                        egui::Vec2::new(96.0, 34.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
@@ -212,7 +212,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     );
                 });
                 columns[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(2.0);
+                    ui.add_space(6.0);
                     if window_button(ui, ICON_CLOSE, "window-close", "Schliessen", true).clicked() {
                         // Nicht direkt schließen: ungespeicherte Änderungen prüfen.
                         app.pending_close = true;
