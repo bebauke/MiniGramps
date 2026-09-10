@@ -70,7 +70,16 @@ pub(crate) const ICON_TRASH: &[u8] = include_bytes!("../../assets/icons/trash-2.
 pub(crate) const ICON_EXTERNAL_LINK: &[u8] = include_bytes!("../../assets/icons/external-link.svg");
 pub(crate) const ICON_CENTER: &[u8] = include_bytes!("../../assets/icons/crosshair.svg");
 pub(crate) const ICON_RESET: &[u8] = include_bytes!("../../assets/icons/refresh-cw.svg");
+pub(crate) const ICON_UNDO: &[u8] = include_bytes!("../../assets/icons/rotate-ccw.svg");
+pub(crate) const ICON_REDO: &[u8] = include_bytes!("../../assets/icons/rotate-cw.svg");
 pub(crate) const LOGO: &[u8] = include_bytes!("../../assets/icon.svg");
+
+/// Angefragter Personenwechsel während offener ungespeicherter Bearbeitung.
+#[derive(Clone, Debug)]
+pub struct PendingSelect {
+    pub target: String,
+    pub set_reference: bool,
+}
 
 pub struct MiniGramps {
     pub data: TreeData,
@@ -152,6 +161,13 @@ pub struct MiniGramps {
     pub hidden_sections: HashSet<String>,
     /// Schließen angefordert, aber ungespeicherte Änderungen prüfen.
     pub pending_close: bool,
+    /// Angefragte Personen-Auswahl bei laufender unsicherer Bearbeitung
+    /// (Wechsel-Dialog in `dialogs::show_pending_select_confirm`).
+    pub pending_select: Option<PendingSelect>,
+    /// Undo-Verlauf: Datenschnappschüsse VOR jeder Mutation (max. 100).
+    pub undo_stack: Vec<TreeData>,
+    /// Redo-Verlauf: verlassene Zustände für Strg+Umschalt+Z / Strg+Y.
+    pub redo_stack: Vec<TreeData>,
     /// Server-Verbindung (Öffnen-Dialog): Basis-URL + Token (Sitzung).
     pub server_url: String,
     pub server_token: String,
@@ -213,6 +229,9 @@ impl MiniGramps {
             collapsed_sections: HashSet::new(),
             hidden_sections: HashSet::new(),
             pending_close: false,
+            pending_select: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             server_url: String::new(),
             server_token: String::new(),
             server_online: false,
@@ -313,6 +332,13 @@ impl MiniGramps {
                     path.display()
                 ));
                 self.data = data;
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                self.pending_select = None;
+                self.inline_edit = false;
+                self.show_editor = false;
+                self.editing = None;
+                self.relation_picker = None;
                 if let Some(manifest) = load_project_manifest(path) {
                     self.data.project.name = manifest.name;
                     self.data.project.format_version = manifest.format_version;
@@ -385,6 +411,13 @@ impl MiniGramps {
                 self.reference = self.selected.clone();
                 self.expanded.clear();
                 self.data = data;
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                self.pending_select = None;
+                self.inline_edit = false;
+                self.show_editor = false;
+                self.editing = None;
+                self.relation_picker = None;
                 self.photo_cache.clear();
                 self.fit_pending = true;
                 self.show_open = false;
@@ -406,6 +439,13 @@ impl MiniGramps {
                         self.reference = self.selected.clone();
                         self.expanded.clear();
                         self.data = data;
+                        self.undo_stack.clear();
+                        self.redo_stack.clear();
+                        self.pending_select = None;
+                        self.inline_edit = false;
+                        self.show_editor = false;
+                        self.editing = None;
+                        self.relation_picker = None;
                         self.photo_cache.clear();
                         self.fit_pending = true;
                         self.show_open = false;
@@ -442,6 +482,143 @@ impl MiniGramps {
         self.persist_layout();
         self.status = format!("Referenzperson: {name}");
         self.log(format!("Referenzperson gesetzt: {name}"));
+    }
+
+    /// Arbeitskopie hat im Vergleich zur Datenbank ungespeicherte Änderungen?
+    pub fn draft_has_changes(&self) -> bool {
+        match self.data.find(&self.draft.id) {
+            Some(stored) => stored != &self.draft,
+            None => false,
+        }
+    }
+
+    /// Zustand VOR einer Datenänderung sichern (Undo). Jede neue Änderung
+    /// leert den Redo-Verlauf; die Historie ist auf 100 Schritte begrenzt.
+    pub fn snapshot(&mut self) {
+        while self.undo_stack.len() >= 100 {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(self.data.clone());
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) {
+        let Some(previous) = self.undo_stack.pop() else {
+            return;
+        };
+        self.redo_stack
+            .push(std::mem::replace(&mut self.data, previous));
+        self.refresh_after_rollback();
+        self.status = "Rückgängig".into();
+    }
+
+    pub fn redo(&mut self) {
+        let Some(next) = self.redo_stack.pop() else {
+            return;
+        };
+        self.undo_stack
+            .push(std::mem::replace(&mut self.data, next));
+        self.refresh_after_rollback();
+        self.status = "Wiederholt".into();
+    }
+
+    /// Nach Undo/Redo: Bearbeitung beenden, Auswahl an die Daten angleichen.
+    fn refresh_after_rollback(&mut self) {
+        self.inline_edit = false;
+        self.show_editor = false;
+        self.editing = None;
+        self.relation_picker = None;
+        self.relation_editor = None;
+        self.pending_select = None;
+        self.photo_cache.clear();
+        let keep = self
+            .selected
+            .clone()
+            .filter(|id| self.data.find(id).is_some());
+        if let Some(id) = keep {
+            if let Some(person) = self.data.find(&id).cloned() {
+                self.draft = person;
+                return;
+            }
+        }
+        if let Some(first) = self.data.people.first() {
+            self.selected = Some(first.id.clone());
+            self.draft = first.clone();
+        } else {
+            self.selected = None;
+            self.draft = person("", "", "", "", Gender::Unknown);
+        }
+    }
+
+    /// Ungespeicherte Arbeitskopie in die Datenbank übernehmen (Undo-Schritt
+    /// wird gesichert). Gemeinsame Logik von Diskette, Editor und
+    /// Personenwechsel-Dialog.
+    pub fn commit_draft(&mut self) {
+        self.snapshot();
+        if let Some(person) = self
+            .data
+            .people
+            .iter_mut()
+            .find(|person| person.id == self.draft.id)
+        {
+            *person = self.draft.clone();
+        }
+        let _ = crate::media::write_round_avatar_now(&self.library, &self.draft);
+        crate::media::clear_person_photo_cache(&mut self.photo_cache, &self.draft.id);
+    }
+
+    /// Person auswählen. Läuft gerade eine Bearbeitung mit ungespeicherten
+    /// Änderungen, wird erst der Wechsel-Dialog eingeblendet
+    /// (`pending_select`), statt sofort zu wechseln.
+    pub fn request_select(&mut self, id: &str, set_reference: bool) {
+        if self.inline_edit
+            && self.draft_has_changes()
+            && self.selected.as_deref() != Some(id)
+        {
+            self.pending_select = Some(PendingSelect {
+                target: id.into(),
+                set_reference,
+            });
+            return;
+        }
+        self.apply_select(id, set_reference);
+    }
+
+    fn apply_select(&mut self, id: &str, set_reference: bool) {
+        self.selected = Some(id.into());
+        self.relation_picker = None;
+        if set_reference {
+            self.set_reference(id);
+        }
+    }
+
+    /// Vom Wechsel-Dialog bestätigten Zielwechsel ausführen.
+    pub(crate) fn apply_pending_select(&mut self) {
+        if let Some(pending) = self.pending_select.take() {
+            self.apply_select(&pending.target, pending.set_reference);
+        }
+    }
+
+    /// Zeichenfläche (Strg+Z / Strg+Y) zurück- und vorlaufen lassen.
+    pub fn handle_undo_redo_shortcuts(&mut self, ctx: &egui::Context) {
+        // Während ein Textfeld fokussiert ist, gehört Strg+Z dem Texteditor.
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let (undo, redo) = ctx.input(|i| {
+            let command = i.modifiers.command;
+            let undo = command
+                && !i.modifiers.shift
+                && i.key_pressed(egui::Key::Z);
+            let redo = (command && i.key_pressed(egui::Key::Y))
+                || (command && i.modifiers.shift && i.key_pressed(egui::Key::Z));
+            (undo, redo)
+        });
+        if undo {
+            self.undo();
+        } else if redo {
+            self.redo();
+        }
     }
 
     /// Layout (manuelle Offsets) sofort in die `.layout.json` schreiben.
@@ -499,6 +676,10 @@ impl eframe::App for MiniGramps {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+
+        // Undo/Redo über die Tastatur (Strg+Z / Strg+Y bzw. Strg+Umschalt+Z) —
+        // außerhalb von aktiven Textfeldern.
+        self.handle_undo_redo_shortcuts(ctx);
 
         // Panels in eigenen Modulen; Reihenfolge bestimmt das Layout.
         header::show(self, ctx);
@@ -575,11 +756,34 @@ impl eframe::App for MiniGramps {
                     self.fit_pending = true;
                 }
                 ui.separator();
+                let undo_enabled = !self.undo_stack.is_empty();
+                if ui
+                    .add_enabled_ui(undo_enabled, |ui| {
+                        icon_only_button(ui, ICON_UNDO, "toolbar-undo")
+                            .on_hover_text("Rückgängig (Strg+Z)")
+                            .clicked()
+                    })
+                    .inner == true
+                {
+                    self.undo();
+                }
+                let redo_enabled = !self.redo_stack.is_empty();
+                if ui
+                    .add_enabled_ui(redo_enabled, |ui| {
+                        icon_only_button(ui, ICON_REDO, "toolbar-redo")
+                            .on_hover_text("Wiederholen (Strg+Y / Strg+Umschalt+Z)")
+                            .clicked()
+                    })
+                    .inner == true
+                {
+                    self.redo();
+                }
+                ui.separator();
                     // Hinweis nur, wenn genug Platz (sonst automatisch aus).
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
                         let hint =
-                            "Mausrad: Zoom · Ziehen: Verschieben · Klick: Person · Shift+Klick: Referenz · Shift+Ziehen: Karte · Rahmen ziehen: Zweig";
+                            "Mausrad: Zoom · Ziehen: Baum verschieben · Klick: Person · Shift+Klick: Referenz · Shift+Ziehen: Karte/Zweig/Partner-Tausch";
                         let hint_width = ui
                             .painter()
                             .layout_no_wrap(
@@ -694,12 +898,23 @@ impl eframe::App for MiniGramps {
                     self.pan += response.drag_delta();
                 }
                 match action {
-                    Some(TreeAction::View(id)) => self.selected = Some(id),
-                    Some(TreeAction::Reference(id)) => self.set_reference(&id),
+                    Some(TreeAction::View(id)) => self.request_select(&id, false),
+                    Some(TreeAction::Reference(id)) => self.request_select(&id, true),
                     Some(TreeAction::ToggleExpand(id)) => {
                         if !self.expanded.remove(&id) {
                             self.expanded.insert(id);
                         }
+                    }
+                    Some(TreeAction::SwapPartner {
+                        person_id,
+                        partner_id,
+                        direction,
+                    }) => {
+                        self.snapshot();
+                        self.data.swap_partner(&person_id, &partner_id, direction);
+                        self.log(format!(
+                            "Partner getauscht: {person_id} <-> {partner_id} ({direction})"
+                        ));
                     }
                     None => {}
                 }
@@ -714,6 +929,8 @@ impl eframe::App for MiniGramps {
         dialogs::show_export(self, ctx);
         dialogs::show_image_intent(self, ctx);
         dialogs::show_lightbox(self, ctx);
+        // Wechsel-Dialog bei ungespeicherten Änderungen (vor dem nächsten Frame).
+        dialogs::show_pending_select_confirm(self, ctx);
     }
 }
 

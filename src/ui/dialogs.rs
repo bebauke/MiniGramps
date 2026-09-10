@@ -257,6 +257,52 @@ pub fn show_close_confirm(app: &mut MiniGramps, ctx: &egui::Context) {
     }
 }
 
+pub fn show_pending_select_confirm(app: &mut MiniGramps, ctx: &egui::Context) {
+    if app.pending_select.is_none() {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(window_title("Ungespeicherte Änderungen"))
+        .open(&mut open)
+        .movable(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(400.0)
+        .show(ctx, |ui| {
+            let name = app
+                .data
+                .find(&app.draft.id)
+                .map(|person| person.display_name())
+                .unwrap_or_default();
+            ui.label(format!(
+                "Es gibt ungespeicherte Änderungen an „{name}“. Vor dem Wechsel speichern?"
+            ));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Speichern und wechseln").clicked() {
+                    app.commit_draft();
+                    app.inline_edit = false;
+                    app.status = "Profil gespeichert".into();
+                    app.save();
+                    app.apply_pending_select();
+                }
+                if ui.button("Verwerfen und wechseln").clicked() {
+                    app.inline_edit = false;
+                    app.relation_picker = None;
+                    app.status = "Änderungen verworfen".into();
+                    app.apply_pending_select();
+                }
+                if ui.button("Abbrechen").clicked() {
+                    app.pending_select = None;
+                }
+            });
+        });
+    if !open {
+        app.pending_select = None;
+    }
+}
+
 pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
     if !app.show_editor {
         return;
@@ -335,6 +381,7 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
             ui.separator();
             if ui.button("Speichern").clicked() {
                 let id = app.draft.id.clone();
+                app.snapshot();
                 if let Some(existing) = &app.editing {
                     if let Some(person) = app
                         .data
@@ -358,6 +405,7 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
                     .button(egui::RichText::new("Person löschen").color(Color32::LIGHT_RED))
                     .clicked()
                 {
+                    app.snapshot();
                     app.data.people.retain(|person| person.id != id);
                     app.data.families.iter_mut().for_each(|family| {
                         if family.parent_a.as_deref() == Some(&id) {
@@ -386,9 +434,11 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.label(path.display().to_string());
             ui.label("Wofür soll dieses Foto verwendet werden?");
+            let selected_id = app.selected.clone();
             if ui.button("Als Profilbild verwenden").clicked() {
-                if let Some(id) = &app.selected {
+                if let Some(id) = &selected_id {
                     if let Some(relative) = import_media_file_async(ui.ctx(), &app.library, &path) {
+                        app.snapshot();
                         if let Some(person) =
                             app.data.people.iter_mut().find(|person| person.id == *id)
                         {
@@ -403,8 +453,9 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
                 app.pending_image = None;
             }
             if ui.button("Zur Galerie hinzufügen").clicked() {
-                if let Some(id) = &app.selected {
+                if let Some(id) = &selected_id {
                     if let Some(relative) = import_media_file_async(ui.ctx(), &app.library, &path) {
+                        app.snapshot();
                         if let Some(person) =
                             app.data.people.iter_mut().find(|person| person.id == *id)
                         {
@@ -415,7 +466,8 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
                 app.pending_image = None;
             }
             if ui.button("Profilbild entfernen").clicked() {
-                if let Some(id) = &app.selected {
+                if let Some(id) = &selected_id {
+                    app.snapshot();
                     if let Some(person) = app.data.people.iter_mut().find(|person| person.id == *id)
                     {
                         person.photo = None;
@@ -481,6 +533,7 @@ pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {
                             .clicked()
                         {
                             if let Some(id) = &selected_id {
+                                app.snapshot();
                                 if let Some(person) =
                                     app.data.people.iter_mut().find(|person| person.id == *id)
                                 {

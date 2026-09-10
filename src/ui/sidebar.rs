@@ -16,7 +16,7 @@ use rfd::FileDialog;
 
 use crate::media::{
     avatar_ui_live, avatar_ui_preview, clear_person_photo_cache, gallery_thumbnail_ui,
-    import_media_file_async, write_round_avatar_now,
+    import_media_file_async,
 };
 use crate::model::{ChildRelation, Gender, Person, person};
 use crate::ui::{
@@ -94,6 +94,10 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                             None => String::new(),
                         };
                         ui.collapsing(format!("{display} · {}", members.len()), |ui| {
+                            // Namen nicht umbrechen lassen, sondern in „…“
+                            // übergehen lassen, damit lange Namen die Liste
+                            // nicht stauchen.
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                             for (id, gender, name) in members.iter() {
                                 let active = app.selected.as_deref() == Some(id.as_str());
                                 if ui
@@ -105,10 +109,7 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                                 {
                                     // Ansicht öffnen; Shift/Dreifachklick
                                     // setzt direkt die Referenzperson.
-                                    app.selected = Some(id.clone());
-                                    if picker::wants_reference(ui) {
-                                        app.set_reference(id);
-                                    }
+                                    app.request_select(id, picker::wants_reference(ui));
                                 }
                             }
                         });
@@ -170,16 +171,7 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                     }
                     if icon_only_button(ui, icon, "profile-edit").clicked() {
                         if app.inline_edit {
-                            if let Some(person) = app
-                                .data
-                                .people
-                                .iter_mut()
-                                .find(|person| person.id == app.draft.id)
-                            {
-                                *person = app.draft.clone();
-                            }
-                            let _ = write_round_avatar_now(&app.library, &app.draft);
-                            clear_person_photo_cache(&mut app.photo_cache, &app.draft.id);
+                            app.commit_draft();
                             app.status = "Profil gespeichert".into();
                             // Auch auf die Festplatte schreiben — sonst sind
                             // Foto/Änderungen nach Neustart weg.
@@ -499,6 +491,7 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                         if ui.small_button("✕").clicked() {
                             app.data.unlink_child(&p.id, &child.id);
                             app.relation_editor = None;
+                            app.snapshot();
                         }
                     } else if picker::relationship_row(
                         ui,
@@ -509,10 +502,7 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                         &app.library,
                     ) {
                         let child_id = child.id.clone();
-                        app.selected = Some(child_id.clone());
-                        if picker::wants_reference(ui) {
-                            app.set_reference(&child_id);
-                        }
+                        app.request_select(&child_id, picker::wants_reference(ui));
                     }
                 });
                 if app
@@ -740,6 +730,7 @@ fn relation_section(
                     };
                 }
                 if ui.small_button("✕").clicked() {
+                    app.snapshot();
                     match kind {
                         crate::ui::tree::RelationKind::Partner => app
                             .data
@@ -765,10 +756,7 @@ fn relation_section(
                     &mut app.photo_cache,
                     &app.library,
                 ) {
-                    app.selected = Some(entry.id.clone());
-                    if picker::wants_reference(ui) {
-                        app.set_reference(&entry.id);
-                    }
+                    app.request_select(&entry.id, picker::wants_reference(ui));
                 }
             }
         });

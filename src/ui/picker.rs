@@ -146,6 +146,7 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
         ui.text_edit_singleline(&mut app.relation_family_name);
         if ui.button("+").on_hover_text("Person anlegen und direkt verknüpfen").clicked() {
             let new_id = format!("p{}", app.data.people.len() + 1);
+            app.snapshot();
             app.data
                 .people
                 .push(person(&new_id, &app.relation_query, &app.relation_family_name, "", Gender::Unknown));
@@ -203,6 +204,7 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
             ui.label("Existierende Person verknüpfen:");
             for candidate in suggestions {
                 if ui.small_button(candidate.display_name()).clicked() {
+                    app.snapshot();
                     match kind {
                         RelationKind::Partner => app.data.link_partner(selected_id, &candidate.id),
                         RelationKind::Parent => app.data.link_child(&candidate.id, selected_id),
@@ -290,6 +292,7 @@ pub fn relation_options(
                 ] {
                     let active = app.data.partner_relation_of(person_id, relative_id) == relation;
                     if ui.selectable_label(active, relation.label()).clicked() {
+                        app.snapshot();
                         app.data
                             .set_partner_relation(person_id, relative_id, relation);
                     }
@@ -306,6 +309,7 @@ pub fn relation_options(
                 ] {
                     let active = app.data.relation_of_child(relative_id, person_id) == relation;
                     if ui.selectable_label(active, relation.label()).clicked() {
+                        app.snapshot();
                         app.data
                             .set_child_relation(relative_id, person_id, relation);
                     }

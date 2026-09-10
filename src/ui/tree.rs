@@ -61,6 +61,13 @@ pub enum TreeAction {
     Reference(String),
     /// Weitere Generationen an diesem Knoten aus-/einklappen.
     ToggleExpand(String),
+    /// Partner-Pseudokarten per Shift+Ziehen tauschen (nur freie Partner;
+    /// `direction` = -1 nach vorn, +1 nach hinten).
+    SwapPartner {
+        person_id: String,
+        partner_id: String,
+        direction: i32,
+    },
 }
 
 pub fn draw_tree(
@@ -794,7 +801,7 @@ pub fn draw_tree(
                 // die Kinder erben ihn über die Junction-Vererbung.
                 let frame_hit = painter.ctx().input(|i| {
                     i.pointer.primary_down()
-                        && !i.modifiers.shift
+                        && i.modifiers.shift
                         && i.pointer.press_origin().is_some_and(|q| outer.contains(q))
                 });
                 if frame_hit
@@ -1310,46 +1317,62 @@ pub fn draw_tree(
                 *action = Some(TreeAction::Reference(partner.id.clone()));
                 *long_press_used = true;
             }
-            // Partner-Karte verschieben (Shift+Ziehen) — der Versatz gilt
-            // entlang der Verteilungsachse in beiden Ausrichtungen und wird
-            // in der Layout-Datei gesichert.
-            let (partner_delta, partner_start) = painter.ctx().input(|i| {
-                if !(i.pointer.primary_down() && i.modifiers.shift) {
-                    return (0.0, false);
+            // Partner-Pseudokarte per Shift+Ziehen: NUR die Reihenfolge der
+            // Partner tauschen (mehrere freie Partner ohne Kennenlern-/
+            // Heiratsdatum). Datierte Partner bleiben chronologisch fix; die
+            // Karte verschiebt die Person dabei NICHT mehr.
+            let free = {
+                let (z, m) = data.get_partnership_dates(person, partner);
+                z.is_none() && m.is_none()
+            };
+            let swap_axis: f32 = painter.ctx().input(|i| {
+                if !i.pointer.primary_down() {
+                    // Losgelassen: einen hier laufenden Gestus-Latch räumen.
+                    if card_drag
+                        .as_ref()
+                        .is_some_and(|(id, _)| id == partner.id.as_str())
+                    {
+                        *card_drag = None;
+                    }
+                    return 0.0;
+                }
+                if !(i.modifiers.shift && free) {
+                    return 0.0;
                 }
                 let pressed_here = i
                     .pointer
                     .press_origin()
                     .is_some_and(|q| partner_card.contains(q));
-                let active = card_drag
+                if pressed_here {
+                    *card_drag = Some((partner.id.clone(), Vec::new()));
+                }
+                if !card_drag
                     .as_ref()
-                    .is_some_and(|(id, _)| id == partner.id.as_str());
-                if !(pressed_here || active) {
-                    return (0.0, false);
+                    .is_some_and(|(id, _)| id == partner.id.as_str())
+                {
+                    return 0.0;
                 }
-                let delta = i.pointer.delta();
-                (
-                    if orientation == TreeOrientation::Vertical {
-                        delta.x
-                    } else {
-                        delta.y
-                    },
-                    pressed_here,
-                )
-            });
-            if partner_delta != 0.0 || (partner_start && card_drag.is_none()) {
-                let layout_delta = partner_delta / zoom;
-                // Ziehen an der Pseudo-Partnerkarte verschiebt die zugehörige
-                // Person — der Partner folgt automatisch (ein eigener Versatz
-                // würde ihn in Nachbarblöcke hineinzeichnen).
-                if let Some((_, members)) = card_drag {
-                    for id in members.clone() {
-                        *manual_offsets.entry(id).or_insert(0.0) += layout_delta;
-                    }
+                let from = i.pointer.press_origin().unwrap_or(partner_card.center());
+                let to = i.pointer.latest_pos().unwrap_or(partner_card.center());
+                let axis = if orientation == TreeOrientation::Vertical {
+                    to.x - from.x
                 } else {
-                    *manual_offsets.entry(person.id.clone()).or_insert(0.0) += layout_delta;
-                    *card_drag = Some((person.id.clone(), vec![person.id.clone()]));
+                    to.y - from.y
+                };
+                if axis.abs() >= 20.0 {
+                    // Richtung für den Tausch festhalten und Latch lösen.
+                    *card_drag = None;
+                    if axis < 0.0 { -20.0 } else { 20.0 }
+                } else {
+                    0.0
                 }
+            });
+            if swap_axis.abs() == 20.0 {
+                *action = Some(TreeAction::SwapPartner {
+                    person_id: person.id.clone(),
+                    partner_id: partner.id.clone(),
+                    direction: if swap_axis < 0.0 { -1 } else { 1 },
+                });
             }
         }
     }

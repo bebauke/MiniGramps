@@ -118,7 +118,7 @@ impl Default for EventKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Event {
     pub kind: EventKind,
     #[serde(default)]
@@ -148,7 +148,7 @@ impl Default for PhotoCrop {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Person {
     pub id: String,
     #[serde(default)]
@@ -250,7 +250,7 @@ impl PartnerRelation {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Family {
     pub id: String,
     pub parent_a: Option<String>,
@@ -281,7 +281,7 @@ impl ChildRelation {
     }
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct TreeData {
     /// MiniGramps-spezifische Eigenschaften; fremde Importformate erhalten
     /// hier automatisch neutrale Standardwerte.
@@ -295,9 +295,14 @@ pub struct TreeData {
     /// Eintrag = Unbekannt.
     #[serde(default)]
     pub partner_relations: HashMap<String, PartnerRelation>,
+    /// Manuelle Partnerreihenfolge je Person (Schlüssel = Personen-ID).
+    /// Gilt NUR für Partner ohne Kennenlern-/Heiratsdatum; datierte Partner
+    /// bleiben chronologisch sortiert (fixe Reihenfolge).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub partner_order: HashMap<String, Vec<String>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectMetadata {
     #[serde(default = "default_project_name")]
     pub name: String,
@@ -353,6 +358,7 @@ impl TreeData {
             ],
             child_relations: HashMap::new(),
             partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
         }
     }
     pub fn find(&self, id: &str) -> Option<&Person> {
@@ -461,30 +467,79 @@ impl TreeData {
             .collect();
 
         if let Some(p1) = self.find(id) {
-            partners.sort_by(|a, b| {
-                let (z_a, m_a) = self.get_partnership_dates(p1, a);
-                let (z_b, m_b) = self.get_partnership_dates(p1, b);
-
-                let key_a = if let Some(da) = z_a {
-                    (0, da, m_a.unwrap_or((9999, 12, 31)), a.id.as_str())
-                } else if let Some(da) = m_a {
-                    (1, da, (9999, 12, 31), a.id.as_str())
+            // Manuelle Reihenfolge (nur für Partner ohne Datum): Position je
+            // Partner-ID in der gewünschten Liste als Tiebreaker vor der ID.
+            let manual = self.partner_order.get(id);
+            let manual_pos = |partner_id: &str| -> usize {
+                manual
+                    .and_then(|list| list.iter().position(|p| p == partner_id))
+                    .unwrap_or(usize::MAX)
+            };
+            let key = |partner: &Person| -> (u8, (i32, i32, i32), (i32, i32, i32), usize, String) {
+                let (z, m) = self.get_partnership_dates(p1, partner);
+                let (priority, d1, d2) = if let Some(d) = z {
+                    (
+                        0,
+                        d,
+                        m.unwrap_or((9999, 12, 31)),
+                    )
+                } else if let Some(d) = m {
+                    (1, d, (9999, 12, 31))
                 } else {
-                    (2, (9999, 12, 31), (9999, 12, 31), a.id.as_str())
+                    (2, (9999, 12, 31), (9999, 12, 31))
                 };
-
-                let key_b = if let Some(db) = z_b {
-                    (0, db, m_b.unwrap_or((9999, 12, 31)), b.id.as_str())
-                } else if let Some(db) = m_b {
-                    (1, db, (9999, 12, 31), b.id.as_str())
-                } else {
-                    (2, (9999, 12, 31), (9999, 12, 31), b.id.as_str())
-                };
-
-                key_a.cmp(&key_b)
-            });
+                (priority, d1, d2, manual_pos(&partner.id), partner.id.clone())
+            };
+            partners.sort_by(|a, b| key(a).cmp(&key(b)));
         }
         partners
+    }
+    /// Partner-Pseudokarten per Ziehen tauschen (nur Partner ohne
+    /// Kennenlern-/Heiratsdatum; datierte Partner sind chronologisch fix).
+    /// `direction` = -1 (nach links/vorn) oder +1 (nach rechts/hinten) in
+    /// der angezeigten Reihenfolge.
+    pub fn swap_partner(&mut self, person_id: &str, partner_id: &str, direction: i32) {
+        let Some(p1) = self.find(person_id).cloned() else {
+            return;
+        };
+        let is_free = |p: &Person| {
+            let (z, m) = self.get_partnership_dates(&p1, p);
+            z.is_none() && m.is_none()
+        };
+        // Angezeigte Reihenfolge der freien Partner (altes Manual berücksichtigt)…
+        let old = self.partner_order.get(person_id).cloned().unwrap_or_default();
+        let pos = |id: &str| old.iter().position(|p| p == id).unwrap_or(usize::MAX);
+        let mut order: Vec<String> = self
+            .families
+            .iter()
+            .filter_map(|f| {
+                if f.parent_a.as_deref() == Some(person_id) {
+                    f.parent_b.as_deref()
+                } else if f.parent_b.as_deref() == Some(person_id) {
+                    f.parent_a.as_deref()
+                } else {
+                    None
+                }
+            })
+            .filter_map(|other| self.find(other))
+            .filter(|partner| is_free(partner))
+            .map(|partner| partner.id.clone())
+            .collect();
+        order.sort_by_key(|id| pos(id));
+        // …und Tausch mit dem Nachbarn in Ziehrichtung.
+        let Some(index) = order.iter().position(|id| id == partner_id) else {
+            return;
+        };
+        let target = index as i32 + direction;
+        if target < 0 || target >= order.len() as i32 {
+            return;
+        }
+        let target = target as usize;
+        if order[target] == order[index] {
+            return;
+        }
+        order.swap(index, target);
+        self.partner_order.insert(person_id.to_string(), order);
     }
     /// Verknüpft zwei Personen als Partner. Nutzt eine offene Ein-Elternteil-
     /// Familie, sonst eine neue. Aufgerufen aus dem Beziehungspicker
@@ -907,6 +962,7 @@ mod tests {
             families: Vec::new(),
             child_relations: HashMap::new(),
             partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
         };
         data.link_partner("a", "b");
         data.link_child("a", "c");
@@ -928,6 +984,7 @@ mod tests {
             families: Vec::new(),
             child_relations: HashMap::new(),
             partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
         };
         data.link_child_to(Some("a"), Some("b"), "c", ChildRelation::Adopted);
         data.link_child_to(Some("a"), Some("b"), "c", ChildRelation::Adopted);
@@ -935,6 +992,85 @@ mod tests {
         assert_eq!(data.parents_of("c").len(), 2);
         assert_eq!(data.relation_of_child("a", "c"), ChildRelation::Adopted);
         assert_eq!(data.relation_of_child("b", "c"), ChildRelation::Adopted);
+    }
+
+    #[test]
+    fn swaps_only_free_partners() {
+        let mut data = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("a", "Alex", "", "", Gender::Unknown),
+                person("b", "Bea", "", "", Gender::Unknown),
+                person("c", "Chris", "", "", Gender::Unknown),
+                person("d", "Dana", "", "", Gender::Unknown),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        data.link_partner("a", "b");
+        data.link_partner("a", "c");
+        data.link_partner("a", "d");
+        fn ids(data: &TreeData) -> Vec<&str> {
+            data.partners_of("a").iter().map(|p| p.id.as_str()).collect()
+        }
+        assert_eq!(ids(&data), vec!["b", "c", "d"]);
+        // Freie Partner per Ziehen tauschen: „c“ eine Position nach vorn.
+        data.swap_partner("a", "c", -1);
+        assert_eq!(ids(&data), vec!["c", "b", "d"]);
+        assert_eq!(data.partner_order["a"], vec!["c", "b", "d"]);
+        // Randfall: am äußersten Ende ändert sich nichts.
+        data.swap_partner("a", "d", 1);
+        assert_eq!(ids(&data), vec!["c", "b", "d"]);
+        // Folgende Tausche respektieren die gespeicherte Reihenfolge.
+        data.swap_partner("a", "b", 1);
+        assert_eq!(ids(&data), vec!["c", "d", "b"]);
+    }
+
+    #[test]
+    fn dated_partners_stay_fixed() {
+        let mut c = person("c", "Chris", "", "", Gender::Unknown);
+        c.events.push(Event {
+            kind: EventKind::Marriage,
+            date: "1990".into(),
+            place: String::new(),
+            description: String::new(),
+        });
+        let mut d = person("d", "Dana", "", "", Gender::Unknown);
+        d.events.push(Event {
+            kind: EventKind::Custom("Partnerschaft".into()),
+            date: "2001".into(),
+            place: String::new(),
+            description: String::new(),
+        });
+        let mut data = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("a", "Alex", "", "", Gender::Unknown),
+                person("b", "Bea", "", "", Gender::Unknown),
+                c,
+                d,
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        data.link_partner("a", "b");
+        data.link_partner("a", "c");
+        data.link_partner("a", "d");
+        // Chronologische Sortierung: Partnerschaft (2001) vor Heirat (1990),
+        // freier Partner „b“ ans Ende.
+        let ids: Vec<&str> = data.partners_of("a").iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["d", "c", "b"]);
+        // Datierte Partner sind nicht tauschbar — Reihenfolge bleibt fix.
+        data.swap_partner("a", "c", -1);
+        data.swap_partner("a", "d", -1);
+        data.swap_partner("a", "d", 1);
+        let ids: Vec<&str> = data.partners_of("a").iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["d", "c", "b"]);
+        assert!(data.partner_order.is_empty());
     }
 
     #[test]
