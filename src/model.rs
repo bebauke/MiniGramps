@@ -881,4 +881,25 @@ mod tests {
         // Medieval/historical year support
         assert_eq!(parse_birth_date("800"), Some((800, 1, 1)));
     }
+
+    #[test]
+    fn test_parse_birth_date_bauke() {
+        // Teste alle echten Datums-Formate aus dem BAUKE Stammbaum
+        assert_eq!(parse_birth_date("16 Jun 1998"), Some((1998, 6, 16)));
+        assert_eq!(parse_birth_date("21 Oktober 1969"), Some((1969, 10, 21)));
+        assert_eq!(parse_birth_date("27.7.1974"), Some((1974, 7, 27)));
+        assert_eq!(parse_birth_date("3 Juni 1942"), Some((1942, 6, 3)));
+        assert_eq!(parse_birth_date("29 September 1952"), Some((1952, 9, 29)));
+        assert_eq!(parse_birth_date("19 Aug 1920"), Some((1920, 8, 19)));
+        assert_eq!(parse_birth_date("8 Mai 1910"), Some((1910, 5, 8)));
+        assert_eq!(parse_birth_date("24 Dezember 1924"), Some((1924, 12, 24)));
+        assert_eq!(parse_birth_date("21 Juli 1907"), Some((1907, 7, 21)));
+        assert_eq!(parse_birth_date("21 Februar 1877"), Some((1877, 2, 21)));
+        assert_eq!(parse_birth_date("21 Januar 1891"), Some((1891, 1, 21)));
+        assert_eq!(parse_birth_date("28 Juli 1879"), Some((1879, 7, 28)));
+        assert_eq!(parse_birth_date("10 Dezember 1892"), Some((1892, 12, 10)));
+        assert_eq!(parse_birth_date("1 Feb 1888"), Some((1888, 2, 1)));
+        assert_eq!(parse_birth_date("25 Februar 1897"), Some((1897, 2, 25)));
+        assert_eq!(parse_birth_date("19. Januar 1848"), Some((1848, 1, 19)));
+    }
 }
