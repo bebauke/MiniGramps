@@ -466,6 +466,30 @@ pub fn draw_tree(
             println!("STAGE_{} row={} [{}]", stage, row, order);
         }
     };
+    // Diagnose: große Einzelverschiebungen (>1000) je Verhandlungsteilschritt.
+    let log_big_moves = |prev: &HashMap<&str, f32>, spread: &HashMap<&str, f32>, stage: &str| {
+        if !log_layout {
+            return;
+        }
+        let mut moves: Vec<(&str, f32, f32)> = spread
+            .iter()
+            .filter_map(|(id, after)| {
+                let before = prev.get(id).copied().unwrap_or(*after);
+                ((after - before).abs() > 1000.0).then_some((*id, before, *after))
+            })
+            .collect();
+        moves.sort_by(|a, b| (b.2 - b.1).abs().total_cmp(&(a.2 - a.1).abs()));
+        for (id, before, after) in moves.into_iter().take(20) {
+            println!(
+                "NEG_MOVE stage={} id={} from={:.0} to={:.0} d={:.0}",
+                stage,
+                id,
+                before,
+                after,
+                after - before
+            );
+        }
+    };
     if view == TreeView::Ancestors {
         // Berechne das perfekte, überschneidungsfreie Vorfahren-Layout rekursiv!
         spread = layout_ancestors(root, &relations, &levels, &widths, gap);
@@ -528,6 +552,7 @@ pub fn draw_tree(
         dump_stage("PACK", &spread);
         for _ in 0..12 {
             // 1) Partner-Pseudokarten an ihre Person koppeln.
+            let prev_partner = spread.clone();
             for (row, ids) in rows.iter().enumerate() {
                 if view == TreeView::Fan {
                     continue;
@@ -556,6 +581,8 @@ pub fn draw_tree(
                     }
                 }
             }
+            log_big_moves(&prev_partner, &spread, "partner");
+            let prev_attr = spread.clone();
             // 2) Attraktion: Kinder → Eltern-Junction, Eltern → Kinder-Mittelwert.
             for family in &data.families {
                 let children: Vec<&str> = family
@@ -606,6 +633,8 @@ pub fn draw_tree(
                     }
                 }
             }
+            log_big_moves(&prev_attr, &spread, "attr");
+            let prev_repel = spread.clone();
             // 3) Abstoßung: innerhalb der Gruppen (Karten) und zwischen den
             //    Gruppen (Container) als starre Blöcke (siehe `repel` oben).
             repel_pass(
@@ -625,6 +654,7 @@ pub fn draw_tree(
                 &group_of,
                 &shown_partners,
             );
+            log_big_moves(&prev_repel, &spread, "repel");
         }
     }
 
