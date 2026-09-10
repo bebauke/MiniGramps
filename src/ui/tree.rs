@@ -1801,7 +1801,11 @@ fn repel_pass<'a>(
                     .iter()
                     .map(|(id, _)| (*id, spread[*id]))
                     .collect();
-                inner.sort_by(|a, b| a.1.total_cmp(&b.1));
+                inner.sort_by(|a, b| {
+                    let key_a = birth_key(a.0);
+                    let key_b = birth_key(b.0);
+                    key_a.cmp(&key_b)
+                });
                 for window in inner.windows(2) {
                     let need = right_offset(window[0].0) + left_offset(window[1].0) + gap;
                     let actual = window[1].1 - window[0].1;

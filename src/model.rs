@@ -727,14 +727,15 @@ pub fn person(
 
 /// Hilfsfunktion, um ein beliebiges Geburtsdatums-String in eine vergleichbare
 /// Struktur (Jahr, Monat, Tag) zu parsen. Unterstützt Deutsch und Englisch,
-/// volle Monatsnamen und Abkürzungen.
+/// volle Monatsnamen und Abkürzungen sowie unsichere/ungefähre Angaben
+/// (z. B. "um 1944", "~1966", "1966?").
 pub fn parse_birth_date(date_str: &str) -> Option<(i32, i32, i32)> {
     let s = date_str.trim().to_lowercase();
     if s.is_empty() || s == "unbekannt" {
         return None;
     }
-    // Tokenize nach Whitespace, Punkten, Bindestrichen oder Slashes
-    let tokens: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == '.' || c == '-' || c == '/').filter(|t| !t.is_empty()).collect();
+    // Nach allen nicht-alphanumerischen Zeichen splitten (entfernt ?, ~, [], (), Punkte, etc.)
+    let tokens: Vec<&str> = s.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).collect();
     if tokens.is_empty() {
         return None;
     }
@@ -772,7 +773,7 @@ pub fn parse_birth_date(date_str: &str) -> Option<(i32, i32, i32)> {
         }
 
         if let Ok(num) = token.parse::<i32>() {
-            if num >= 1000 && num <= 3000 {
+            if num >= 100 && num <= 3000 {
                 year = Some(num);
             } else if num >= 1 && num <= 31 {
                 if day.is_none() {
@@ -786,11 +787,11 @@ pub fn parse_birth_date(date_str: &str) -> Option<(i32, i32, i32)> {
 
     if tokens.len() == 3 {
         if let (Ok(num1), Ok(num2), Ok(num3)) = (tokens[0].parse::<i32>(), tokens[1].parse::<i32>(), tokens[2].parse::<i32>()) {
-            if num3 >= 1000 && num3 <= 3000 {
+            if num3 >= 100 && num3 <= 3000 {
                 year = Some(num3);
                 month = Some(num2);
                 day = Some(num1);
-            } else if num1 >= 1000 && num1 <= 3000 {
+            } else if num1 >= 100 && num1 <= 3000 {
                 year = Some(num1);
                 month = Some(num2);
                 day = Some(num3);
@@ -798,7 +799,7 @@ pub fn parse_birth_date(date_str: &str) -> Option<(i32, i32, i32)> {
         }
     } else if tokens.len() == 1 {
         if let Ok(num) = tokens[0].parse::<i32>() {
-            if num >= 1000 && num <= 3000 {
+            if num >= 100 && num <= 3000 {
                 year = Some(num);
             }
         }
@@ -862,5 +863,22 @@ mod tests {
         assert_eq!(data.parents_of("c").len(), 2);
         assert_eq!(data.relation_of_child("a", "c"), ChildRelation::Adopted);
         assert_eq!(data.relation_of_child("b", "c"), ChildRelation::Adopted);
+    }
+
+    #[test]
+    fn test_parse_birth_date() {
+        assert_eq!(parse_birth_date("2. Juni 1966"), Some((1966, 6, 2)));
+        assert_eq!(parse_birth_date("10.04.1957"), Some((1957, 4, 10)));
+        assert_eq!(parse_birth_date("1957-04-10"), Some((1957, 4, 10)));
+        assert_eq!(parse_birth_date("1971"), Some((1971, 1, 1)));
+        assert_eq!(parse_birth_date("12 MAR 1950"), Some((1950, 3, 12)));
+        assert_eq!(parse_birth_date("um 1944"), Some((1944, 1, 1)));
+        assert_eq!(parse_birth_date("~1966"), Some((1966, 1, 1)));
+        assert_eq!(parse_birth_date("1966?"), Some((1966, 1, 1)));
+        assert_eq!(parse_birth_date("[1966]"), Some((1966, 1, 1)));
+        assert_eq!(parse_birth_date("Unbekannt"), None);
+        assert_eq!(parse_birth_date(""), None);
+        // Medieval/historical year support
+        assert_eq!(parse_birth_date("800"), Some((800, 1, 1)));
     }
 }
