@@ -30,7 +30,7 @@ use crate::media::{initials, round_avatar_texture_cached};
 use crate::model::TreeData;
 
 /// Ansichtsmodus (Schalter in der Stammbaum-Werkzeugleiste, `ui`).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeView {
     Descendants,
     Ancestors,
@@ -1354,7 +1354,6 @@ pub fn draw_tree(
         }
     }
     if (drag_started || drag_ended)
-        && view == TreeView::Ancestors
         && orientation == TreeOrientation::Vertical
     {
         let mut total = 0.0f32;
@@ -1380,11 +1379,11 @@ pub fn draw_tree(
         }
         let avg = if count > 0 { total / count as f32 } else { 0.0 };
         if drag_started {
-            println!("DRAG_START avg_parent_dist={:.1} ({} families, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
-                avg, count, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
+            println!("DRAG_START avg_parent_dist={:.1} ({} families, view={:?}, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
+                avg, count, view, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
         } else {
-            println!("DRAG_END   avg_parent_dist={:.1} ({} families, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
-                avg, count, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
+            println!("DRAG_END   avg_parent_dist={:.1} ({} families, view={:?}, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
+                avg, count, view, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
         }
     }
     content_bounds
@@ -1672,6 +1671,18 @@ fn repel_pass<'a>(
             widths[id]
         }
     };
+    let left_offset = |id: &str| -> f32 {
+        own_extent(0, id) / 2.0
+    };
+    let right_offset = |id: &str| -> f32 {
+        let mut r = own_extent(0, id) / 2.0;
+        for partner in data.partners_of(id) {
+            if !visible(&partner.id) && shown_partners.contains(partner.id.as_str()) {
+                r += partner_extent(0, &partner.id) + couple_gap;
+            }
+        }
+        r
+    };
     // Breite des TEILBAUMS je Person: eigener Footprint + alle sichtbaren
     // Nachkommen. Die "breiteste Stelle" bleibt bei Kollisionen stehen,
     // schmalere Gruppen weichen aus.
@@ -1766,18 +1777,18 @@ fn repel_pass<'a>(
                 _ => groups.push(vec![member]),
             }
         }
-        // Ebenenweise verhandeln: [innen → außen] wiederholen, bis stabil.
-        for _ in 0..6 {
+        // Ebenenweise verhandeln: [innen → außen] wiederholen, bis stabil (max 24 Versuche).
+        for _ in 0..24 {
             let mut moved = false;
             // 1) Innen: Karten einer Gruppe (Container) auseinanderdrücken.
             for group in &groups {
-                let mut inner: Vec<(&str, f32, f32)> = group
+                let mut inner: Vec<(&str, f32)> = group
                     .iter()
-                    .map(|(id, footprint)| (*id, spread[*id], *footprint))
+                    .map(|(id, _)| (*id, spread[*id]))
                     .collect();
                 inner.sort_by(|a, b| a.1.total_cmp(&b.1));
                 for window in inner.windows(2) {
-                    let need = (window[0].2 + window[1].2) / 2.0 + gap;
+                    let need = right_offset(window[0].0) + left_offset(window[1].0) + gap;
                     let actual = window[1].1 - window[0].1;
                     if actual < need {
                         // Nur nach rechts schieben: monotone Platzierung,
@@ -1797,11 +1808,11 @@ fn repel_pass<'a>(
                 .map(|group| {
                     let start = group
                         .iter()
-                        .map(|(id, footprint)| spread[*id] - footprint / 2.0)
+                        .map(|(id, _)| spread[*id] - left_offset(id))
                         .fold(f32::MAX, f32::min);
                     let end = group
                         .iter()
-                        .map(|(id, footprint)| spread[*id] + footprint / 2.0)
+                        .map(|(id, _)| spread[*id] + right_offset(id))
                         .fold(f32::MIN, f32::max);
                     // Teilbaum-Breite entscheidet, WER bei Kollision weicht.
                     let branch: f32 = group
@@ -1810,16 +1821,16 @@ fn repel_pass<'a>(
                         .sum();
                     (
                         group.iter().map(|(id, _)| *id).collect(),
-                        (start + end) / 2.0,
-                        end - start,
+                        start,
+                        end,
                         branch,
                     )
                 })
                 .collect();
             spans.sort_by(|a, b| a.1.total_cmp(&b.1));
             for window in spans.windows(2) {
-                let need = (window[0].2 + window[1].2) / 2.0 + gap;
-                let actual = window[1].1 - window[0].1;
+                let need = gap;
+                let actual = window[1].1 - window[0].2; // right_start - left_end
                 if actual < need {
                     let deficit = need - actual;
                     // Die SCHMÄLERE Gruppe (kleinere Teilbaum-Breite) weicht
