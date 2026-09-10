@@ -1064,8 +1064,16 @@ impl eframe::App for MiniGramps {
                 let drag_started = mouse_is_down && !self.drag_mouse_was_down;
                 let drag_ended = !mouse_is_down && self.drag_mouse_was_down;
                 self.drag_mouse_was_down = mouse_is_down;
-                // Umfangreiche Layoutdiagnose bleibt auf Debug-Builds begrenzt.
-                let log_layout = cfg!(debug_assertions) && (self.fit_pending || drag_ended);
+// Umfangreiche Layoutdiagnose: in Debug-Builds immer, in Release über die
+// Umgebungsvariable MINIGRAMPS_LAYOUT_LOG (oder F9). So lassen sich kaputte
+// Layouts auch im Release-Build protokollieren.
+let log_layout_enabled_by_env = {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MINIGRAMPS_LAYOUT_LOG").is_some())
+};
+let log_layout_request = ui.input(|i| i.key_pressed(egui::Key::F9));
+let log_layout = (cfg!(debug_assertions) || log_layout_enabled_by_env)
+    && (self.fit_pending || drag_ended || log_layout_request);
                 // Lang-Touch-Debouncer und aktiven Karten-Drag zurücksetzen,
                 // wenn nichts gedrückt ist. Drag-Ende → Layout live sichern.
                 if !mouse_is_down {

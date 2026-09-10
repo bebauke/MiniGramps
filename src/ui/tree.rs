@@ -1952,6 +1952,75 @@ fn log_layout_diagnostics(
             );
         }
     }
+
+    // Zeilen-Reihenfolge (nach Achse sortiert): zeigt, wie die Karten einer
+    // Generation verteilt sind – Basis für die Analyse „ab 4 Generationen".
+    for (row, ids) in rows.iter().enumerate() {
+        let mut items: Vec<(&str, f32)> = ids
+            .iter()
+            .filter_map(|id| positions.get(*id).map(|p| (*id, axis(p))))
+            .collect();
+        items.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let order = items
+            .iter()
+            .map(|(id, x)| format!("{}@{:.0}", id, x))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("LAYOUT_ROW row={} n={} order=[{}]", row, items.len(), order);
+    }
+
+    // Familien: Abstand zwischen Eltern-Junction und dem Mittel der
+    // Kindergruppe. Große |delta| zeigen, wo die finale Zentrierung die
+    // Gruppe NICHT unter die Eltern ziehen konnte (auseinandergezogenes Layout).
+    for family in &data.families {
+        let children: Vec<(&str, f32)> = family
+            .children
+            .iter()
+            .filter_map(|child| {
+                positions
+                    .get(child.as_str())
+                    .map(|p| (child.as_str(), axis(p)))
+            })
+            .collect();
+        if children.is_empty() {
+            continue;
+        }
+        let parents: Vec<(&str, f32)> = [&family.parent_a, &family.parent_b]
+            .into_iter()
+            .flatten()
+            .filter_map(|parent| {
+                positions
+                    .get(parent.as_str())
+                    .map(|p| (parent.as_str(), axis(p)))
+            })
+            .collect();
+        if parents.is_empty() {
+            continue;
+        }
+        let junction = parents.iter().map(|(_, x)| *x).sum::<f32>() / parents.len() as f32;
+        let child_mean = children.iter().map(|(_, x)| *x).sum::<f32>() / children.len() as f32;
+        let delta = child_mean - junction;
+        if delta.abs() > card_h {
+            let row = children
+                .first()
+                .and_then(|(id, _)| levels.get(*id).copied())
+                .unwrap_or_default();
+            let parents_list = parents
+                .iter()
+                .map(|(id, x)| format!("{}@{:.0}", id, x))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let children_list = children
+                .iter()
+                .map(|(id, x)| format!("{}@{:.0}", id, x))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!(
+                "LAYOUT_FAMILY id={} row={} delta={:.0} junction={:.0} childmean={:.0} parents=[{}] children=[{}]",
+                family.id, row, delta, junction, child_mean, parents_list, children_list,
+            );
+        }
+    }
 }
 
 /// Berechnet die effektiven Versätze der sichtbaren Karten: manuelle Offsets

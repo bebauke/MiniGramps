@@ -95,8 +95,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                         egui::Vec2::new(96.0, 34.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.spacing_mut().button_padding = egui::vec2(5.0, 2.0);
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.spacing_mut().button_padding = egui::vec2(5.0, 1.0);
                             ui.horizontal(|ui| {
                                 let undo_response = ui
                                     .add_enabled_ui(app.undo_action_name().is_some(), |ui| {
@@ -105,7 +105,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ICON_UNDO,
                                             "global-undo",
                                             13.0,
-                                            egui::Vec2::new(30.0, 17.0),
+                                            egui::Vec2::new(30.0, 15.0),
                                         )
                                         .on_hover_text(&undo_tip)
                                     })
@@ -136,7 +136,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ICON_REDO,
                                             "global-redo",
                                             13.0,
-                                            egui::Vec2::new(30.0, 17.0),
+                                            egui::Vec2::new(30.0, 15.0),
                                         )
                                         .on_hover_text(&redo_tip)
                                         .clicked()
@@ -153,8 +153,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_CHEVRON_LEFT,
                                             "nav-back",
-                                            11.0,
-                                            egui::Vec2::new(26.0, 15.0),
+                                            12.0,
+                                            egui::Vec2::new(30.0, 15.0),
                                         )
                                         .on_hover_text(if nav_back_ok {
                                             "Vorherige Referenzperson"
@@ -172,8 +172,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_CHEVRON_RIGHT,
                                             "nav-forward",
-                                            11.0,
-                                            egui::Vec2::new(26.0, 15.0),
+                                            12.0,
+                                            egui::Vec2::new(30.0, 15.0),
                                         )
                                         .on_hover_text(if nav_forward_ok {
                                             "Nächste Referenzperson"
