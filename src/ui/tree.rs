@@ -447,6 +447,25 @@ pub fn draw_tree(
 
     // Startpaketierung je Zeile (zentriert) oder perfektes rekursives Vorfahren-Layout:
     let mut spread: HashMap<&str, f32> = HashMap::new();
+    // Diagnose: Zeilenreihenfolge je Layout-Stufe ausgeben (nur bei log_layout).
+    let dump_stage = |stage: &str, spread: &HashMap<&str, f32>| {
+        if !log_layout {
+            return;
+        }
+        for (row, ids) in rows.iter().enumerate() {
+            let mut items: Vec<(&str, f32)> = ids
+                .iter()
+                .filter_map(|id| spread.get(*id).map(|x| (*id, *x)))
+                .collect();
+            items.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let order = items
+                .iter()
+                .map(|(id, x)| format!("{}@{:.0}", id, x))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("STAGE_{} row={} [{}]", stage, row, order);
+        }
+    };
     if view == TreeView::Ancestors {
         // Berechne das perfekte, überschneidungsfreie Vorfahren-Layout rekursiv!
         spread = layout_ancestors(root, &relations, &levels, &widths, gap);
@@ -506,6 +525,7 @@ pub fn draw_tree(
                 cursor += footprint + gap;
             }
         }
+        dump_stage("PACK", &spread);
         for _ in 0..12 {
             // 1) Partner-Pseudokarten an ihre Person koppeln.
             for (row, ids) in rows.iter().enumerate() {
@@ -608,6 +628,8 @@ pub fn draw_tree(
         }
     }
 
+    dump_stage("NEG", &spread);
+
     // Endgültige Positionen (Layout-Koordinaten → beim Zeichnen skaliert).
     // Zeilen nach der Verhandlung neu zentrieren – das monotone
     // Rechts-Schieben der Abstoßung verschiebt die Zeilen nach rechts.
@@ -651,6 +673,7 @@ pub fn draw_tree(
         }
         peak_eff = peak_eff.max(value.abs());
     }
+    dump_stage("OFF", &spread);
     if view != TreeView::Ancestors {
         // Finaler Abstoßungspass NACH den manuellen Versätzen: nur noch
         // Überlappungen auflösen (MIN_CARD_GAP), damit selbst eng zusammen
@@ -688,6 +711,8 @@ pub fn draw_tree(
             view,
         );
     }
+
+    dump_stage("REPEL", &spread);
 
     // Finale Zentrierung: Gruppen werden minimal (kollisionsfrei) in
     // Richtung ihrer Junction verschoben — Kinder hängen so weit wie möglich
@@ -902,6 +927,7 @@ pub fn draw_tree(
     }
 
     let mut positions: HashMap<&str, (f32, f32)> = HashMap::new();
+    dump_stage("CENTER", &spread);
     for (row, ids) in rows.iter().enumerate() {
         if view == TreeView::Fan {
             for (index, id) in ids.iter().enumerate() {
