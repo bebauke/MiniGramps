@@ -961,9 +961,8 @@ impl eframe::App for MiniGramps {
                 let drag_started = mouse_is_down && !self.drag_mouse_was_down;
                 let drag_ended = !mouse_is_down && self.drag_mouse_was_down;
                 self.drag_mouse_was_down = mouse_is_down;
-                // Beim Laden/Zentrieren und nach einem Drag genau einen
-                // Layout-Diagnoseblock ausgeben, nicht in jedem Frame.
-                let log_layout = self.fit_pending || drag_ended;
+                // Umfangreiche Layoutdiagnose bleibt auf Debug-Builds begrenzt.
+                let log_layout = cfg!(debug_assertions) && (self.fit_pending || drag_ended);
                 // Lang-Touch-Debouncer und aktiven Karten-Drag zurücksetzen,
                 // wenn nichts gedrückt ist. Drag-Ende → Layout live sichern.
                 if !mouse_is_down {

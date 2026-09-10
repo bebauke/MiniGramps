@@ -30,6 +30,8 @@ use crate::media::{initials, round_avatar_texture_cached};
 use crate::model::{Person, TreeData};
 use crate::ui::CardLayout;
 
+const CARD_DETAIL_MIN_ZOOM: f32 = 0.4;
+
 /// Für einen Layoutdurchlauf vorbereitete Beziehungen. Das vermeidet, dass
 /// `children_of`/`parents_of`/`partners_of` in jedem Kollisionspass erneut
 /// alle Familien und Personen linear durchsuchen.
@@ -991,6 +993,10 @@ pub fn draw_tree(
             .get(id)
             .map(|(x, y)| center + Vec2::new(*x * zoom, *y * zoom))
     };
+    let viewport = painter.clip_rect().expand(32.0);
+    let line_on_screen = |a: Pos2, b: Pos2| {
+        viewport.intersects(Rect::from_two_pos(a, b).expand(4.0))
+    };
     if view == TreeView::Descendants {
         for person in &data.people {
             if !visible(&person.id) {
@@ -1021,13 +1027,15 @@ pub fn draw_tree(
                 // Paarrahmen: dezenter Hintergrund (10 % Schwarz) + goldene
                 // Umrandung — hebt sich klar vom Geschwister-Container ab.
                 let outer = frame.expand(4.0 * zoom);
-                painter.rect_filled(outer, 12.0 * zoom, Color32::from_black_alpha(25));
-                painter.rect_stroke(
-                    outer,
-                    12.0 * zoom,
-                    Stroke::new(1.5, Color32::from_rgb(201, 170, 96)),
-                    egui::StrokeKind::Inside,
-                );
+                if viewport.intersects(outer) {
+                    painter.rect_filled(outer, 12.0 * zoom, Color32::from_black_alpha(25));
+                    painter.rect_stroke(
+                        outer,
+                        12.0 * zoom,
+                        Stroke::new(1.5, Color32::from_rgb(201, 170, 96)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
                 // Rahmen ziehen (Klick+Drag, ohne Shift): der ganze Zweig
                 // folgt — Person + sichtbare Partner erhalten den Versatz,
                 // die Kinder erben ihn über die Junction-Vererbung.
@@ -1176,13 +1184,15 @@ pub fn draw_tree(
                     bounds = bounds.union(*block);
                 }
                 let container_rect = bounds.expand(sibling_container_padding * zoom);
-                painter.rect_filled(container_rect, 10.0 * zoom, Color32::from_black_alpha(25));
-                painter.rect_stroke(
-                    container_rect,
-                    10.0 * zoom,
-                    Stroke::new(1.0, Color32::from_rgb(70, 105, 110)),
-                    egui::StrokeKind::Outside,
-                );
+                if viewport.intersects(container_rect) {
+                    painter.rect_filled(container_rect, 10.0 * zoom, Color32::from_black_alpha(25));
+                    painter.rect_stroke(
+                        container_rect,
+                        10.0 * zoom,
+                        Stroke::new(1.0, Color32::from_rgb(70, 105, 110)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
                 container = Some(container_rect);
             }
             let target = match &container {
@@ -1270,16 +1280,23 @@ pub fn draw_tree(
                     );
                 }
             }
-            painter.line_segment(
-                [origin, target],
-                Stroke::new(2.0, Color32::from_rgb(74, 111, 119)),
-            );
+            if line_on_screen(origin, target) {
+                painter.line_segment(
+                    [origin, target],
+                    Stroke::new(2.0, Color32::from_rgb(74, 111, 119)),
+                );
+            }
             continue;
         }
         // Vorfahren-/Fächer-Sicht: Paarlinie zwischen sichtbaren Eltern,
         // Linien vom Junction zu jedem Kind.
         if let (Some(a), Some(b)) = (pa, pb) {
-            painter.line_segment([a, b], Stroke::new(2.0, Color32::from_rgb(120, 170, 160)));
+            if line_on_screen(a, b) {
+                painter.line_segment(
+                    [a, b],
+                    Stroke::new(2.0, Color32::from_rgb(120, 170, 160)),
+                );
+            }
         }
         let junction = match (pa, pb) {
             (Some(a), Some(b)) => {
@@ -1305,10 +1322,12 @@ pub fn draw_tree(
         };
         for child in &family.children {
             if let Some(c) = pos(child) {
-                painter.line_segment(
-                    [junction, c],
-                    Stroke::new(2.0, Color32::from_rgb(74, 111, 119)),
-                );
+                if line_on_screen(junction, c) {
+                    painter.line_segment(
+                        [junction, c],
+                        Stroke::new(2.0, Color32::from_rgb(74, 111, 119)),
+                    );
+                }
             }
         }
     }
@@ -1325,6 +1344,7 @@ pub fn draw_tree(
             _ => card_w(*level, &person.id),
         };
         let card = Rect::from_center_size(at, Vec2::new(width, card_h) * zoom);
+        let card_on_screen = viewport.intersects(card);
         let card_clicked = draw_person_card(
             painter,
             person,
@@ -1365,7 +1385,11 @@ pub fn draw_tree(
         let pointer_pos = painter.ctx().input(|i| i.pointer.interact_pos());
         let card_hovered = pointer_pos
             .is_some_and(|q| card.contains(q) || badge_rect.contains(q));
-        if view != TreeView::Fan && card_hovered && (has_more || expanded.contains(&person.id)) {
+        if card_on_screen
+            && view != TreeView::Fan
+            && card_hovered
+            && (has_more || expanded.contains(&person.id))
+        {
             // Nachfahrensicht: Badge in der rechten oberen Ecke. Vorfahren-
             // sicht: der Ausklapp-Pfeil liegt ÜBER der Box (bzw. links im
             // horizontalen Baum), weil die Vorfahren dort erscheinen.
@@ -1408,7 +1432,7 @@ pub fn draw_tree(
         }
         // Aufwärtspfeil über der Referenzperson (Nachfahrensicht): springt
         // zum Vater – Fallback Mutter – und macht ihn zur Referenz.
-        if view == TreeView::Descendants && person.id == root {
+        if card_on_screen && view == TreeView::Descendants && person.id == root {
             let parents = relations.parents_of(&person.id);
             let target = parents
                 .iter()
@@ -1430,13 +1454,14 @@ pub fn draw_tree(
             // Langer Touch (≥ 0,6 s) setzt die Referenzperson – NUR bei
             // echtem Touch (`any_touches`), nicht bei gedrückter Maustaste;
             // pro Drücken nur einmal (`long_press_used`, Reset in `ui`).
-            let long_pressed = painter.ctx().input(|i| {
-                i.any_touches()
+            let long_pressed = card_on_screen
+                && painter.ctx().input(|i| {
+                    i.any_touches()
                     && i.pointer.press_origin().is_some_and(|q| card.contains(q))
                     && i.pointer
                         .press_start_time()
                         .is_some_and(|t0| i.time - t0 >= 0.6)
-            });
+                });
             if long_pressed && !*long_press_used {
                 *action = Some(TreeAction::Reference(person.id.clone()));
                 *long_press_used = true;
@@ -1448,13 +1473,16 @@ pub fn draw_tree(
         // Einmal gestartet, läuft er bis zum Loslassen – auch wenn die Karte
         // den ursprünglichen Press-Punkt längst verlassen hat.
         let (manual_delta, drag_start) = painter.ctx().input(|i| {
+            let is_active = card_drag
+                .as_ref()
+                .is_some_and(|(id, _)| id == person.id.as_str());
+            if !card_on_screen && !is_active {
+                return (0.0, false);
+            }
             if !(i.pointer.primary_down() && i.modifiers.shift) {
                 return (0.0, false);
             }
             let pressed_here = i.pointer.press_origin().is_some_and(|q| card.contains(q));
-            let is_active = card_drag
-                .as_ref()
-                .is_some_and(|(id, _)| id == person.id.as_str());
             if !(pressed_here || is_active) {
                 return (0.0, false);
             }
@@ -1514,7 +1542,7 @@ pub fn draw_tree(
                 for id in &move_set {
                     *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
                 }
-                if view == TreeView::Ancestors {
+                if cfg!(debug_assertions) && view == TreeView::Ancestors {
                     let offsets: Vec<_> = move_set.iter()
                         .map(|id| format!("{}:{:.1}", id, manual_offsets.get(id.as_str()).copied().unwrap_or(0.0)))
                         .collect();
@@ -1548,12 +1576,15 @@ pub fn draw_tree(
                 )
             };
             if view != TreeView::Descendants {
-                painter.line_segment(
-                    [line_a, line_b],
-                    Stroke::new(2.0, Color32::from_rgb(120, 170, 160)),
-                );
+                if line_on_screen(line_a, line_b) {
+                    painter.line_segment(
+                        [line_a, line_b],
+                        Stroke::new(2.0, Color32::from_rgb(120, 170, 160)),
+                    );
+                }
             }
             let partner_card = Rect::from_center_size(pat, Vec2::new(partner_width, card_h) * zoom);
+            let partner_on_screen = viewport.intersects(partner_card);
             let partner_clicked = draw_person_card(
                 painter,
                 partner,
@@ -1566,6 +1597,12 @@ pub fn draw_tree(
                 media_base,
                 photo_cache,
             );
+            let partner_active = card_drag
+                .as_ref()
+                .is_some_and(|(id, _)| id == partner.id.as_str());
+            if !partner_on_screen && !partner_active {
+                continue;
+            }
             let partner_long = painter.ctx().input(|i| {
                 i.any_touches()
                     && i.pointer
@@ -1585,7 +1622,7 @@ pub fn draw_tree(
             }
             // Aufwärtspfeil über dem Ehepartner der Referenz: dessen Vater
             // (Fallback Mutter) als Referenz.
-            if view == TreeView::Descendants && person.id == root {
+            if partner_on_screen && view == TreeView::Descendants && person.id == root {
                 let parents = relations.parents_of(&partner.id);
                 let target = parents
                     .iter()
@@ -1658,7 +1695,8 @@ pub fn draw_tree(
             }
         }
     }
-    if (drag_started || drag_ended)
+    if cfg!(debug_assertions)
+        && (drag_started || drag_ended)
         && orientation == TreeOrientation::Vertical
     {
         let mut total = 0.0f32;
@@ -2503,6 +2541,9 @@ fn draw_person_card(
 ) -> bool {
     let size = Vec2::new(width, card_layout.height()) * zoom;
     let card = Rect::from_center_size(at, size);
+    if !painter.clip_rect().expand(32.0).intersects(card) {
+        return false;
+    }
     let fill = match (person.gender, selected_now) {
         (_, true) => Color32::from_rgb(43, 121, 113),
         (crate::model::Gender::Female, _) => Color32::from_rgb(112, 66, 72),
@@ -2530,6 +2571,11 @@ fn draw_person_card(
         ),
         egui::StrokeKind::Outside,
     );
+    if zoom < CARD_DETAIL_MIN_ZOOM {
+        return painter.ctx().input(|i| {
+            i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|q| card.contains(q))
+        });
+    }
     let (avatar_size, avatar_center, name_at, name_align, birth_at, birth_align) =
         match card_layout {
             CardLayout::Compact => (
