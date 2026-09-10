@@ -12,8 +12,8 @@ use eframe::egui::{self, Color32};
 use crate::import::discover_projects;
 use crate::ui::{
     ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_CLOSE, ICON_MAXIMIZE, ICON_MINIMIZE, ICON_OPEN,
-    ICON_REDO, ICON_SAVE, ICON_SETTINGS, ICON_UNDO, MiniGramps, icon_button_big, icon_nav_button,
-    icon_only_button, panels::palette, whitened_logo,
+    ICON_REDO, ICON_SAVE, ICON_SETTINGS, ICON_UNDO, MiniGramps, icon_button_big, icon_only_button,
+    icon_row_button, panels::palette, whitened_logo,
 };
 
 pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -79,74 +79,113 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                         .undo_action_name()
                         .map(|name| format!("Rückgängig: {name} (Strg+Z)"))
                         .unwrap_or_else(|| "Nichts rückgängig zu machen".into());
-                    let undo_response = ui
-                        .add_enabled_ui(app.undo_action_name().is_some(), |ui| {
-                            icon_only_button(ui, ICON_UNDO, "global-undo")
-                                .on_hover_text(undo_tip)
-                        })
-                        .inner;
-                    if undo_response.clicked() {
-                        app.undo();
-                    }
-                    egui::Popup::context_menu(&undo_response).show(|ui| {
-                        ui.label(egui::RichText::new("Rückgängig-Historie").strong());
-                        ui.separator();
-                        for (index, entry) in app.undo_stack.iter().rev().take(30).enumerate() {
-                            ui.label(format!("{}. {}", index + 1, entry.name));
-                        }
-                        if app.undo_stack.len() > 30 {
-                            ui.label(format!("… und {} weitere", app.undo_stack.len() - 30));
-                        }
-                    });
                     let redo_tip = app
                         .redo_action_name()
                         .map(|name| format!("Wiederholen: {name} (Strg+Y)"))
                         .unwrap_or_else(|| "Nichts zu wiederholen".into());
-                    let redo_clicked = ui
-                        .add_enabled_ui(app.redo_action_name().is_some(), |ui| {
-                            icon_only_button(ui, ICON_REDO, "global-redo")
-                                .on_hover_text(redo_tip)
-                                .clicked()
-                        })
-                        .inner;
-                    if redo_clicked {
-                        app.redo();
-                    }
-                    // Zurück-/Vor-Pfeile für die Referenzperson-Historie:
-                    // in derselben Zeile, aber flacher und unterhalb des
-                    // Undo/Redo-Niveaus (unten ausgerichtet).
                     let nav_back_ok = app.can_navigate_back();
                     let nav_forward_ok = app.can_navigate_forward();
+                    // Undo/Redo und Referenz-Pfeile als zweizeilige
+                    // Befehlsgruppe: Zeile 1 = Rückgängig/Wiederholen,
+                    // Zeile 2 = Zurück/Vor direkt darunter. Höhe entspricht
+                    // fast den großen Buttons, sodass die Oberkante der
+                    // Undo/Redo-Zeile und die Unterkante der Pfeil-Zeile an
+                    // Speichern/Öffnen ausgerichtet (kolinear) sind.
                     ui.allocate_ui_with_layout(
-                        egui::Vec2::new(78.0, 40.0),
-                        egui::Layout::left_to_right(egui::Align::BOTTOM),
+                        egui::Vec2::new(96.0, 34.0),
+                        egui::Layout::top_down(egui::Align::Center),
                         |ui| {
-                            let back_response = ui
-                                .add_enabled_ui(nav_back_ok, |ui| {
-                                    icon_nav_button(ui, ICON_CHEVRON_LEFT, "nav-back")
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.spacing_mut().button_padding = egui::vec2(5.0, 2.0);
+                            ui.horizontal(|ui| {
+                                let undo_response = ui
+                                    .add_enabled_ui(app.undo_action_name().is_some(), |ui| {
+                                        icon_row_button(
+                                            ui,
+                                            ICON_UNDO,
+                                            "global-undo",
+                                            13.0,
+                                            egui::Vec2::new(30.0, 17.0),
+                                        )
+                                        .on_hover_text(&undo_tip)
+                                    })
+                                    .inner;
+                                if undo_response.clicked() {
+                                    app.undo();
+                                }
+                                egui::Popup::context_menu(&undo_response).show(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Rückgängig-Historie").strong(),
+                                    );
+                                    ui.separator();
+                                    for (index, entry) in
+                                        app.undo_stack.iter().rev().take(30).enumerate()
+                                    {
+                                        ui.label(format!("{}. {}", index + 1, entry.name));
+                                    }
+                                    if app.undo_stack.len() > 30 {
+                                        ui.label(
+                                            format!("… und {} weitere", app.undo_stack.len() - 30),
+                                        );
+                                    }
+                                });
+                                let redo_clicked = ui
+                                    .add_enabled_ui(app.redo_action_name().is_some(), |ui| {
+                                        icon_row_button(
+                                            ui,
+                                            ICON_REDO,
+                                            "global-redo",
+                                            13.0,
+                                            egui::Vec2::new(30.0, 17.0),
+                                        )
+                                        .on_hover_text(&redo_tip)
+                                        .clicked()
+                                    })
+                                    .inner;
+                                if redo_clicked {
+                                    app.redo();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                let back_response = ui
+                                    .add_enabled_ui(nav_back_ok, |ui| {
+                                        icon_row_button(
+                                            ui,
+                                            ICON_CHEVRON_LEFT,
+                                            "nav-back",
+                                            11.0,
+                                            egui::Vec2::new(26.0, 15.0),
+                                        )
                                         .on_hover_text(if nav_back_ok {
                                             "Vorherige Referenzperson"
                                         } else {
                                             "Keine vorherige Referenz"
                                         })
-                                })
-                                .inner;
-                            if back_response.clicked() {
-                                app.navigate_back();
-                            }
-                            let forward_response = ui
-                                .add_enabled_ui(nav_forward_ok, |ui| {
-                                    icon_nav_button(ui, ICON_CHEVRON_RIGHT, "nav-forward")
+                                    })
+                                    .inner;
+                                if back_response.clicked() {
+                                    app.navigate_back();
+                                }
+                                let forward_response = ui
+                                    .add_enabled_ui(nav_forward_ok, |ui| {
+                                        icon_row_button(
+                                            ui,
+                                            ICON_CHEVRON_RIGHT,
+                                            "nav-forward",
+                                            11.0,
+                                            egui::Vec2::new(26.0, 15.0),
+                                        )
                                         .on_hover_text(if nav_forward_ok {
                                             "Nächste Referenzperson"
                                         } else {
                                             "Keine nächste Referenz"
                                         })
-                                })
-                                .inner;
-                            if forward_response.clicked() {
-                                app.navigate_forward();
-                            }
+                                    })
+                                    .inner;
+                                if forward_response.clicked() {
+                                    app.navigate_forward();
+                                }
+                            });
                         },
                     );
                     // Projektname hinter dem Speichern-Button (etwas größer

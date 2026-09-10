@@ -1313,17 +1313,21 @@ pub(crate) fn icon_only_button(
     ui.add(egui::Button::image(image))
 }
 
-/// Kleiner Pfeil-Button für die Referenz-Navigation: flacher als die großen
-/// Toolbar-Icons und gedacht für die Zeile unterhalb von Undo/Redo.
-pub(crate) fn icon_nav_button(
+/// Kompakter Icon-Button für die zweizeilige Befehlsgruppe in der
+/// Titelleiste (Zeile 1: Undo/Redo, Zeile 2: Zurück/Vor). Über `icon_size`
+/// und `min_size` fein steuerbar, damit die Gruppengrenzen auf die
+/// großen Buttons (Speichern/Öffnen) ausgerichtet bleiben.
+pub(crate) fn icon_row_button(
     ui: &mut egui::Ui,
     bytes: &'static [u8],
     id: &'static str,
+    icon_size: f32,
+    min_size: egui::Vec2,
 ) -> egui::Response {
     let image = egui::Image::from_bytes(format!("bytes://{id}.svg"), whitened_svg(bytes))
-        .fit_to_exact_size(Vec2::splat(12.0))
+        .fit_to_exact_size(Vec2::splat(icon_size))
         .tint(ui.visuals().text_color());
-    ui.add(egui::Button::image(image).min_size(Vec2::new(26.0, 16.0)))
+    ui.add(egui::Button::image(image).min_size(min_size))
 }
 
 pub(crate) fn icon_toggle_button(

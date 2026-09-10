@@ -12,12 +12,12 @@
 ## Danach
 
 - [ ] Baumlayout von der Darstellung trennen und per Revisionsschlüssel cachen
-- [ ] Partner-Tausch: Zieh-Gestus einmalig auslösen (Latch), kein Hin-und-her-Flickern
+- [x] Partner-Tausch: Zieh-Gestus einmalig auslösen (Latch), kein Hin-und-her-Flickern
 - [x] Zentrale Frame-Kopien von `expanded` und `manual_offsets` entfernen
-- [x] Baumkarten: erste beiden Vornamen plus Nachname; im großen Foto klein drunter
-- [x] Zoom-Zentrum am Mauszeiger und konfigurierbarer Baum-Abstand (Default doppelt)
-- [x] Profilbild füllt die Karte bei ausgeblendeten Inhaltsdetails (kleiner Zoom)
-- [x] Zurück/Vor-Navigation der Referenzperson in der Titelleiste (kleiner als Undo/Redo)
+- [x] Baumkarten: erste beiden Vornamen plus Nachname; im großen Foto Nachname gleich groß drunter
+- [x] Zoom-Zentrum am Mauszeiger; Baum-Abstand als Default (Slider 30–150) statt Mindestabstand
+- [x] Profilbild bei ausgeblendeten Details in den Rahmen eingepasst (nicht gestreckt); ohne Foto Initialen
+- [x] Zurück/Vor-Navigation als 2×2-Cluster unter Undo/Redo, kolinear zu Speichern/Öffnen
 - [ ] Fotos vollständig asynchron dekodieren und GPU-Uploads pro Frame begrenzen
 - [ ] Undo-Historie von vollständigen `TreeData`-Kopien auf Änderungsbefehle umstellen
 - [ ] Einstellungen dauerhaft speichern

@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 
-use crate::media::{cover_uv, initials, photo_preview_texture, round_avatar_texture_cached};
+use crate::media::{initials, photo_preview_texture, round_avatar_texture_cached};
 use crate::model::{Person, TreeData};
 use crate::ui::CardLayout;
 
@@ -861,12 +861,12 @@ pub fn draw_tree(
                     if !*manual {
                         let min_d = prev_end
                             .map(|(prev, padding)| {
-                                prev + gap + padding + container_padding - start
+                                prev + padding + container_padding - start
                             })
                             .unwrap_or(f32::NEG_INFINITY);
                         let max_d = next
                             .map(|(next, padding)| {
-                                next - gap - container_padding - padding - end
+                                next - container_padding - padding - end
                             })
                             .unwrap_or(f32::INFINITY);
                         if min_d <= max_d {
@@ -2082,7 +2082,7 @@ fn block_ancestor_drag<'a>(
     shown_partners: &HashSet<&'a str>,
     drag_root: &'a str,
     manual_offsets: &mut HashMap<String, f32>,
-    gap: f32,
+    _gap: f32,
     view: TreeView,
 ) {
     let visible = |id: &str| levels.contains_key(id);
@@ -2140,19 +2140,21 @@ fn block_ancestor_drag<'a>(
                 // entgegen): nicht als blockende Karte behandeln, aber mitziehen.
                 continue;
             }
-            // Linker Nachbar fest? Dann gilt: x - w/2 >= nbx + nbw/2 + gap.
+            // Linker Nachbar fest? Dann gilt: x - w/2 >= nbx + nbw/2
+            // (nur Überlappung verhindern; der Baum-Abstand ist ein Default,
+            // kein Mindestzwang).
             if i > 0 {
                 let (nb, nbx, nbw) = cards[i - 1];
                 if !scale.contains_key(nb) {
-                    let cand = (nbx + nbw / 2.0 + gap + w / 2.0 - x) / s + current;
+                    let cand = (nbx + nbw / 2.0 + w / 2.0 - x) / s + current;
                     lo = lo.max(cand);
                 }
             }
-            // Rechter Nachbar fest? Dann gilt: x + w/2 <= nbx - nbw/2 - gap.
+            // Rechter Nachbar fest? Dann gilt: x + w/2 <= nbx - nbw/2.
             if i + 1 < cards.len() {
                 let (nb, nbx, nbw) = cards[i + 1];
                 if !scale.contains_key(nb) {
-                    let cand = (nbx - nbw / 2.0 - gap - w / 2.0 - x) / s + current;
+                    let cand = (nbx - nbw / 2.0 - w / 2.0 - x) / s + current;
                     hi = hi.min(cand);
                 }
             }
@@ -2383,7 +2385,10 @@ fn repel_pass<'a>(
                     key_a.cmp(&key_b)
                 });
                 for window in inner.windows(2) {
-                    let need = right_offsets[window[0].0] + left_offsets[window[1].0] + gap;
+                    // Nur Überlappung verhindern (Tuch bei Lücken): der
+                    // konfigurierte Baum-Abstand ist ein DEFAULT, kein
+                    // Mindestabstand – er wirkt über die initiale Platzierung.
+                    let need = right_offsets[window[0].0] + left_offsets[window[1].0];
                     let actual = window[1].1 - window[0].1;
                     if actual < need {
                         // Nur nach rechts schieben: monotone Platzierung,
@@ -2424,17 +2429,17 @@ fn repel_pass<'a>(
                 .collect();
             spans.sort_by(|a, b| a.1.total_cmp(&b.1));
             for window in spans.windows(2) {
-                let need = gap
-                    + if window[0].0.len() > 1 {
-                        sibling_container_padding
-                    } else {
-                        0.0
-                    }
-                    + if window[1].0.len() > 1 {
-                        sibling_container_padding
-                    } else {
-                        0.0
-                    };
+                // Container trennen nur der gezeichnete Innen-Rand:
+                // Baum-Abstand ist Default, kein Zwangs-Mindestabstand.
+                let need = if window[0].0.len() > 1 {
+                    sibling_container_padding
+                } else {
+                    0.0
+                } + if window[1].0.len() > 1 {
+                    sibling_container_padding
+                } else {
+                    0.0
+                };
                 let actual = window[1].1 - window[0].2; // right_start - left_end
                 if actual < need {
                     let deficit = need - actual;
@@ -2619,17 +2624,31 @@ fn draw_person_card(
         egui::StrokeKind::Outside,
     );
     if zoom < CARD_DETAIL_MIN_ZOOM {
-        // Statt einer leeren Farbfläche das Profilbild als Vollbild-Abdeckung
-        // zeigen (Cover-Beschnitt wie im Profil). Ohne Foto bleibt die
-        // Farbfläche; der Rahmen wird über dem Foto erneut gezeichnet.
+        // Statt leerer Farbfläche das Profilbild vollständig in den Rahmen
+        // EINPASSEN (kein Strecken, kein Zuschneiden; frei bleibende Ränder
+        // zeigen die Kartenfarbe). Ohne Foto stehen die Initialen in der
+        // Kartenmitte.
         if let Some(texture) =
             photo_preview_texture(painter.ctx(), person, photo_cache, media_base)
         {
             let tv = texture.size_vec2();
-            let uv = cover_uv(tv.x / tv.y.max(1.0), person.photo_crop.as_ref());
+            let tex_aspect = tv.x / tv.y.max(1.0);
+            let card_aspect = card.width() / card.height().max(1.0);
+            let image_rect = if tex_aspect > card_aspect {
+                let w = card.width();
+                Rect::from_center_size(card.center(), Vec2::new(w, w / tex_aspect))
+            } else {
+                let h = card.height();
+                Rect::from_center_size(card.center(), Vec2::new(h * tex_aspect, h))
+            };
             painter
                 .with_clip_rect(card)
-                .image(texture.id(), card, uv, Color32::WHITE);
+                .image(
+                    texture.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
             painter.rect(
                 card,
                 10. * zoom,
@@ -2645,6 +2664,14 @@ fn draw_person_card(
                     stroke_color,
                 ),
                 egui::StrokeKind::Outside,
+            );
+        } else {
+            painter.text(
+                card.center(),
+                Align2::CENTER_CENTER,
+                initials(person),
+                FontId::proportional((card.height() * 0.4).max(6.0)),
+                Color32::WHITE,
             );
         }
         return painter.ctx().input(|i| {
@@ -2729,7 +2756,7 @@ fn draw_person_card(
                     name2_at,
                     Align2::CENTER_CENTER,
                     person.family_name.clone(),
-                    FontId::proportional(10.5 * zoom),
+                    FontId::proportional(13. * zoom),
                     Color32::from_rgb(214, 218, 218),
                 );
             }
@@ -2838,8 +2865,10 @@ fn layout_ancestors<'a>(
                 }
 
                 if let (Some(f_right), Some(m_left)) = (max_f_right, min_m_left) {
-                    // Der benötigte Abstand auf dieser Ebene: rechter Rand Vater + Mindestabstand - linker Rand Mutter
-                    let needed_sep = f_right - m_left + gap;
+                    // Benötigter Abstand: rechter Rand Vater - linker Rand Mutter;
+                    // der konfigurierte Abstand ist ein DEFAULT (greift nur über
+                    // `default_sep`), bei Platzmangel berühren sich die Teilbäume.
+                    let needed_sep = f_right - m_left;
                     if needed_sep > min_distance {
                         min_distance = needed_sep;
                     }

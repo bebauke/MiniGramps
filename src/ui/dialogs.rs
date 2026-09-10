@@ -162,13 +162,13 @@ pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.label("Baum-Abstand");
                 ui.add(
-                    egui::Slider::new(&mut app.layout_gap, 16.0..=96.0)
-                        .step_by(8.0)
+                    egui::Slider::new(&mut app.layout_gap, 30.0..=150.0)
+                        .step_by(10.0)
                         .show_value(true),
                 )
                 .on_hover_text(
-                    "Abstand zwischen den Karten im automatischen Layout \
-                     (Standard: doppelter Grundabstand).",
+                    "Default-Abstand zwischen den Karten im automatischen Layout \
+                     (bei Platzmangel rücken Karten näher zusammen).",
                 );
             });
             if app.layout_gap != old_gap {
