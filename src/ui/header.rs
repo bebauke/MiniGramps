@@ -86,14 +86,12 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                         .unwrap_or_else(|| "Nichts zu wiederholen".into());
                     let nav_back_ok = app.can_navigate_back();
                     let nav_forward_ok = app.can_navigate_forward();
-                    // Undo/Redo und Referenz-Pfeile als zweizeilige
-                    // Befehlsgruppe: Zeile 1 = Rückgängig/Wiederholen,
-                    // Zeile 2 = Zurück/Vor direkt darunter. Höhe entspricht
-                    // fast den großen Buttons, sodass die Oberkante der
-                    // Undo/Redo-Zeile und die Unterkante der Pfeil-Zeile an
-                    // Speichern/Öffnen ausgerichtet (kolinear) sind.
+                    // Undo/Redo und Referenz-Pfeile als kompakte zweizeilige
+                    // Befehlsgruppe (Zeile 1 = Rückgängig/Wiederholen, Zeile 2
+                    // = Zurück/Vor direkt darunter), vertikal zentriert zu den
+                    // großen Buttons.
                     ui.allocate_ui_with_layout(
-                        egui::Vec2::new(96.0, 34.0),
+                        egui::Vec2::new(96.0, 22.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
@@ -105,8 +103,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_UNDO,
                                             "global-undo",
-                                            12.0,
-                                            egui::Vec2::new(30.0, 12.0),
+                                            10.0,
+                                            egui::Vec2::new(30.0, 10.0),
                                         )
                                         .on_hover_text(&undo_tip)
                                     })
@@ -136,8 +134,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_REDO,
                                             "global-redo",
-                                            12.0,
-                                            egui::Vec2::new(30.0, 12.0),
+                                            10.0,
+                                            egui::Vec2::new(30.0, 10.0),
                                         )
                                         .on_hover_text(&redo_tip)
                                         .clicked()
@@ -154,8 +152,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_CHEVRON_LEFT,
                                             "nav-back",
-                                            11.0,
-                                            egui::Vec2::new(30.0, 12.0),
+                                            10.0,
+                                            egui::Vec2::new(30.0, 10.0),
                                         )
                                         .on_hover_text(if nav_back_ok {
                                             "Vorherige Referenzperson"
@@ -173,8 +171,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_CHEVRON_RIGHT,
                                             "nav-forward",
-                                            11.0,
-                                            egui::Vec2::new(30.0, 12.0),
+                                            10.0,
+                                            egui::Vec2::new(30.0, 10.0),
                                         )
                                         .on_hover_text(if nav_forward_ok {
                                             "Nächste Referenzperson"
