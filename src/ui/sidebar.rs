@@ -13,6 +13,7 @@
 
 use eframe::egui::{self, Color32, Sense, Stroke, Vec2};
 use rfd::FileDialog;
+use std::collections::HashMap;
 
 use crate::media::{
     avatar_ui_live, avatar_ui_preview, clear_person_photo_cache, gallery_thumbnail_ui,
@@ -51,6 +52,7 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                         .clicked()
                     {
                         app.group_by_count = !app.group_by_count;
+                        app.people_groups_dirty = true;
                     }
                 });
             });
@@ -58,34 +60,39 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // Eigene Kopien (id/name/gender), damit im Closure auch
-                    // `app.set_reference` aufgerufen werden kann.
-                    type PersonRow = (String, Gender, String);
-                    let mut groups: Vec<(String, Vec<PersonRow>)> = Vec::new();
-                    for p in &app.data.people {
-                        let surname = if p.family_name.is_empty() {
-                            p.display_name()
-                        } else {
-                            p.family_name.clone()
-                        }
-                        .to_lowercase();
-                        match groups.iter_mut().find(|(name, _)| *name == surname) {
-                            Some((_, members)) => {
-                                members.push((p.id.clone(), p.gender, p.display_name()))
+                    if app.people_groups_dirty {
+                        let mut grouped: HashMap<String, Vec<(String, Gender, String)>> =
+                            HashMap::new();
+                        for person in &app.data.people {
+                            let surname = if person.family_name.is_empty() {
+                                person.display_name()
+                            } else {
+                                person.family_name.clone()
                             }
-                            None => groups
-                                .push((surname, vec![(p.id.clone(), p.gender, p.display_name())])),
+                            .to_lowercase();
+                            grouped.entry(surname).or_default().push((
+                                person.id.clone(),
+                                person.gender,
+                                person.display_name(),
+                            ));
                         }
+                        let mut groups: Vec<_> = grouped.into_iter().collect();
+                        for (_, members) in &mut groups {
+                            members.sort_by_key(|(_, _, name)| name.to_lowercase());
+                        }
+                        if app.group_by_count {
+                            groups.sort_by(|(a, members_a), (b, members_b)| {
+                                members_b.len().cmp(&members_a.len()).then_with(|| a.cmp(b))
+                            });
+                        } else {
+                            groups.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        }
+                        app.people_groups = groups;
+                        app.people_groups_dirty = false;
                     }
-                    if app.group_by_count {
-                        groups.sort_by(|(a, members_a), (b, members_b)| {
-                            members_b.len().cmp(&members_a.len()).then_with(|| a.cmp(b))
-                        });
-                    } else {
-                        groups.sort_by(|(a, _), (b, _)| a.cmp(b));
-                    }
-                    for (surname, members) in &mut groups {
-                        members.sort_by_key(|(_, _, name)| name.to_lowercase());
+                    let selected = app.selected.as_deref();
+                    let mut requested_selection = None;
+                    for (surname, members) in &app.people_groups {
                         let mut chars = surname.chars();
                         let display = match chars.next() {
                             Some(first) => {
@@ -99,7 +106,7 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                             // nicht stauchen.
                             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                             for (id, gender, name) in members.iter() {
-                                let active = app.selected.as_deref() == Some(id.as_str());
+                                let active = selected == Some(id.as_str());
                                 if ui
                                     .selectable_label(
                                         active,
@@ -109,10 +116,14 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                                 {
                                     // Ansicht öffnen; Shift/Dreifachklick
                                     // setzt direkt die Referenzperson.
-                                    app.request_select(id, picker::wants_reference(ui));
+                                    requested_selection =
+                                        Some((id.clone(), picker::wants_reference(ui)));
                                 }
                             }
                         });
+                    }
+                    if let Some((id, set_reference)) = requested_selection {
+                        app.request_select(&id, set_reference);
                     }
                 });
             ui.separator();

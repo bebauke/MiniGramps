@@ -5,7 +5,7 @@
 - [x] Beziehungsindex pro Layoutdurchlauf statt wiederholter linearer Familien-/Personensuche
 - [x] Kartenmaße nur für sichtbare Personen und sichtbare Partner berechnen
 - [x] Viewport-Culling und vereinfachte Karten bei kleinem Zoom
-- [ ] Personenliste nur bei Daten-/Sortieränderungen neu gruppieren
+- [x] Personenliste nur bei Daten-/Sortieränderungen neu gruppieren
 - [x] Detaillierte Layoutdiagnose im Release-Build deaktivieren oder schaltbar machen
 
 ## Danach

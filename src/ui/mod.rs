@@ -152,6 +152,10 @@ pub struct MiniGramps {
     pub show_export: bool,
     /// Sortierung der Personenliste: nach Anzahl (true) oder Alphabet.
     pub group_by_count: bool,
+    /// Vorbereitete linke Personenliste; wird nur nach Daten- oder
+    /// Sortieränderungen neu gruppiert und sortiert.
+    pub people_groups: Vec<(String, Vec<(String, Gender, String)>)>,
+    pub people_groups_dirty: bool,
     /// Textur-Cache (`media::photo_texture`), Schlüssel = `Person::id`
     /// bzw. Galerie-Pseudo-IDs `gallery-<id>-<index>`.
     pub photo_cache: HashMap<String, TextureHandle>,
@@ -247,6 +251,8 @@ impl MiniGramps {
             project_name_before_edit: None,
             show_export: false,
             group_by_count: true,
+            people_groups: Vec::new(),
+            people_groups_dirty: true,
             photo_cache: HashMap::new(),
             tree_view: TreeView::Descendants,
             selected_project: None,
@@ -376,6 +382,7 @@ impl MiniGramps {
                     path.display()
                 ));
                 self.data = data;
+                self.people_groups_dirty = true;
                 self.undo_stack.clear();
                 self.redo_stack.clear();
                 self.pending_select = None;
@@ -455,6 +462,7 @@ impl MiniGramps {
                 self.reference = self.selected.clone();
                 self.expanded.clear();
                 self.data = data;
+                self.people_groups_dirty = true;
                 self.undo_stack.clear();
                 self.redo_stack.clear();
                 self.pending_select = None;
@@ -483,6 +491,7 @@ impl MiniGramps {
                         self.reference = self.selected.clone();
                         self.expanded.clear();
                         self.data = data;
+                        self.people_groups_dirty = true;
                         self.undo_stack.clear();
                         self.redo_stack.clear();
                         self.pending_select = None;
@@ -539,6 +548,7 @@ impl MiniGramps {
     /// Zustand VOR einer Datenänderung sichern (Undo). Jede neue Änderung
     /// leert den Redo-Verlauf; die Historie ist auf 100 Schritte begrenzt.
     pub fn snapshot(&mut self, name: impl Into<String>) {
+        self.people_groups_dirty = true;
         while self.undo_stack.len() >= 100 {
             self.undo_stack.remove(0);
         }
@@ -609,6 +619,7 @@ impl MiniGramps {
 
     /// Nach Undo/Redo: Bearbeitung beenden, Auswahl an die Daten angleichen.
     fn refresh_after_rollback(&mut self) {
+        self.people_groups_dirty = true;
         self.inline_edit = false;
         self.show_editor = false;
         self.editing = None;
