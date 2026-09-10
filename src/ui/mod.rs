@@ -234,6 +234,11 @@ pub struct MiniGramps {
     /// Debug-Log (Leiste unten + Terminal via `log`).
     /// Pfad der aktuell geöffneten Projektdatei (für `<stem>.layout.json`).
     pub current_data_path: Option<PathBuf>,
+    /// HWND des Fensters (Windows) für die abgerundete Fensterform.
+    window_hwnd: Option<isize>,
+    /// Zuletzt angewandte Fensterform (Breite, Höhe, maximiert) – verhindert
+    /// unnötige `SetWindowRgn`-Aufrufe pro Frame.
+    window_region: Option<(i32, i32, bool)>,
     started: std::time::Instant,
 }
 
@@ -304,6 +309,8 @@ impl MiniGramps {
             server_online: false,
             server_base: None,
             current_data_path: None,
+            window_hwnd: None,
+            window_region: None,
             started: std::time::Instant::now(),
         };
         app.log(format!(
@@ -852,10 +859,69 @@ self.selected = data.people.first().map(|p| p.id.clone());
             Err(e) => self.log(format!("Layout sichern fehlgeschlagen: {e}")),
         }
     }
+
+    /// Rundet das rahmenlose Fenster (Windows) mit 5 Punkten Radius; im
+    /// maximierten Zustand wird die Form zurückgesetzt. Wird nur bei
+    /// Größen-/Zustandsänderung tatsächlich angewendet.
+    fn apply_window_corners(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if self.window_hwnd.is_none() {
+                match frame.window_handle().map(|h| h.as_raw()) {
+                    Ok(RawWindowHandle::Win32(h)) => self.window_hwnd = Some(h.hwnd.get()),
+                    _ => return,
+                }
+            }
+            let Some(hwnd) = self.window_hwnd else {
+                return;
+            };
+            let hwnd = hwnd as *mut std::ffi::c_void;
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            let mut rect = win_shape::Rect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            // SAFETY: `hwnd` stammt aus dem echten Fenster-Handle dieses Frames.
+            unsafe { win_shape::GetClientRect(hwnd, &mut rect) };
+            let key = (rect.right, rect.bottom, maximized);
+            if self.window_region == Some(key) {
+                return;
+            }
+            self.window_region = Some(key);
+            let scale = ctx.pixels_per_point().max(0.1);
+            // SAFETY: Handle + Region stammen aus den Win32-APIs; die Region
+            // geht bei Erfolg in den Besitz des Fensters über.
+            unsafe {
+                if maximized || rect.right <= 0 || rect.bottom <= 0 {
+                    win_shape::SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
+                } else {
+                    let r = (WINDOW_CORNER_RADIUS * scale).round() as i32;
+                    let region = win_shape::CreateRoundRectRgn(
+                        0,
+                        0,
+                        rect.right + 1,
+                        rect.bottom + 1,
+                        r * 2,
+                        r * 2,
+                    );
+                    if !region.is_null() {
+                        win_shape::SetWindowRgn(hwnd, region, 1);
+                    }
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (ctx, frame);
+        }
+    }
 }
 
 impl eframe::App for MiniGramps {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let mut style = (*ctx.style()).clone();
         style.visuals = if self.dark_mode {
             egui::Visuals::dark()
@@ -872,6 +938,9 @@ impl eframe::App for MiniGramps {
             style.visuals.widgets.inactive.fg_stroke.color = Color32::from_gray(216);
         }
         ctx.set_style(style);
+
+        // Rahmenloses Fenster: 5px-Rundung anwenden (nur bei Änderung).
+        self.apply_window_corners(ctx, frame);
 
         // Schließen abfangen: Bei ungespeicherten Änderungen erst nachfragen.
         let native_close = ctx.input(|i| i.viewport().close_requested());
@@ -1264,6 +1333,10 @@ let log_layout = (cfg!(debug_assertions) || log_layout_enabled_by_env)
         dialogs::show_lightbox(self, ctx);
         // Wechsel-Dialog bei ungespeicherten Änderungen (vor dem nächsten Frame).
         dialogs::show_pending_select_confirm(self, ctx);
+
+        // Zuletzt: eigene Rand-Resizerkennung (überschreibt ggf. gesetzte
+        // Cursor der Widgets an den Fensterrändern).
+        handle_window_resize(ctx);
     }
 }
 
@@ -1368,6 +1441,86 @@ pub(crate) fn window_title(text: &str) -> egui::RichText {
 }
 
 // --- Start & globale Konfiguration -----------------------------------------
+
+/// Win32-Aufrufe zum Abrunden des rahmenlosen Fensters (exakter Radius).
+#[cfg(windows)]
+mod win_shape {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    pub struct Rect {
+        pub left: i32,
+        pub top: i32,
+        pub right: i32,
+        pub bottom: i32,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        pub fn GetClientRect(hwnd: *mut c_void, rect: *mut Rect) -> i32;
+        pub fn SetWindowRgn(hwnd: *mut c_void, hwnd_rgn: *mut c_void, redraw: i32) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        pub fn CreateRoundRectRgn(
+            x1: i32,
+            y1: i32,
+            x2: i32,
+            y2: i32,
+            ellipse_w: i32,
+            ellipse_h: i32,
+        ) -> *mut c_void;
+    }
+}
+
+/// Radius der Fensterrundung in logischen Punkten.
+const WINDOW_CORNER_RADIUS: f32 = 5.0;
+
+/// Rahmenloses Fenster: eigene Rand-Erkennung, da `with_decorations(false)`
+/// die OS-Resizeränder entfernt. Bei Mausdruck am Rand wird der native
+/// Resize-Vorgang gestartet (funktioniert, weil winit `WS_SIZEBOX` behält).
+fn handle_window_resize(ctx: &egui::Context) {
+    const M: f32 = 6.0;
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+        return;
+    }
+    let rect = ctx.content_rect();
+    let Some(p) = ctx.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    let left = p.x <= rect.left() + M;
+    let right = p.x >= rect.right() - M;
+    let top = p.y <= rect.top() + M;
+    let bottom = p.y >= rect.bottom() - M;
+    let (dir, cursor) = match (left, right, top, bottom) {
+        (true, _, true, _) => (
+            egui::ResizeDirection::NorthWest,
+            egui::CursorIcon::ResizeNorthWest,
+        ),
+        (_, true, true, _) => (
+            egui::ResizeDirection::NorthEast,
+            egui::CursorIcon::ResizeNorthEast,
+        ),
+        (true, _, _, true) => (
+            egui::ResizeDirection::SouthWest,
+            egui::CursorIcon::ResizeSouthWest,
+        ),
+        (_, true, _, true) => (
+            egui::ResizeDirection::SouthEast,
+            egui::CursorIcon::ResizeSouthEast,
+        ),
+        (true, _, _, _) => (egui::ResizeDirection::West, egui::CursorIcon::ResizeWest),
+        (_, true, _, _) => (egui::ResizeDirection::East, egui::CursorIcon::ResizeEast),
+        (_, _, true, _) => (egui::ResizeDirection::North, egui::CursorIcon::ResizeNorth),
+        (_, _, _, true) => (egui::ResizeDirection::South, egui::CursorIcon::ResizeSouth),
+        _ => return,
+    };
+    ctx.set_cursor_icon(cursor);
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+    }
+}
 
 /// Einstiegspunkt: Fenster, App-Icon (Logo gerendert via resvg), Schriften.
 pub fn run() -> eframe::Result<()> {
