@@ -870,12 +870,12 @@ pub fn draw_tree(
                     if !*manual {
                         let min_d = prev_end
                             .map(|(prev, padding)| {
-                                prev + MIN_CARD_GAP + padding + container_padding - start
+                                prev + gap + padding + container_padding - start
                             })
                             .unwrap_or(f32::NEG_INFINITY);
                         let max_d = next
                             .map(|(next, padding)| {
-                                next - MIN_CARD_GAP - container_padding - padding - end
+                                next - gap - container_padding - padding - end
                             })
                             .unwrap_or(f32::INFINITY);
                         if min_d <= max_d {
@@ -2874,9 +2874,11 @@ fn layout_ancestors<'a>(
 
                 if let (Some(f_right), Some(m_left)) = (max_f_right, min_m_left) {
                     // Benötigter Abstand: rechter Rand Vater - linker Rand
-                    // Mutter + fester Mindestabstand. Der konfigurierte Abstand
-                    // ist ein DEFAULT (greift außerdem über `default_sep`).
-                    let needed_sep = f_right - m_left + MIN_CARD_GAP;
+                    // Mutter + Baum-Abstand. Im Vorfahren-Automatiklayout
+                    // liegt damit der konfigurierte `gap` zwischen den
+                    // Kartengruppen (Default-Abstand); nur der finale Pass
+                    // nach manuellen Versätzen kappt auf `MIN_CARD_GAP`.
+                    let needed_sep = f_right - m_left + gap;
                     if needed_sep > min_distance {
                         min_distance = needed_sep;
                     }
