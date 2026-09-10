@@ -1409,14 +1409,14 @@ pub fn draw_tree(
             };
             if arrow_down {
                 painter.arrow(
-                    badge_at + Vec2::new(0.0, 4.5 * zoom),
-                    Vec2::new(0.0, -9.0 * zoom),
+                    badge_at - Vec2::new(0.0, 4.5 * zoom),
+                    Vec2::new(0.0, 9.0 * zoom),
                     Stroke::new(1.5, Color32::from_rgb(158, 213, 199)),
                 );
             } else {
                 painter.arrow(
-                    badge_at - Vec2::new(0.0, 4.5 * zoom),
-                    Vec2::new(0.0, 9.0 * zoom),
+                    badge_at + Vec2::new(0.0, 4.5 * zoom),
+                    Vec2::new(0.0, -9.0 * zoom),
                     Stroke::new(1.5, Color32::from_rgb(158, 213, 199)),
                 );
             }
