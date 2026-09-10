@@ -32,6 +32,11 @@ use crate::ui::CardLayout;
 
 const CARD_DETAIL_MIN_ZOOM: f32 = 0.4;
 
+/// Fester Mindestabstand zwischen Karten. Der einstellbare Baum-Abstand ist
+/// der Default (Zielabstand) der automatischen Platzierung; darunter dürfen
+/// Karten nie rücken, damit sie sich nicht berühren.
+const MIN_CARD_GAP: f32 = 16.0;
+
 /// Für einen Layoutdurchlauf vorbereitete Beziehungen. Das vermeidet, dass
 /// `children_of`/`parents_of`/`partners_of` in jedem Kollisionspass erneut
 /// alle Familien und Personen linear durchsuchen.
@@ -861,12 +866,12 @@ pub fn draw_tree(
                     if !*manual {
                         let min_d = prev_end
                             .map(|(prev, padding)| {
-                                prev + padding + container_padding - start
+                                prev + MIN_CARD_GAP + padding + container_padding - start
                             })
                             .unwrap_or(f32::NEG_INFINITY);
                         let max_d = next
                             .map(|(next, padding)| {
-                                next - container_padding - padding - end
+                                next - MIN_CARD_GAP - container_padding - padding - end
                             })
                             .unwrap_or(f32::INFINITY);
                         if min_d <= max_d {
@@ -2140,21 +2145,22 @@ fn block_ancestor_drag<'a>(
                 // entgegen): nicht als blockende Karte behandeln, aber mitziehen.
                 continue;
             }
-            // Linker Nachbar fest? Dann gilt: x - w/2 >= nbx + nbw/2
-            // (nur Überlappung verhindern; der Baum-Abstand ist ein Default,
-            // kein Mindestzwang).
+            // Linker Nachbar fest? Dann gilt: x - w/2 >= nbx + nbw/2 + MIN_CARD_GAP
+            // (fester Mindestabstand; der Baum-Abstand bleibt ein Default).
             if i > 0 {
                 let (nb, nbx, nbw) = cards[i - 1];
                 if !scale.contains_key(nb) {
-                    let cand = (nbx + nbw / 2.0 + w / 2.0 - x) / s + current;
+                    let cand =
+                        (nbx + nbw / 2.0 + MIN_CARD_GAP + w / 2.0 - x) / s + current;
                     lo = lo.max(cand);
                 }
             }
-            // Rechter Nachbar fest? Dann gilt: x + w/2 <= nbx - nbw/2.
+            // Rechter Nachbar fest? Dann gilt: x + w/2 <= nbx - nbw/2 - MIN_CARD_GAP.
             if i + 1 < cards.len() {
                 let (nb, nbx, nbw) = cards[i + 1];
                 if !scale.contains_key(nb) {
-                    let cand = (nbx - nbw / 2.0 - w / 2.0 - x) / s + current;
+                    let cand =
+                        (nbx - nbw / 2.0 - MIN_CARD_GAP - w / 2.0 - x) / s + current;
                     hi = hi.min(cand);
                 }
             }
@@ -2385,10 +2391,10 @@ fn repel_pass<'a>(
                     key_a.cmp(&key_b)
                 });
                 for window in inner.windows(2) {
-                    // Nur Überlappung verhindern (Tuch bei Lücken): der
-                    // konfigurierte Baum-Abstand ist ein DEFAULT, kein
-                    // Mindestabstand – er wirkt über die initiale Platzierung.
-                    let need = right_offsets[window[0].0] + left_offsets[window[1].0];
+                    // Karten nie berühren lassen; der konfigurierte
+                    // Baum-Abstand ist nur der DEFAULT (Zielabstand) – der
+                    // feste MIN_CARD_GAP bleibt als Mindestabstand.
+                    let need = right_offsets[window[0].0] + left_offsets[window[1].0] + MIN_CARD_GAP;
                     let actual = window[1].1 - window[0].1;
                     if actual < need {
                         // Nur nach rechts schieben: monotone Platzierung,
@@ -2429,17 +2435,19 @@ fn repel_pass<'a>(
                 .collect();
             spans.sort_by(|a, b| a.1.total_cmp(&b.1));
             for window in spans.windows(2) {
-                // Container trennen nur der gezeichnete Innen-Rand:
-                // Baum-Abstand ist Default, kein Zwangs-Mindestabstand.
-                let need = if window[0].0.len() > 1 {
-                    sibling_container_padding
-                } else {
-                    0.0
-                } + if window[1].0.len() > 1 {
-                    sibling_container_padding
-                } else {
-                    0.0
-                };
+                // Container: gezeichneter Innen-Rand plus fester Mindestabstand
+                // (Baum-Abstand ist nur Default, kein Zwangs-Mindestabstand).
+                let need = MIN_CARD_GAP
+                    + if window[0].0.len() > 1 {
+                        sibling_container_padding
+                    } else {
+                        0.0
+                    }
+                    + if window[1].0.len() > 1 {
+                        sibling_container_padding
+                    } else {
+                        0.0
+                    };
                 let actual = window[1].1 - window[0].2; // right_start - left_end
                 if actual < need {
                     let deficit = need - actual;
@@ -2865,10 +2873,10 @@ fn layout_ancestors<'a>(
                 }
 
                 if let (Some(f_right), Some(m_left)) = (max_f_right, min_m_left) {
-                    // Benötigter Abstand: rechter Rand Vater - linker Rand Mutter;
-                    // der konfigurierte Abstand ist ein DEFAULT (greift nur über
-                    // `default_sep`), bei Platzmangel berühren sich die Teilbäume.
-                    let needed_sep = f_right - m_left;
+                    // Benötigter Abstand: rechter Rand Vater - linker Rand
+                    // Mutter + fester Mindestabstand. Der konfigurierte Abstand
+                    // ist ein DEFAULT (greift außerdem über `default_sep`).
+                    let needed_sep = f_right - m_left + MIN_CARD_GAP;
                     if needed_sep > min_distance {
                         min_distance = needed_sep;
                     }
