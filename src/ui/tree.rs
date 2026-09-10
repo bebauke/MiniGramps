@@ -2737,7 +2737,9 @@ fn draw_person_card(
             avatar.center(),
             Align2::CENTER_CENTER,
             initials(person),
-            FontId::proportional(13. * zoom),
+            // Proportional zur Avatar-Größe: Kompakt (48) behält 13, das
+            // große Foto (78) skaliert die Initialen entsprechend mit.
+            FontId::proportional(avatar_size * 13.0 / 48.0),
             Color32::WHITE,
         );
     }
