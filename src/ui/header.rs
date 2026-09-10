@@ -212,6 +212,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     );
                 });
                 columns[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(2.0);
                     if window_button(ui, ICON_CLOSE, "window-close", "Schliessen", true).clicked() {
                         // Nicht direkt schließen: ungespeicherte Änderungen prüfen.
                         app.pending_close = true;
