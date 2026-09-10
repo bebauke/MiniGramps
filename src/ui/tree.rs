@@ -82,6 +82,8 @@ pub fn draw_tree(
     orientation: TreeOrientation,
     zoom: f32,
     pan: Vec2,
+    drag_started: bool,
+    drag_ended: bool,
 ) -> Rect {
     let root: &str = match reference.filter(|id| data.find(id).is_some()) {
         Some(id) => id,
@@ -473,113 +475,13 @@ pub fn draw_tree(
     // vererbt — Nachfahren erben den Junction-Versatz abwärts, Vorfahren
     // aufwärts. Danach ein finaler Abstoßungspass: geschobene Teilbäume
     // dürfen andere Gruppen NICHT überlagern.
-    let mut eff: HashMap<&str, f32> = HashMap::new();
-    // Gespeicherte bzw. aktive Versätze der sichtbaren Personen sind der
-    // Startwert der Vererbung (Pseudo-Partner folgen automatisch).
-    for (id, offset) in manual_offsets.iter() {
-        if spread.contains_key(id.as_str()) {
-            eff.insert(id.as_str(), *offset);
+    let mut peak_eff = 0.0f32;
+    let eff_owned = effective_offsets(data, &levels, &spread, manual_offsets, view);
+    for (id, value) in &eff_owned {
+        if let Some(spread_value) = spread.get_mut(id.as_str()) {
+            *spread_value += *value;
         }
-    }
-    {
-        // Familien sortiert nach Ebene der Kinder (aufsteigend) — ein
-        // Durchgang vererbt Junction-Versätze in beide Richtungen:
-        // Nachfahrensicht: Kinder erben vom Pfad-Elternteil;
-        // Vorfahrensicht: Eltern erben vom Kind.
-        let mut ordered_families: Vec<(usize, Vec<&str>, Vec<&str>)> = Vec::new();
-        for family in &data.families {
-            let children: Vec<&str> = family
-                .children
-                .iter()
-                .filter(|child| spread.contains_key(child.as_str()))
-                .map(|child| child.as_str())
-                .collect();
-            if children.is_empty() {
-                continue;
-            }
-            let parents: Vec<&str> = [&family.parent_a, &family.parent_b]
-                .into_iter()
-                .flatten()
-                .filter(|parent| spread.contains_key(parent.as_str()))
-                .map(|parent| parent.as_str())
-                .collect();
-            if parents.is_empty() {
-                continue;
-            }
-            let child_level = children
-                .iter()
-                .filter_map(|child| levels.get(child).copied())
-                .min()
-                .unwrap_or(0);
-            ordered_families.push((child_level, children, parents));
-        }
-        ordered_families.sort_by_key(|(level, _, _)| *level);
-        for (_level, children, parents) in &ordered_families {
-            if view == TreeView::Descendants {
-                // Junction-Versatz = MITTELWERT der Versätze aller
-                // Pfad-Elternteile. Eine Summe würde bei gemeinsam
-                // verschobenem Paar die Kinder DOPPELT verschieben; der
-                // Mittelwert entspricht exakt der Junction-Bewegung.
-                let path_shifts: Vec<f32> = parents
-                    .iter()
-                    .filter_map(|parent| eff.get(*parent).copied())
-                    .collect();
-                let jshift = if path_shifts.is_empty() {
-                    0.0
-                } else {
-                    path_shifts.iter().sum::<f32>() / path_shifts.len() as f32
-                };
-                for child in children {
-                    *eff.entry(child).or_insert(0.0) += jshift;
-                }
-            } else {
-                // Vorfahrengraf (TreeView::Ancestors):
-                // 1. Aufwärtspass (Bottom-to-Top, d.h. von kleineren Ebenen zu größeren):
-                //    Vorfahren werden 1:1 mitverschoben, wenn das Kind verschoben wurde.
-                //    Da wir von Level 0 aufwärts gehen, propagiert sich das bis ganz nach oben.
-                let mut ordered_up = ordered_families.clone();
-                ordered_up.sort_by_key(|(level, _, _)| *level);
-                for (_level, children, parents) in &ordered_up {
-                    // Wenn Kinder dieser Familie verschoben sind, vererben sie ihren Versatz nach oben.
-                    let cshift = children
-                        .iter()
-                        .map(|child| eff.get(*child).copied().unwrap_or(0.0))
-                        .sum::<f32>()
-                        / children.len() as f32;
-                    if cshift != 0.0 {
-                        for parent in parents {
-                            *eff.entry(parent).or_insert(0.0) += cshift;
-                        }
-                    }
-                }
-
-                // 2. Abwärtspass (Top-to-Bottom, d.h. von großen Ebenen zu kleinen):
-                //    Kinder müssen exakt mittig zwischen ihren Eltern stehen.
-                //    Ein Klick/Verschiebung am Elternteil schiebt das Kind zur Hälfte,
-                //    und das trickelt sich nach unten fort.
-                let mut ordered_down = ordered_families.clone();
-                ordered_down.sort_by_key(|(level, _, _)| std::cmp::Reverse(*level));
-                for (_level, children, parents) in &ordered_down {
-                    let pshift = parents
-                        .iter()
-                        .map(|parent| eff.get(*parent).copied().unwrap_or(0.0))
-                        .sum::<f32>()
-                        / parents.len() as f32;
-                    for child in children {
-                        // Wenn das Kind selbst direkt verschoben wurde, behält es seinen Versatz.
-                        // Andernfalls wird der Versatz durch die Eltern bestimmt!
-                        if !manual_offsets.contains_key(*child) {
-                            eff.insert(child, pshift);
-                        }
-                    }
-                }
-            }
-        }
-        for (id, value) in &eff {
-            if let Some(spread_value) = spread.get_mut(*id) {
-                *spread_value += *value;
-            }
-        }
+        peak_eff = peak_eff.max(value.abs());
     }
     if view != TreeView::Ancestors {
         repel_pass(
@@ -596,6 +498,19 @@ pub fn draw_tree(
             couple_gap,
             &group_of,
             &shown_partners,
+        );
+    } else if let Some((drag_root, _)) = card_drag {
+        block_ancestor_drag(
+            &mut spread,
+            &rows,
+            data,
+            &levels,
+            &widths,
+            &shown_partners,
+            drag_root,
+            manual_offsets,
+            gap,
+            view,
         );
     }
 
@@ -1093,10 +1008,6 @@ pub fn draw_tree(
                         (b.x, wb, a.x, wa)
                     };
                     let jx = (left_x + left_w * zoom / 2.0 + right_x - right_w * zoom / 2.0) / 2.0;
-                    println!(
-                        "LINE_ALIGN: parent_a_id={}, parent_b_id={}, left_x={}, left_w={}, right_x={}, right_w={}, jx={}",
-                        id_a, id_b, left_x, left_w, right_x, right_w, jx
-                    );
                     Pos2::new(jx, (a.y + b.y) / 2.0)
                 } else {
                     Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
@@ -1107,12 +1018,6 @@ pub fn draw_tree(
         };
         for child in &family.children {
             if let Some(c) = pos(child) {
-                if view == TreeView::Ancestors {
-                    println!(
-                        "LINE_ALIGN_CHILD: child_id={}, c.x={}, junction.x={}",
-                        child, c.x, junction.x
-                    );
-                }
                 painter.line_segment(
                     [junction, c],
                     Stroke::new(2.0, Color32::from_rgb(74, 111, 119)),
@@ -1156,22 +1061,26 @@ pub fn draw_tree(
                 .any(|relative| !levels.contains_key(relative.id.as_str()))
         };
         let mut badge_clicked = false;
-        // Badges (Expand-Pfeil) nur beim Hovern über der Karte einblenden.
-        let card_hovered = painter
-            .ctx()
-            .input(|i| i.pointer.interact_pos().is_some_and(|q| card.contains(q)));
+        // Badge-Position (Ausklapp-Pfeil) vorab berechnen, damit auch das
+        // Hovern ÜBER dem Badge die Karte als "gehovert" zählt und der
+        // Pfeil nicht verschwindet, sobald die Maus von der Karte auf den
+        // Pfeil (oberhalb der Box bzw. links daneben) wandert.
+        let badge_at = if view == TreeView::Descendants {
+            Pos2::new(card.right() - 12.0 * zoom, card.top() + 12.0 * zoom)
+        } else if orientation == TreeOrientation::Vertical {
+            Pos2::new(card.center().x, card.top() - 13.0 * zoom)
+        } else {
+            Pos2::new(card.left() - 13.0 * zoom, card.center().y)
+        };
+        let badge_r = 9.0 * zoom;
+        let badge_rect = Rect::from_center_size(badge_at, Vec2::splat(badge_r * 2.0));
+        let pointer_pos = painter.ctx().input(|i| i.pointer.interact_pos());
+        let card_hovered = pointer_pos
+            .is_some_and(|q| card.contains(q) || badge_rect.contains(q));
         if view != TreeView::Fan && card_hovered && (has_more || expanded.contains(&person.id)) {
             // Nachfahrensicht: Badge in der rechten oberen Ecke. Vorfahren-
             // sicht: der Ausklapp-Pfeil liegt ÜBER der Box (bzw. links im
             // horizontalen Baum), weil die Vorfahren dort erscheinen.
-            let badge_at = if view == TreeView::Descendants {
-                Pos2::new(card.right() - 12.0 * zoom, card.top() + 12.0 * zoom)
-            } else if orientation == TreeOrientation::Vertical {
-                Pos2::new(card.center().x, card.top() - 13.0 * zoom)
-            } else {
-                Pos2::new(card.left() - 13.0 * zoom, card.center().y)
-            };
-            let badge_r = 9.0 * zoom;
             painter.circle_filled(badge_at, badge_r, Color32::from_rgb(24, 40, 48));
             painter.circle_stroke(
                 badge_at,
@@ -1199,7 +1108,6 @@ pub fn draw_tree(
                     Stroke::new(1.5, Color32::from_rgb(158, 213, 199)),
                 );
             }
-            let badge_rect = Rect::from_center_size(badge_at, Vec2::splat(badge_r * 2.0));
             badge_clicked = painter.ctx().input(|i| {
                 i.pointer.any_click()
                     && i.pointer
@@ -1274,15 +1182,13 @@ pub fn draw_tree(
         });
         if manual_delta != 0.0 || (drag_start && card_drag.is_none()) {
             let layout_delta = manual_delta / zoom;
-            // Partner zieht nur mit, wenn er "mitklebt": Im Vorfahrenbaum nur
-            // bei Sichtabstand ≤ 10 px zwischen den Karten, sonst bleibt er
-            // stehen. In der Nachfahrensicht zieht der Partner immer mit.
+            // Im Vorfahren- und Nachfahrensicht bleibt der Partner stehen
+            // (das Kind zentriert sich beim Ziehen automatisch zwischen den
+            // Eltern — der Down-Pass gibt ihm die halbe Verschiebung). Nur
+            // bei Fan-View klebt der Partner (fast) an der Person.
             let partner_follows = |base_center: Pos2, base_width: f32, partner_id: &str| -> bool {
-                if view == TreeView::Ancestors {
-                    return false; // Im Vorfahrenbaum bleibt der Partner immer stehen!
-                }
-                if view != TreeView::Ancestors {
-                    return true;
+                if view != TreeView::Fan {
+                    return false;
                 }
                 let Some(partner_center) = pos(partner_id) else {
                     return false;
@@ -1315,22 +1221,17 @@ pub fn draw_tree(
                 // Laufender Drag: bekannte Menge verschieben.
                 for id in members.clone() {
                     *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
-                    println!(
-                        "DRAG (active): id={}, delta={}, val={}",
-                        id,
-                        layout_delta,
-                        manual_offsets.get(&id).copied().unwrap_or(0.0)
-                    );
                 }
             } else {
                 for id in &move_set {
                     *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
-                    println!(
-                        "DRAG (start): id={}, delta={}, val={}",
-                        id,
-                        layout_delta,
-                        manual_offsets.get(id).copied().unwrap_or(0.0)
-                    );
+                }
+                if view == TreeView::Ancestors {
+                    let offsets: Vec<_> = move_set.iter()
+                        .map(|id| format!("{}:{:.1}", id, manual_offsets.get(id.as_str()).copied().unwrap_or(0.0)))
+                        .collect();
+                    println!("DRAG_PICK person={} move_set=[{}] zoom={:.3} layout_delta={:.1}",
+                        person.id, offsets.join(", "), zoom, layout_delta);
                 }
                 *card_drag = Some((person.id.clone(), move_set));
             }
@@ -1452,7 +1353,284 @@ pub fn draw_tree(
             }
         }
     }
+    if (drag_started || drag_ended)
+        && view == TreeView::Ancestors
+        && orientation == TreeOrientation::Vertical
+    {
+        let mut total = 0.0f32;
+        let mut count = 0usize;
+        for f in &data.families {
+            if let (Some(a), Some(b)) = (
+                f.parent_a.as_deref().and_then(&pos),
+                f.parent_b.as_deref().and_then(&pos),
+            ) {
+                let d = (a.x - b.x).abs();
+                total += d;
+                count += 1;
+                if drag_ended && count <= 6 {
+                    let ea = eff_owned.get(f.parent_a.as_deref().unwrap_or("")).copied().unwrap_or(0.0);
+                    let eb = eff_owned.get(f.parent_b.as_deref().unwrap_or("")).copied().unwrap_or(0.0);
+                    let oa = manual_offsets.get(f.parent_a.as_deref().unwrap_or("")).copied().unwrap_or(0.0);
+                    let ob = manual_offsets.get(f.parent_b.as_deref().unwrap_or("")).copied().unwrap_or(0.0);
+                    println!("  FAM {}: {}({:.0}) <-> {}({:.0}) dist={:.1} offsets=({:.1},{:.1}) eff=({:.1},{:.1})",
+                        f.id, f.parent_a.as_deref().unwrap_or("?"), a.x,
+                        f.parent_b.as_deref().unwrap_or("?"), b.x, d, oa, ob, ea, eb);
+                }
+            }
+        }
+        let avg = if count > 0 { total / count as f32 } else { 0.0 };
+        if drag_started {
+            println!("DRAG_START avg_parent_dist={:.1} ({} families, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
+                avg, count, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
+        } else {
+            println!("DRAG_END   avg_parent_dist={:.1} ({} families, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
+                avg, count, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
+        }
+    }
     content_bounds
+}
+
+/// Berechnet die effektiven Versätze der sichtbaren Karten: manuelle Offsets
+/// sind der Startwert; ein Aufwärtspass vererbt Versätze an die Vorfahren, ein
+/// Abwärtspass zentriert Kinder zwischen ihren Eltern. Manuell verschobene
+/// Kinder behalten ihren Eigenversatz und folgen den Eltern zusätzlich (minus
+/// eigenem Startanteil), statt beim Eltern-Ziehen stehen zu bleiben.
+/// Gibt die Versätze als eigenständige Map zurück (String-Snapshots).
+fn effective_offsets<'a>(
+    data: &'a TreeData,
+    levels: &HashMap<&'a str, usize>,
+    drawn: &HashMap<&'a str, f32>,
+    manual_offsets: &HashMap<String, f32>,
+    view: TreeView,
+) -> HashMap<String, f32> {
+    let mut eff: HashMap<&'a str, f32> = HashMap::new();
+    for (id, offset) in manual_offsets {
+        if drawn.contains_key(id.as_str()) {
+            if let Some(&key) = levels.keys().find(|key| **key == id.as_str()) {
+                eff.insert(key, *offset);
+            }
+        }
+    }
+    let mut ordered_families: Vec<(usize, Vec<&'a str>, Vec<&'a str>)> = Vec::new();
+    for family in &data.families {
+        let children: Vec<&'a str> = family
+            .children
+            .iter()
+            .filter(|child| drawn.contains_key(child.as_str()))
+            .map(|child| child.as_str())
+            .collect();
+        if children.is_empty() {
+            continue;
+        }
+        let parents: Vec<&'a str> = [&family.parent_a, &family.parent_b]
+            .into_iter()
+            .flatten()
+            .filter(|parent| drawn.contains_key(parent.as_str()))
+            .map(|parent| parent.as_str())
+            .collect();
+        if parents.is_empty() {
+            continue;
+        }
+        let child_level = children
+            .iter()
+            .filter_map(|child| levels.get(child).copied())
+            .min()
+            .unwrap_or(0);
+        ordered_families.push((child_level, children, parents));
+    }
+    ordered_families.sort_by_key(|(level, _, _)| *level);
+    if view == TreeView::Descendants {
+        // Nachfahrensicht: Kinder erben vom Pfad-Elternteil (Junction-Mittel).
+        for (_level, children, parents) in &ordered_families {
+            let path_shifts: Vec<f32> = parents
+                .iter()
+                .filter_map(|parent| eff.get(*parent).copied())
+                .collect();
+            let jshift = if path_shifts.is_empty() {
+                0.0
+            } else {
+                path_shifts.iter().sum::<f32>() / path_shifts.len() as f32
+            };
+            for child in children {
+                *eff.entry(child).or_insert(0.0) += jshift;
+            }
+        }
+    } else {
+        // Vorfahrensicht: Start-Versatz je Familie merken (nur manuelle
+        // Kinder-Offsets, vor der Propagation).
+        let mut family_cshift: HashMap<Vec<&'a str>, f32> = HashMap::new();
+        for (_level, children, _parents) in &ordered_families {
+            let seed = children
+                .iter()
+                .map(|child| eff.get(*child).copied().unwrap_or(0.0))
+                .sum::<f32>()
+                / children.len() as f32;
+            family_cshift.insert(children.clone(), seed);
+        }
+        // 1. Aufwärtspass: Vorfahren 1:1 mitverschieben, wenn das Kind verschoben ist.
+        for (_level, children, parents) in &ordered_families {
+            let cshift = children
+                .iter()
+                .map(|child| eff.get(*child).copied().unwrap_or(0.0))
+                .sum::<f32>()
+                / children.len() as f32;
+            if cshift != 0.0 {
+                for parent in parents {
+                    *eff.entry(parent).or_insert(0.0) += cshift;
+                }
+            }
+        }
+        // 2. Abwärtspass: Kinder mittig zwischen ihren Eltern; manuell
+        // verschobene Kinder folgen den Eltern mit (eigener Offset + Versatz
+        // durch die Eltern - eigener Startanteil).
+        let mut ordered_down = ordered_families.clone();
+        ordered_down.sort_by_key(|(level, _, _)| std::cmp::Reverse(*level));
+        for (_level, children, parents) in &ordered_down {
+            let pshift = parents
+                .iter()
+                .map(|parent| eff.get(*parent).copied().unwrap_or(0.0))
+                .sum::<f32>()
+                / parents.len() as f32;
+            for child in children {
+                if manual_offsets.contains_key(*child) {
+                    let own = manual_offsets.get(*child).copied().unwrap_or(0.0);
+                    let seed = family_cshift.get(children).copied().unwrap_or(0.0);
+                    eff.insert(child, own + pshift - seed);
+                } else {
+                    eff.insert(child, pshift);
+                }
+            }
+        }
+    }
+    eff.iter()
+        .map(|(id, value)| ((*id).to_string(), *value))
+        .collect()
+}
+
+/// Kollisions-Blockade der Vorfahrensicht: Nach allen manuellen Versätzen
+/// wird je Ebene geprüft, ob die mitbewegten Karten des gezogenen Zweigs
+/// (Person + ganze Vorfahrenlinie samt Partnern UND dank Abwärtspass auch die
+/// Kinder/Nachkommen) mit fest bleibenden Nachbarkarten kollidieren. Statt den
+/// Nachbarn zu verschieben, wird der Versatz der gezogenen Person auf die
+/// erlaubte Spanne geklemmt (min/max über alle Ebenen). Die Bewegungs-Steigung
+/// je Karte wird aus den echten effektiven Versätzen gewonnen
+/// (`effective_offsets` mit simuliertem +1.0-Offset), damit auch die
+/// Kollisionen der mitgezogenen (z.T. manuell verschobenen) Kinder exakt
+/// berücksichtigt sind.
+fn block_ancestor_drag<'a>(
+    spread: &mut HashMap<&'a str, f32>,
+    rows: &[Vec<&'a str>],
+    data: &'a TreeData,
+    levels: &HashMap<&'a str, usize>,
+    widths: &HashMap<&'a str, f32>,
+    shown_partners: &HashSet<&'a str>,
+    drag_root: &'a str,
+    manual_offsets: &mut HashMap<String, f32>,
+    gap: f32,
+    view: TreeView,
+) {
+    let visible = |id: &str| levels.contains_key(id);
+    let current = manual_offsets.get(drag_root).copied().unwrap_or(0.0);
+    if current == 0.0 {
+        return;
+    }
+    // Echte Bewegungs-Steigung je Karte: effektive Versätze aktuell und mit
+    // simuliertem +1.0-Offset an der Ziehperson; Differenz = Faktor, mit dem
+    // die Karte pro Einheit des Zieh-Offsets wandert (inkl. Kinder).
+    let base_eff = effective_offsets(data, levels, spread, manual_offsets, view);
+    let mut bumped = manual_offsets.clone();
+    bumped.insert(drag_root.to_string(), current + 1.0);
+    let bumped_eff = effective_offsets(data, levels, spread, &bumped, view);
+    let mut scale: HashMap<&'a str, f32> = HashMap::new();
+    for id in levels.keys() {
+        let s = bumped_eff.get(*id).copied().unwrap_or(0.0)
+            - base_eff.get(*id).copied().unwrap_or(0.0);
+        if s.abs() > 1e-4 {
+            scale.insert(*id, s);
+        }
+    }
+    // Erlaubte Offset-Spanne: jede mitbewegte Karte darf nicht in eine feste
+    // Nachbarkarte ragen — ausgedrückt in Einheiten des Zieh-Offsets.
+    let mut lo = f32::NEG_INFINITY;
+    let mut hi = f32::INFINITY;
+    for ids in rows {
+        let mut cards: Vec<(&'a str, f32, f32)> = Vec::new(); // (id, x, width)
+        for id in ids {
+            let Some(&x) = spread.get(id) else {
+                continue;
+            };
+            let mut w = widths[id];
+            for partner in data.partners_of(id) {
+                if !visible(&partner.id) && shown_partners.contains(partner.id.as_str()) {
+                    if let Some(&px) = spread.get(partner.id.as_str()) {
+                        let p_w = widths.get(partner.id.as_str()).copied().unwrap_or(215.0);
+                        // Partner-Pseudokarte wird rechts neben der Person
+                        // gezeichnet; die gemeinsame Box erstreckt sich bis
+                        // zum rechten Rand der Partnerkarte.
+                        w = (px + p_w / 2.0) - (x - w / 2.0);
+                    }
+                }
+            }
+            cards.push((id, x, w));
+        }
+        cards.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        for i in 0..cards.len() {
+            let (id, x, w) = cards[i];
+            let Some(&s) = scale.get(id) else {
+                continue;
+            };
+            if s <= 0.0 {
+                // Gegenläufig bewegte Karte (eigener manueller Versatz wirkt
+                // entgegen): nicht als blockende Karte behandeln, aber mitziehen.
+                continue;
+            }
+            // Linker Nachbar fest? Dann gilt: x - w/2 >= nbx + nbw/2 + gap.
+            if i > 0 {
+                let (nb, nbx, nbw) = cards[i - 1];
+                if !scale.contains_key(nb) {
+                    let cand = (nbx + nbw / 2.0 + gap + w / 2.0 - x) / s + current;
+                    lo = lo.max(cand);
+                }
+            }
+            // Rechter Nachbar fest? Dann gilt: x + w/2 <= nbx - nbw/2 - gap.
+            if i + 1 < cards.len() {
+                let (nb, nbx, nbw) = cards[i + 1];
+                if !scale.contains_key(nb) {
+                    let cand = (nbx - nbw / 2.0 - gap - w / 2.0 - x) / s + current;
+                    hi = hi.min(cand);
+                }
+            }
+        }
+    }
+    // Offset in die erlaubte Spanne klemmen (stabil: klebt an der Grenze).
+    let target = if current < lo {
+        lo
+    } else if current > hi {
+        hi
+    } else {
+        return;
+    };
+    let delta = target - current;
+    // Mitbewegten Zweig um `delta * s` verschieben (nur dieser; Nachbarn fest).
+    for (id, s) in &scale {
+        if let Some(value) = spread.get_mut(id) {
+            *value += delta * s;
+        }
+        // Auch Partner-Pseudokarten des Zweigs mitschieben.
+        for partner in data.partners_of(id) {
+            if !visible(&partner.id)
+                && shown_partners.contains(partner.id.as_str())
+                && spread.contains_key(partner.id.as_str())
+            {
+                if let Some(value) = spread.get_mut(partner.id.as_str()) {
+                    *value += delta * s;
+                }
+            }
+        }
+    }
+    if let Some(offset) = manual_offsets.get_mut(drag_root) {
+        *offset = target;
+    }
 }
 
 /// Abstoßungspass, ebenenweise: Pro Ebene (Zeile) zuerst die Karten

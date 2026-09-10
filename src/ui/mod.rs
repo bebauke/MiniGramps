@@ -89,6 +89,8 @@ pub struct MiniGramps {
     /// Menge. Gilt bis zum Loslassen – unabhängig davon, wo der Druck
     /// ursprünglich startede (sonst bricht der Drag am Kartenrand ab).
     pub card_drag: Option<(String, Vec<String>)>,
+    /// Maus-Status vom Vorgängerframe zur Erkennung von Drag-Start/Ende.
+    pub drag_mouse_was_down: bool,
     /// Standard-Generationenzahl (Einstellungen; 0 = alle).
     pub max_generations: usize,
     /// Datenordner: Speicherort (`save`) und Medien-Basisordner (`media`).
@@ -173,6 +175,7 @@ impl MiniGramps {
             manual_offsets: HashMap::new(),
             long_press_used: false,
             card_drag: None,
+            drag_mouse_was_down: false,
             max_generations: 5,
             library,
             status: "Beispielbaum geladen".into(),
@@ -509,7 +512,7 @@ impl eframe::App for MiniGramps {
                     ui.add_space(14.0);
                     ui.label(
                         egui::RichText::new("STAMMBAUM")
-                            .size(15.0)
+                            .size(13.0)
                             .strong()
                             .color(section_accent),
                     );
@@ -552,12 +555,16 @@ impl eframe::App for MiniGramps {
                     .on_hover_text("Stammbaum zentrieren und im Fenster einpassen (Zoom-Fit)")
                     .clicked()
                 {
+                    println!("CENTER: zoom={:.3} pan=({:.1},{:.1}) offsets={}",
+                        self.zoom, self.pan.x, self.pan.y, self.manual_offsets.len());
                     self.fit_pending = true;
                 }
                 if icon_only_button(ui, ICON_RESET, "toolbar-reset")
                     .on_hover_text("Alle manuellen Verschiebungen zurücksetzen (Layout-Reset)")
                     .clicked()
                 {
+                    println!("RESET: clearing {} offsets, zoom={:.3} pan=({:.1},{:.1})",
+                        self.manual_offsets.len(), self.zoom, self.pan.x, self.pan.y);
                     self.manual_offsets.clear();
                     self.persist_layout();
                     self.zoom = 1.0;
@@ -614,9 +621,14 @@ impl eframe::App for MiniGramps {
                 if response.hovered() && scroll != 0.0 {
                     self.zoom = (self.zoom * (1.0 + scroll * 0.001)).clamp(0.15, 1.4);
                 }
+                // Maus-Transitions-Erkennung für Drag-Logging.
+                let mouse_is_down = ui.input(|i| i.pointer.primary_down());
+                let drag_started = mouse_is_down && !self.drag_mouse_was_down;
+                let drag_ended = !mouse_is_down && self.drag_mouse_was_down;
+                self.drag_mouse_was_down = mouse_is_down;
                 // Lang-Touch-Debouncer und aktiven Karten-Drag zurücksetzen,
                 // wenn nichts gedrückt ist. Drag-Ende → Layout live sichern.
-                if !ui.input(|i| i.pointer.primary_down()) {
+                if !mouse_is_down {
                     self.long_press_used = false;
                     if self.card_drag.take().is_some() {
                         self.persist_layout();
@@ -650,6 +662,8 @@ impl eframe::App for MiniGramps {
                         self.tree_orientation,
                         self.zoom,
                         self.pan,
+                        drag_started,
+                        drag_ended,
                     );
                     self.long_press_used = long_press_used;
                     self.manual_offsets = manual_offsets;
