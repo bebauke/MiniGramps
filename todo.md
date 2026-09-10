@@ -17,6 +17,7 @@
 - [x] Baumkarten: erste beiden Vornamen plus Nachname; im großen Foto klein drunter
 - [x] Zoom-Zentrum am Mauszeiger und konfigurierbarer Baum-Abstand (Default doppelt)
 - [x] Profilbild füllt die Karte bei ausgeblendeten Inhaltsdetails (kleiner Zoom)
+- [x] Zurück/Vor-Navigation der Referenzperson in der Titelleiste (kleiner als Undo/Redo)
 - [ ] Fotos vollständig asynchron dekodieren und GPU-Uploads pro Frame begrenzen
 - [ ] Undo-Historie von vollständigen `TreeData`-Kopien auf Änderungsbefehle umstellen
 - [ ] Einstellungen dauerhaft speichern

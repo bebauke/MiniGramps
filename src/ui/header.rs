@@ -11,8 +11,9 @@ use eframe::egui::{self, Color32};
 
 use crate::import::discover_projects;
 use crate::ui::{
-    ICON_CLOSE, ICON_MAXIMIZE, ICON_MINIMIZE, ICON_OPEN, ICON_REDO, ICON_SAVE, ICON_SETTINGS,
-    ICON_UNDO, MiniGramps, icon_button_big, icon_only_button, panels::palette, whitened_logo,
+    ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_CLOSE, ICON_MAXIMIZE, ICON_MINIMIZE, ICON_OPEN,
+    ICON_REDO, ICON_SAVE, ICON_SETTINGS, ICON_UNDO, MiniGramps, icon_button_big, icon_nav_button,
+    icon_only_button, panels::palette, whitened_logo,
 };
 
 pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -111,6 +112,43 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     if redo_clicked {
                         app.redo();
                     }
+                    // Zurück-/Vor-Pfeile für die Referenzperson-Historie:
+                    // in derselben Zeile, aber flacher und unterhalb des
+                    // Undo/Redo-Niveaus (unten ausgerichtet).
+                    let nav_back_ok = app.can_navigate_back();
+                    let nav_forward_ok = app.can_navigate_forward();
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(78.0, 40.0),
+                        egui::Layout::left_to_right(egui::Align::BOTTOM),
+                        |ui| {
+                            let back_response = ui
+                                .add_enabled_ui(nav_back_ok, |ui| {
+                                    icon_nav_button(ui, ICON_CHEVRON_LEFT, "nav-back")
+                                        .on_hover_text(if nav_back_ok {
+                                            "Vorherige Referenzperson"
+                                        } else {
+                                            "Keine vorherige Referenz"
+                                        })
+                                })
+                                .inner;
+                            if back_response.clicked() {
+                                app.navigate_back();
+                            }
+                            let forward_response = ui
+                                .add_enabled_ui(nav_forward_ok, |ui| {
+                                    icon_nav_button(ui, ICON_CHEVRON_RIGHT, "nav-forward")
+                                        .on_hover_text(if nav_forward_ok {
+                                            "Nächste Referenzperson"
+                                        } else {
+                                            "Keine nächste Referenz"
+                                        })
+                                })
+                                .inner;
+                            if forward_response.clicked() {
+                                app.navigate_forward();
+                            }
+                        },
+                    );
                     // Projektname hinter dem Speichern-Button (etwas größer
                     // als Kleinschrift, damit er als Titel erkennbar ist).
                     ui.label(

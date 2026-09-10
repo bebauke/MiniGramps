@@ -118,6 +118,12 @@ pub struct MiniGramps {
     pub selected: Option<String>,
     /// Referenzperson = Wurzel des Stammbaums (`tree::draw_tree`).
     pub reference: Option<String>,
+    /// Verlauf besuchter Referenzpersonen (Zurück/Vor-Pfeile in der
+    /// Titelleiste). Neue Referenzen hängen hinten an; Zurück/Vor wandern
+    /// entlang des Verlaufs.
+    pub reference_history: Vec<String>,
+    /// Aktuelle Position in `reference_history`.
+    pub reference_history_index: usize,
     /// Personen, deren weitere Generationen ausgeklappt sind.
     pub expanded: HashSet<String>,
     /// Manuelle Verschiebungen entlang der Verteilungsachse
@@ -240,6 +246,8 @@ impl MiniGramps {
             data: TreeData::demo(),
             selected: Some("p5".into()),
             reference: Some("p5".into()),
+            reference_history: vec!["p5".to_string()],
+            reference_history_index: 0,
             expanded: HashSet::new(),
             manual_offsets: HashMap::new(),
             long_press_used: false,
@@ -466,10 +474,11 @@ impl MiniGramps {
                         .collect::<Vec<_>>(),
                 );
                 self.server_online = true;
-                self.server_base = Some(base_url.to_string());
-                self.selected = data.people.first().map(|p| p.id.clone());
-                self.reference = self.selected.clone();
-                self.expanded.clear();
+self.server_base = Some(base_url.to_string());
+                        self.selected = data.people.first().map(|p| p.id.clone());
+                        self.reference = self.selected.clone();
+                        self.reset_reference_navigation();
+                        self.expanded.clear();
                 self.data = data;
                 self.people_groups_dirty = true;
                 self.undo_stack.clear();
@@ -496,9 +505,10 @@ impl MiniGramps {
                         self.manual_offsets = cache.read_layout();
                         self.server_online = false;
                         self.server_base = Some(base_url.to_string());
-                        self.selected = data.people.first().map(|p| p.id.clone());
-                        self.reference = self.selected.clone();
-                        self.expanded.clear();
+self.selected = data.people.first().map(|p| p.id.clone());
+                self.reference = self.selected.clone();
+                self.reset_reference_navigation();
+                self.expanded.clear();
                         self.data = data;
                         self.people_groups_dirty = true;
                         self.undo_stack.clear();
@@ -535,6 +545,22 @@ impl MiniGramps {
             .unwrap_or_default();
         self.reference = Some(id.to_string());
         self.selected = Some(id.to_string());
+        // Verlauf pflegen: neue Referenz hinten anhängen, Vorwärtszweig
+        // abschneiden (Browser-Muster), auf 100 Einträge begrenzen.
+        let on_current = self
+            .reference_history
+            .get(self.reference_history_index)
+            .map(String::as_str)
+            == Some(id);
+        if !on_current {
+            self.reference_history.truncate(self.reference_history_index + 1);
+            self.reference_history.push(id.to_string());
+            if self.reference_history.len() > 100 {
+                let overflow = self.reference_history.len() - 100;
+                self.reference_history.drain(0..overflow);
+            }
+            self.reference_history_index = self.reference_history.len().saturating_sub(1);
+        }
         // Neue Referenz sofort mittig: Das Layout wird relativ zur
         // Referenz aufgebaut, der Schwenk wird auf null zurückgesetzt
         // (Zoom bleibt erhalten).
@@ -544,6 +570,57 @@ impl MiniGramps {
         self.persist_layout();
         self.status = format!("Referenzperson: {name}");
         self.log(format!("Referenzperson gesetzt: {name}"));
+    }
+
+    pub fn can_navigate_back(&self) -> bool {
+        self.reference_history_index > 0
+    }
+
+    pub fn can_navigate_forward(&self) -> bool {
+        self.reference_history_index + 1 < self.reference_history.len()
+    }
+
+    /// Zur vorigen Referenzperson wechseln (frisst den Verlauf nicht auf).
+    pub fn navigate_back(&mut self) {
+        if self.reference_history_index > 0 {
+            self.reference_history_index -= 1;
+            self.apply_navigation();
+        }
+    }
+
+    /// Zur nächsten Referenzperson wechseln.
+    pub fn navigate_forward(&mut self) {
+        if self.reference_history_index + 1 < self.reference_history.len() {
+            self.reference_history_index += 1;
+            self.apply_navigation();
+        }
+    }
+
+    /// Geschichte direkt anwenden, ohne einen neuen Eintrag anzulegen.
+    fn apply_navigation(&mut self) {
+        if let Some(id) = self
+            .reference_history
+            .get(self.reference_history_index)
+            .cloned()
+        {
+            self.reference = Some(id.clone());
+            self.selected = Some(id.clone());
+            self.pan = Vec2::ZERO;
+            self.fit_pending = true;
+            let name = self
+                .data
+                .find(&id)
+                .map(|p| p.display_name())
+                .unwrap_or_else(|| id.clone());
+            self.status = format!("Referenzperson: {name}");
+        }
+    }
+
+    /// Verlauf der besuchten Referenzpersonen auf den aktuellen Stand
+    /// zurücksetzen (nach Laden eines Projekts/Server).
+    fn reset_reference_navigation(&mut self) {
+        self.reference_history = self.reference.clone().into_iter().collect();
+        self.reference_history_index = self.reference_history.len().saturating_sub(1);
     }
 
     /// Arbeitskopie hat im Vergleich zur Datenbank ungespeicherte Änderungen?
@@ -1234,6 +1311,19 @@ pub(crate) fn icon_only_button(
         .fit_to_exact_size(Vec2::splat(16.0))
         .tint(ui.visuals().text_color());
     ui.add(egui::Button::image(image))
+}
+
+/// Kleiner Pfeil-Button für die Referenz-Navigation: flacher als die großen
+/// Toolbar-Icons und gedacht für die Zeile unterhalb von Undo/Redo.
+pub(crate) fn icon_nav_button(
+    ui: &mut egui::Ui,
+    bytes: &'static [u8],
+    id: &'static str,
+) -> egui::Response {
+    let image = egui::Image::from_bytes(format!("bytes://{id}.svg"), whitened_svg(bytes))
+        .fit_to_exact_size(Vec2::splat(12.0))
+        .tint(ui.visuals().text_color());
+    ui.add(egui::Button::image(image).min_size(Vec2::new(26.0, 16.0)))
 }
 
 pub(crate) fn icon_toggle_button(
