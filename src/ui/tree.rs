@@ -463,7 +463,7 @@ pub fn draw_tree(
                 .map(|(id, x)| format!("{}@{:.0}", id, x))
                 .collect::<Vec<_>>()
                 .join(" ");
-            println!("STAGE_{} row={} [{}]", stage, row, order);
+            log::debug!("STAGE_{} row={} [{}]", stage, row, order);
         }
     };
     // Diagnose: große Einzelverschiebungen (>1000) je Verhandlungsteilschritt.
@@ -480,7 +480,7 @@ pub fn draw_tree(
             .collect();
         moves.sort_by(|a, b| (b.2 - b.1).abs().total_cmp(&(a.2 - a.1).abs()));
         for (id, before, after) in moves.into_iter().take(20) {
-            println!(
+            log::debug!(
                 "NEG_MOVE stage={} id={} from={:.0} to={:.0} d={:.0}",
                 stage,
                 id,
@@ -1320,7 +1320,7 @@ pub fn draw_tree(
                         .as_deref()
                         .and_then(&pos)
                         .unwrap_or(Pos2::ZERO);
-                    println!(
+                    log::debug!(
                         "LAYOUT_SINGLE_CHILD_DIAGONAL family={} child={} name=\"{}\" sideways_px={:.1} origin=({:.1},{:.1}) target=({:.1},{:.1}) child_pos=({:.1},{:.1}) parent_a={} pos=({:.1},{:.1}) parent_b={} pos=({:.1},{:.1}) raw={:.1} effective={:.1} block=({:.1},{:.1})-({:.1},{:.1})",
                         family.id,
                         child,
@@ -1609,11 +1609,11 @@ pub fn draw_tree(
                 for id in &move_set {
                     *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
                 }
-                if cfg!(debug_assertions) && view == TreeView::Ancestors {
+                if log_layout && view == TreeView::Ancestors {
                     let offsets: Vec<_> = move_set.iter()
                         .map(|id| format!("{}:{:.1}", id, manual_offsets.get(id.as_str()).copied().unwrap_or(0.0)))
                         .collect();
-                    println!("DRAG_PICK person={} move_set=[{}] zoom={:.3} layout_delta={:.1}",
+                    log::debug!("DRAG_PICK person={} move_set=[{}] zoom={:.3} layout_delta={:.1}",
                         person.id, offsets.join(", "), zoom, layout_delta);
                 }
                 *card_drag = Some((person.id.clone(), move_set));
@@ -1770,7 +1770,7 @@ pub fn draw_tree(
             }
         }
     }
-    if cfg!(debug_assertions)
+    if log_layout
         && (drag_started || drag_ended)
         && orientation == TreeOrientation::Vertical
     {
@@ -1789,7 +1789,7 @@ pub fn draw_tree(
                     let eb = eff_owned.get(f.parent_b.as_deref().unwrap_or("")).copied().unwrap_or(0.0);
                     let oa = manual_offsets.get(f.parent_a.as_deref().unwrap_or("")).copied().unwrap_or(0.0);
                     let ob = manual_offsets.get(f.parent_b.as_deref().unwrap_or("")).copied().unwrap_or(0.0);
-                    println!("  FAM {}: {}({:.0}) <-> {}({:.0}) dist={:.1} offsets=({:.1},{:.1}) eff=({:.1},{:.1})",
+                    log::debug!("  FAM {}: {}({:.0}) <-> {}({:.0}) dist={:.1} offsets=({:.1},{:.1}) eff=({:.1},{:.1})",
                         f.id, f.parent_a.as_deref().unwrap_or("?"), a.x,
                         f.parent_b.as_deref().unwrap_or("?"), b.x, d, oa, ob, ea, eb);
                 }
@@ -1797,10 +1797,10 @@ pub fn draw_tree(
         }
         let avg = if count > 0 { total / count as f32 } else { 0.0 };
         if drag_started {
-            println!("DRAG_START avg_parent_dist={:.1} ({} families, view={:?}, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
+            log::debug!("DRAG_START avg_parent_dist={:.1} ({} families, view={:?}, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
                 avg, count, view, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
         } else {
-            println!("DRAG_END   avg_parent_dist={:.1} ({} families, view={:?}, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
+            log::debug!("DRAG_END   avg_parent_dist={:.1} ({} families, view={:?}, zoom={:.3}, root={} gen_limit={} visible={} peak_eff={:.1})",
                 avg, count, view, zoom, root, generation_limit, rows.iter().map(|r| r.len()).sum::<usize>(), peak_eff);
         }
     }
@@ -1844,7 +1844,7 @@ fn log_layout_diagnostics(
         .values()
         .map(|value| value.abs())
         .fold(0.0f32, f32::max);
-    println!(
+    log::debug!(
         "LAYOUT_DIAG root={} name=\"{}\" view={:?} orientation={:?} zoom={:.3} rows={:?} bounds=({:.1}x{:.1}) manual={} nonzero={} zero={} max_manual={:.1} max_effective={:.1}",
         root,
         root_name,
@@ -1876,7 +1876,7 @@ fn log_layout_diagnostics(
     });
     for (id, raw, effective) in offset_offenders.into_iter().take(10) {
         let name = relations.find(id).map(Person::display_name).unwrap_or_default();
-        println!(
+        log::debug!(
             "LAYOUT_OFFSET id={} name=\"{}\" row={} raw={:.1} effective={:.1}",
             id,
             name,
@@ -1940,7 +1940,7 @@ fn log_layout_diagnostics(
     {
         let left_name = relations.find(left).map(Person::display_name).unwrap_or_default();
         let right_name = relations.find(right).map(Person::display_name).unwrap_or_default();
-        println!(
+        log::debug!(
             "LAYOUT_GAP row={} gap={:.1} nominal={:.1} left={} name=\"{}\" edge={:.1} group={} raw={:.1} effective={:.1} right={} name=\"{}\" edge={:.1} group={} raw={:.1} effective={:.1}",
             row,
             actual_gap,
@@ -1972,7 +1972,7 @@ fn log_layout_diagnostics(
         }
     }
     for (child, families) in origins.into_iter().filter(|(_, families)| families.len() > 1) {
-        println!(
+        log::debug!(
             "LAYOUT_MULTI_ORIGIN child={} name=\"{}\" families={:?} primary={}",
             child,
             relations.find(child).map(Person::display_name).unwrap_or_default(),
@@ -2002,7 +2002,7 @@ fn log_layout_diagnostics(
             .into_iter()
             .filter(|(_, families)| families.len() > 1)
         {
-            println!(
+            log::debug!(
                 "LAYOUT_DUP_PARTNER owner={} partner={} families={:?}",
                 id, partner, families
             );
@@ -2022,7 +2022,7 @@ fn log_layout_diagnostics(
             .map(|(id, x)| format!("{}@{:.0}", id, x))
             .collect::<Vec<_>>()
             .join(" ");
-        println!("LAYOUT_ROW row={} n={} order=[{}]", row, items.len(), order);
+        log::debug!("LAYOUT_ROW row={} n={} order=[{}]", row, items.len(), order);
     }
 
     // Familien: Abstand zwischen Eltern-Junction und dem Mittel der
@@ -2071,7 +2071,7 @@ fn log_layout_diagnostics(
                 .map(|(id, x)| format!("{}@{:.0}", id, x))
                 .collect::<Vec<_>>()
                 .join(" ");
-            println!(
+            log::debug!(
                 "LAYOUT_FAMILY id={} row={} delta={:.0} junction={:.0} childmean={:.0} parents=[{}] children=[{}]",
                 family.id, row, delta, junction, child_mean, parents_list, children_list,
             );

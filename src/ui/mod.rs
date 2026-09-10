@@ -329,14 +329,14 @@ impl MiniGramps {
         app
     }
 
-    /// Log: Terminal (`println!`) + Debug-Leiste (`panels::show_debug`).
+    /// Log: Terminal (`log::info!`) + Debug-Leiste (`panels::show_debug`).
     pub fn log(&mut self, message: impl Into<String>) {
         let line = format!(
             "[{:>9.3}s] {}",
             self.started.elapsed().as_secs_f32(),
             message.into()
         );
-        println!("{line}");
+        log::info!("{line}");
     }
 
     /// Projekt in den Datenordner schreiben (`<library>/familienbaum…json`).
@@ -1019,7 +1019,7 @@ impl eframe::App for MiniGramps {
                     .on_hover_text("Stammbaum zentrieren und im Fenster einpassen (Zoom-Fit)")
                     .clicked()
                 {
-                    println!("CENTER: zoom={:.3} pan=({:.1},{:.1}) offsets={}",
+                    log::debug!("CENTER: zoom={:.3} pan=({:.1},{:.1}) offsets={}",
                         self.zoom, self.pan.x, self.pan.y, self.manual_offsets.len());
                     self.fit_pending = true;
                 }
@@ -1027,7 +1027,7 @@ impl eframe::App for MiniGramps {
                     .on_hover_text("Alle manuellen Verschiebungen zurücksetzen (Layout-Reset)")
                     .clicked()
                 {
-                    println!("RESET: clearing {} offsets, zoom={:.3} pan=({:.1},{:.1})",
+                    log::debug!("RESET: clearing {} offsets, zoom={:.3} pan=({:.1},{:.1})",
                         self.manual_offsets.len(), self.zoom, self.pan.x, self.pan.y);
                     if !self.manual_offsets.is_empty() {
                         self.snapshot("Layout zurücksetzen");
@@ -1133,16 +1133,10 @@ impl eframe::App for MiniGramps {
                 let drag_started = mouse_is_down && !self.drag_mouse_was_down;
                 let drag_ended = !mouse_is_down && self.drag_mouse_was_down;
                 self.drag_mouse_was_down = mouse_is_down;
-// Umfangreiche Layoutdiagnose: in Debug-Builds immer, in Release über die
-// Umgebungsvariable MINIGRAMPS_LAYOUT_LOG (oder F9). So lassen sich kaputte
-// Layouts auch im Release-Build protokollieren.
-let log_layout_enabled_by_env = {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("MINIGRAMPS_LAYOUT_LOG").is_some())
-};
+// Umfangreiche Layoutdiagnose: Level `debug` (Standard aus), Auslöser sind
+// Fit/Drag-Ende oder F9. Sichtbar mit `RUST_LOG=minigramps=debug`.
 let log_layout_request = ui.input(|i| i.key_pressed(egui::Key::F9));
-let log_layout = (cfg!(debug_assertions) || log_layout_enabled_by_env)
-    && (self.fit_pending || drag_ended || log_layout_request);
+let log_layout = self.fit_pending || drag_ended || log_layout_request;
                 // Lang-Touch-Debouncer und aktiven Karten-Drag zurücksetzen,
                 // wenn nichts gedrückt ist. Drag-Ende → Layout live sichern.
                 if !mouse_is_down {
@@ -1524,6 +1518,12 @@ fn handle_window_resize(ctx: &egui::Context) {
 
 /// Einstiegspunkt: Fenster, App-Icon (Logo gerendert via resvg), Schriften.
 pub fn run() -> eframe::Result<()> {
+    // Logging über Level steuern: Standard zeigt die App-Meldungen (info),
+    // Layoutdiagnose nur mit `RUST_LOG=minigramps=debug` (oder `trace`).
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("minigramps=info,warn"),
+    )
+    .init();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280., 760.])
         .with_min_inner_size([900., 560.])

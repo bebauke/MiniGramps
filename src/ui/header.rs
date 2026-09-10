@@ -20,6 +20,7 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
     let colors = palette(app.dark_mode);
     egui::TopBottomPanel::top("header")
         .exact_height(58.0)
+        .show_separator_line(false)
         .frame(egui::Frame::new().fill(colors.header).inner_margin(6))
         .show(ctx, |ui| {
             // Zuerst als Hintergrund registrieren; spaeter angelegte Buttons
