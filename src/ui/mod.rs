@@ -125,6 +125,8 @@ pub struct MiniGramps {
     pub inline_edit: bool,
     /// Suchtext des Beziehungspickers.
     pub relation_query: String,
+    /// Nachname des Beziehungspickers.
+    pub relation_family_name: String,
     /// Per Drag-and-drop eingefügte Datei mit unklarer Verwendung.
     pub pending_image: Option<PathBuf>,
     /// Vollbildansicht eines Galerie-Bildes.
@@ -197,6 +199,7 @@ impl MiniGramps {
             draft: person("", "", "", "", Gender::Unknown),
             inline_edit: false,
             relation_query: String::new(),
+            relation_family_name: String::new(),
             pending_image: None,
             lightbox_image: None,
             lightbox_tx,

@@ -704,7 +704,12 @@ fn relation_section(
     entries: &[Person],
     icon_bytes: &'static [u8],
 ) {
+    let old_picker = app.relation_picker;
     picker::relation_header(ui, label, kind, &mut app.relation_picker, app.inline_edit);
+    if app.relation_picker != old_picker {
+        app.relation_query.clear();
+        app.relation_family_name.clear();
+    }
     if entries.is_empty() {
         ui.label(
             egui::RichText::new("Nicht hinterlegt")

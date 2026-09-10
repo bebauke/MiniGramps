@@ -111,30 +111,61 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                 });
         });
     }
-    ui.text_edit_singleline(&mut app.relation_query);
-    let needle = app.relation_query.to_lowercase();
-    let suggestions: Vec<_> = app
-        .data
-        .people
-        .iter()
-        .filter(|person| {
-            person.id != selected_id && person.display_name().to_lowercase().contains(&needle)
-        })
-        .take(5)
-        .cloned()
-        .collect();
-    for candidate in suggestions {
-        if ui.small_button(candidate.display_name()).clicked() {
+    if app.relation_family_name.is_empty() {
+        if let Some(p) = app.data.find(selected_id) {
+            let mut prefill = String::new();
+            if kind == RelationKind::Child {
+                if p.gender == Gender::Male {
+                    prefill = p.family_name.clone();
+                } else {
+                    let partners = app.data.partners_of(&p.id);
+                    if let Some(partner) = partners.iter().find(|partner| partner.gender == Gender::Male) {
+                        prefill = partner.family_name.clone();
+                    } else {
+                        prefill = p.family_name.clone();
+                    }
+                }
+            } else if kind == RelationKind::Sibling {
+                let parents = app.data.parents_of(selected_id);
+                if let Some(father) = parents.iter().find(|parent| parent.gender == Gender::Male) {
+                    prefill = father.family_name.clone();
+                } else if let Some(parent) = parents.first() {
+                    prefill = parent.family_name.clone();
+                } else {
+                    prefill = p.family_name.clone();
+                }
+            }
+            app.relation_family_name = prefill;
+        }
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Vorname:");
+        ui.text_edit_singleline(&mut app.relation_query);
+        ui.label("Nachname:");
+        ui.text_edit_singleline(&mut app.relation_family_name);
+        if ui.button("+").on_hover_text("Person anlegen und direkt verknüpfen").clicked() {
+            let new_id = format!("p{}", app.data.people.len() + 1);
+            app.data
+                .people
+                .push(person(&new_id, &app.relation_query, &app.relation_family_name, "", Gender::Unknown));
             match kind {
-                RelationKind::Partner => app.data.link_partner(selected_id, &candidate.id),
-                RelationKind::Parent => app.data.link_child(&candidate.id, selected_id),
+                RelationKind::Partner => {
+                    app.data.link_partner(selected_id, &new_id);
+                    app.status = format!("Partner angelegt: {} {}", app.relation_query, app.relation_family_name);
+                }
+                RelationKind::Parent => {
+                    app.data.link_child(&new_id, selected_id);
+                    app.status = format!("Elternteil angelegt: {} {}", app.relation_query, app.relation_family_name);
+                }
                 RelationKind::Child => {
                     app.data.link_child_to(
                         Some(selected_id),
                         app.pending_child_partner.as_deref(),
-                        &candidate.id,
+                        &new_id,
                         app.pending_child_relation,
                     );
+                    app.status = format!("Kind angelegt: {} {}", app.relation_query, app.relation_family_name);
                 }
                 RelationKind::Sibling => {
                     let parent_id = app
@@ -143,57 +174,63 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                         .first()
                         .map(|parent| parent.id.clone());
                     if let Some(parent_id) = parent_id {
-                        app.data.link_child(&parent_id, &candidate.id);
+                        app.data.link_child(&parent_id, &new_id);
                     }
+                    app.status = format!("Geschwister angelegt: {} {}", app.relation_query, app.relation_family_name);
                 }
             }
             app.relation_picker = None;
             app.relation_query.clear();
+            app.relation_family_name.clear();
+            app.log(format!("Neue Person angelegt: {new_id}"));
         }
-    }
-    if ui.small_button("+ Neu anlegen").clicked() {
-        let new_id = format!("p{}", app.data.people.len() + 1);
-        app.data
+    });
+
+    let needle = app.relation_query.to_lowercase();
+    if !needle.is_empty() {
+        let suggestions: Vec<_> = app
+            .data
             .people
-            .push(person(&new_id, "Neue", "Person", "", Gender::Unknown));
-        match kind {
-            RelationKind::Partner => {
-                app.data.link_partner(selected_id, &new_id);
-                app.status = "Neuer Partner angelegt".into();
-            }
-            RelationKind::Parent => {
-                app.data.link_child(&new_id, selected_id);
-                app.status = "Neues Elternteil angelegt".into();
-            }
-            RelationKind::Child => {
-                app.data.link_child_to(
-                    Some(selected_id),
-                    app.pending_child_partner.as_deref(),
-                    &new_id,
-                    app.pending_child_relation,
-                );
-                app.status = "Neues Kind angelegt".into();
-            }
-            RelationKind::Sibling => {
-                let parent_id = app
-                    .data
-                    .parents_of(selected_id)
-                    .first()
-                    .map(|parent| parent.id.clone());
-                if let Some(parent_id) = parent_id {
-                    app.data.link_child(&parent_id, &new_id);
+            .iter()
+            .filter(|person| {
+                person.id != selected_id && person.display_name().to_lowercase().contains(&needle)
+            })
+            .take(5)
+            .cloned()
+            .collect();
+        if !suggestions.is_empty() {
+            ui.add_space(4.0);
+            ui.label("Existierende Person verknüpfen:");
+            for candidate in suggestions {
+                if ui.small_button(candidate.display_name()).clicked() {
+                    match kind {
+                        RelationKind::Partner => app.data.link_partner(selected_id, &candidate.id),
+                        RelationKind::Parent => app.data.link_child(&candidate.id, selected_id),
+                        RelationKind::Child => {
+                            app.data.link_child_to(
+                                Some(selected_id),
+                                app.pending_child_partner.as_deref(),
+                                &candidate.id,
+                                app.pending_child_relation,
+                            );
+                        }
+                        RelationKind::Sibling => {
+                            let parent_id = app
+                                .data
+                                .parents_of(selected_id)
+                                .first()
+                                .map(|parent| parent.id.clone());
+                            if let Some(parent_id) = parent_id {
+                                app.data.link_child(&parent_id, &candidate.id);
+                            }
+                        }
+                    }
+                    app.relation_picker = None;
+                    app.relation_query.clear();
+                    app.relation_family_name.clear();
                 }
-                app.status = "Neues Geschwister angelegt".into();
             }
         }
-        app.relation_picker = None;
-        app.relation_query.clear();
-        app.selected = Some(new_id.clone());
-        if let Some(created) = app.data.find(&new_id).cloned() {
-            app.draft = created;
-            app.inline_edit = true;
-        }
-        app.log(format!("Neue Person angelegt: {new_id}"));
     }
 }
 

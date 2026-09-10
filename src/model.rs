@@ -399,8 +399,54 @@ impl TreeData {
             .filter_map(|sibling| self.find(sibling))
             .collect()
     }
+
+    pub fn get_partnership_dates(&self, p1: &Person, p2: &Person) -> (Option<(i32, i32, i32)>, Option<(i32, i32, i32)>) {
+        let mut zus_date = None;
+        let mut mar_date = None;
+        let is_zus_event = |kind: &EventKind| -> bool {
+            match kind {
+                EventKind::Custom(s) => {
+                    let sl = s.to_lowercase();
+                    sl == "partnerschaft" || sl == "zusammenkommen" || sl == "zusammenkunft" || sl == "zusammen"
+                }
+                _ => false,
+            }
+        };
+        for event in &p1.events {
+            if is_zus_event(&event.kind) {
+                if let Some(d) = parse_birth_date(&event.date) {
+                    if zus_date.is_none() || d < zus_date.unwrap() {
+                        zus_date = Some(d);
+                    }
+                }
+            } else if event.kind == EventKind::Marriage {
+                if let Some(d) = parse_birth_date(&event.date) {
+                    if mar_date.is_none() || d < mar_date.unwrap() {
+                        mar_date = Some(d);
+                    }
+                }
+            }
+        }
+        for event in &p2.events {
+            if is_zus_event(&event.kind) {
+                if let Some(d) = parse_birth_date(&event.date) {
+                    if zus_date.is_none() || d < zus_date.unwrap() {
+                        zus_date = Some(d);
+                    }
+                }
+            } else if event.kind == EventKind::Marriage {
+                if let Some(d) = parse_birth_date(&event.date) {
+                    if mar_date.is_none() || d < mar_date.unwrap() {
+                        mar_date = Some(d);
+                    }
+                }
+            }
+        }
+        (zus_date, mar_date)
+    }
+
     pub fn partners_of(&self, id: &str) -> Vec<&Person> {
-        self.families
+        let mut partners: Vec<&Person> = self.families
             .iter()
             .filter_map(|f| {
                 if f.parent_a.as_deref() == Some(id) {
@@ -412,7 +458,33 @@ impl TreeData {
                 }
             })
             .filter_map(|partner| self.find(partner))
-            .collect()
+            .collect();
+
+        if let Some(p1) = self.find(id) {
+            partners.sort_by(|a, b| {
+                let (z_a, m_a) = self.get_partnership_dates(p1, a);
+                let (z_b, m_b) = self.get_partnership_dates(p1, b);
+
+                let key_a = if let Some(da) = z_a {
+                    (0, da, m_a.unwrap_or((9999, 12, 31)), a.id.as_str())
+                } else if let Some(da) = m_a {
+                    (1, da, (9999, 12, 31), a.id.as_str())
+                } else {
+                    (2, (9999, 12, 31), (9999, 12, 31), a.id.as_str())
+                };
+
+                let key_b = if let Some(db) = z_b {
+                    (0, db, m_b.unwrap_or((9999, 12, 31)), b.id.as_str())
+                } else if let Some(db) = m_b {
+                    (1, db, (9999, 12, 31), b.id.as_str())
+                } else {
+                    (2, (9999, 12, 31), (9999, 12, 31), b.id.as_str())
+                };
+
+                key_a.cmp(&key_b)
+            });
+        }
+        partners
     }
     /// Verknüpft zwei Personen als Partner. Nutzt eine offene Ein-Elternteil-
     /// Familie, sonst eine neue. Aufgerufen aus dem Beziehungspicker
