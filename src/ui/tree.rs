@@ -870,12 +870,12 @@ pub fn draw_tree(
                     if !*manual {
                         let min_d = prev_end
                             .map(|(prev, padding)| {
-                                prev + gap + padding + container_padding - start
+                                prev + MIN_CARD_GAP + padding + container_padding - start
                             })
                             .unwrap_or(f32::NEG_INFINITY);
                         let max_d = next
                             .map(|(next, padding)| {
-                                next - gap - container_padding - padding - end
+                                next - MIN_CARD_GAP - container_padding - padding - end
                             })
                             .unwrap_or(f32::INFINITY);
                         if min_d <= max_d {
@@ -2442,10 +2442,11 @@ fn repel_pass<'a>(
                 .collect();
             spans.sort_by(|a, b| a.1.total_cmp(&b.1));
             for window in spans.windows(2) {
-                // Container: gezeichneter Innen-Rand plus übergebenem Abstand
-                // (Automatik: Baum-Abstand; final nach manuellen Versätzen:
-                // nur MIN_CARD_GAP, damit enges manuelles Platzieren bleibt).
-                let need = gap
+                // Container als Blöcke nur mit festem Mindestabstand + Rand
+                // trennen. Würde hier der (große) Baum-Abstand erzwungen, zöge
+                // der Pass die Zeilen auseinander und Kindergruppen ließen sich
+                // nicht mehr unter ihre Eltern zurückholen.
+                let need = MIN_CARD_GAP
                     + if window[0].0.len() > 1 {
                         sibling_container_padding
                     } else {
