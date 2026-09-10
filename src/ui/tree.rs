@@ -2765,7 +2765,7 @@ fn draw_person_card(
                     Align2::CENTER_CENTER,
                     person.family_name.clone(),
                     FontId::proportional(13. * zoom),
-                    Color32::from_rgb(214, 218, 218),
+                    Color32::WHITE,
                 );
             }
         }
