@@ -986,42 +986,48 @@ impl eframe::App for MiniGramps {
                 let mut action: Option<TreeAction> = None;
                 let viewed = self.selected.clone();
                 let reference = self.reference.clone();
-                    let expanded = self.expanded.clone();
-                    let mut long_press_used = self.long_press_used;
-                    let previous_manual_offsets = self.manual_offsets.clone();
-                    let card_drag_was_active = self.card_drag.is_some();
-                    let mut manual_offsets = self.manual_offsets.clone();
-                    let mut card_drag = self.card_drag.take();
-                    let mut frame_drag = false;
-                    let content_bounds = tree::draw_tree(
-                        &painter,
-                        response.rect,
-                        &self.data,
-                        reference.as_deref(),
-                        viewed.as_deref(),
-                        &mut action,
-                        &expanded,
-                        &mut long_press_used,
-                        &mut card_drag,
-                        &mut frame_drag,
-                        self.max_generations,
-                        &mut manual_offsets,
-                        &self.library,
-                        &mut self.photo_cache,
-                        self.tree_view,
-                        self.tree_orientation,
-                        self.card_layout,
-                        self.zoom,
-                        self.pan,
-                        drag_started,
-                        drag_ended,
-                        log_layout,
-                    );
-                    self.long_press_used = long_press_used;
-                    if self.tree_tool == TreeTool::Cursor {
-                        if !card_drag_was_active
-                            && card_drag.is_some()
-                            && manual_offsets != previous_manual_offsets
+                let card_drag_was_active = self.card_drag.is_some();
+                let may_start_card_drag = self.tree_tool == TreeTool::Cursor
+                    && !card_drag_was_active
+                    && mouse_is_down
+                    && ui.input(|i| i.modifiers.shift);
+                let previous_manual_offsets =
+                    may_start_card_drag.then(|| self.manual_offsets.clone());
+                let mut manual_offsets = if self.tree_tool == TreeTool::Cursor {
+                    std::mem::take(&mut self.manual_offsets)
+                } else {
+                    self.manual_offsets.clone()
+                };
+                let mut card_drag = self.card_drag.take();
+                let mut frame_drag = false;
+                let content_bounds = tree::draw_tree(
+                    &painter,
+                    response.rect,
+                    &self.data,
+                    reference.as_deref(),
+                    viewed.as_deref(),
+                    &mut action,
+                    &self.expanded,
+                    &mut self.long_press_used,
+                    &mut card_drag,
+                    &mut frame_drag,
+                    self.max_generations,
+                    &mut manual_offsets,
+                    &self.library,
+                    &mut self.photo_cache,
+                    self.tree_view,
+                    self.tree_orientation,
+                    self.card_layout,
+                    self.zoom,
+                    self.pan,
+                    drag_started,
+                    drag_ended,
+                    log_layout,
+                );
+                if self.tree_tool == TreeTool::Cursor {
+                    if !card_drag_was_active && card_drag.is_some() {
+                        if let Some(previous_manual_offsets) = previous_manual_offsets
+                            .filter(|previous| previous != &manual_offsets)
                         {
                             let drag_id = card_drag
                                 .as_ref()
@@ -1037,12 +1043,13 @@ impl eframe::App for MiniGramps {
                                 previous_manual_offsets,
                             );
                         }
-                        self.manual_offsets = manual_offsets;
-                        self.card_drag = card_drag;
-                    } else {
-                        action = None;
-                        self.card_drag = None;
                     }
+                    self.manual_offsets = manual_offsets;
+                    self.card_drag = card_drag;
+                } else {
+                    action = None;
+                    self.card_drag = None;
+                }
                 // Zoom-Fit: den gelieferten Inhaltsbereich (Layout-Koordo-
                 // dinaten) passend in die Zeichenfläche skalieren und mittig
                 // setzen — einmalig nach Laden/Referenzwechsel.

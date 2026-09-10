@@ -12,7 +12,7 @@
 
 - [ ] Baumlayout von der Darstellung trennen und per Revisionsschlüssel cachen
 - [ ] Unveränderliche Arbeit in `repel_pass` aus den Iterationen herausziehen
-- [ ] Zentrale Frame-Kopien von `expanded` und `manual_offsets` entfernen
+- [x] Zentrale Frame-Kopien von `expanded` und `manual_offsets` entfernen
 - [ ] Fotos vollständig asynchron dekodieren und GPU-Uploads pro Frame begrenzen
 - [ ] Undo-Historie von vollständigen `TreeData`-Kopien auf Änderungsbefehle umstellen
 - [ ] Einstellungen dauerhaft speichern
