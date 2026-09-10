@@ -359,12 +359,27 @@ impl TreeData {
         self.people.iter().find(|p| p.id == id)
     }
     pub fn children_of(&self, id: &str) -> Vec<&Person> {
-        self.families
+        let mut children: Vec<&Person> = self.families
             .iter()
             .filter(|f| f.parent_a.as_deref() == Some(id) || f.parent_b.as_deref() == Some(id))
             .flat_map(|f| f.children.iter())
             .filter_map(|id| self.find(id))
-            .collect()
+            .collect();
+
+        children.sort_by(|a, b| {
+            let key_a = if let Some((y, m, d)) = parse_birth_date(&a.birth) {
+                (0, y, m, d, a.id.as_str())
+            } else {
+                (1, 0, 0, 0, a.id.as_str())
+            };
+            let key_b = if let Some((y, m, d)) = parse_birth_date(&b.birth) {
+                (0, y, m, d, b.id.as_str())
+            } else {
+                (1, 0, 0, 0, b.id.as_str())
+            };
+            key_a.cmp(&key_b)
+        });
+        children
     }
     pub fn parents_of(&self, id: &str) -> Vec<&Person> {
         self.families
@@ -707,6 +722,92 @@ pub fn person(
         name_type: String::new(),
         name_origin: String::new(),
         events: Vec::new(),
+    }
+}
+
+/// Hilfsfunktion, um ein beliebiges Geburtsdatums-String in eine vergleichbare
+/// Struktur (Jahr, Monat, Tag) zu parsen. Unterstützt Deutsch und Englisch,
+/// volle Monatsnamen und Abkürzungen.
+pub fn parse_birth_date(date_str: &str) -> Option<(i32, i32, i32)> {
+    let s = date_str.trim().to_lowercase();
+    if s.is_empty() || s == "unbekannt" {
+        return None;
+    }
+    // Tokenize nach Whitespace, Punkten, Bindestrichen oder Slashes
+    let tokens: Vec<&str> = s.split(|c: char| c.is_whitespace() || c == '.' || c == '-' || c == '/').filter(|t| !t.is_empty()).collect();
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut year = None;
+    let mut month = None;
+    let mut day = None;
+
+    let month_names = [
+        vec!["jan", "januar", "january"],
+        vec!["feb", "februar", "february"],
+        vec!["mar", "mär", "märz", "march"],
+        vec!["apr", "april"],
+        vec!["mai", "may"],
+        vec!["jun", "juni", "june"],
+        vec!["jul", "juli", "july"],
+        vec!["aug", "august"],
+        vec!["sep", "september"],
+        vec!["okt", "oct", "oktober", "october"],
+        vec!["nov", "november"],
+        vec!["dez", "dec", "dezember", "december"],
+    ];
+
+    for token in &tokens {
+        let mut found_month = false;
+        for (idx, aliases) in month_names.iter().enumerate() {
+            if aliases.iter().any(|&alias| token.starts_with(alias)) {
+                month = Some((idx + 1) as i32);
+                found_month = true;
+                break;
+            }
+        }
+        if found_month {
+            continue;
+        }
+
+        if let Ok(num) = token.parse::<i32>() {
+            if num >= 1000 && num <= 3000 {
+                year = Some(num);
+            } else if num >= 1 && num <= 31 {
+                if day.is_none() {
+                    day = Some(num);
+                } else if month.is_none() && num <= 12 {
+                    month = Some(num);
+                }
+            }
+        }
+    }
+
+    if tokens.len() == 3 {
+        if let (Ok(num1), Ok(num2), Ok(num3)) = (tokens[0].parse::<i32>(), tokens[1].parse::<i32>(), tokens[2].parse::<i32>()) {
+            if num3 >= 1000 && num3 <= 3000 {
+                year = Some(num3);
+                month = Some(num2);
+                day = Some(num1);
+            } else if num1 >= 1000 && num1 <= 3000 {
+                year = Some(num1);
+                month = Some(num2);
+                day = Some(num3);
+            }
+        }
+    } else if tokens.len() == 1 {
+        if let Ok(num) = tokens[0].parse::<i32>() {
+            if num >= 1000 && num <= 3000 {
+                year = Some(num);
+            }
+        }
+    }
+
+    if let Some(y) = year {
+        Some((y, month.unwrap_or(1), day.unwrap_or(1)))
+    } else {
+        None
     }
 }
 

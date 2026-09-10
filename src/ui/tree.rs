@@ -1643,7 +1643,7 @@ fn repel_pass<'a>(
     spread: &mut HashMap<&'a str, f32>,
     rows: &[Vec<&'a str>],
     row_order: &[usize],
-    data: &TreeData,
+    data: &'a TreeData,
     levels: &HashMap<&'a str, usize>,
     view: TreeView,
     orientation: TreeOrientation,
@@ -1761,10 +1761,25 @@ fn repel_pass<'a>(
                 }
             }
         }
+        let birth_key = |id: &'a str| -> (i32, i32, i32, i32, &'a str) {
+            if let Some(p) = data.find(id) {
+                if let Some((y, m, d)) = crate::model::parse_birth_date(&p.birth) {
+                    (0, y, m, d, p.id.as_str())
+                } else {
+                    (1, 0, 0, 0, p.id.as_str())
+                }
+            } else {
+                (1, 0, 0, 0, id)
+            }
+        };
         members.sort_by(|a, b| {
             let anchor_a = anchors.get(a.0).copied().unwrap_or(a.1);
             let anchor_b = anchors.get(b.0).copied().unwrap_or(b.1);
-            anchor_a.total_cmp(&anchor_b).then(a.1.total_cmp(&b.1))
+            anchor_a.total_cmp(&anchor_b).then_with(|| {
+                let key_a = birth_key(a.0);
+                let key_b = birth_key(b.0);
+                key_a.cmp(&key_b)
+            })
         });
         fn group_key<'b>(group_of: &'b HashMap<&'b str, &'b str>, id: &'b str) -> &'b str {
             group_of.get(id).copied().unwrap_or(id)
