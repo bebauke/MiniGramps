@@ -129,10 +129,17 @@ pub struct MiniGramps {
     /// Menge. Gilt bis zum Loslassen – unabhängig davon, wo der Druck
     /// ursprünglich startede (sonst bricht der Drag am Kartenrand ab).
     pub card_drag: Option<(String, Vec<String>)>,
+    /// Latch gegen Mehrfach-Tausch beim Partner-Umsortieren: Wird nach einem
+    /// Tausch gesetzt und erst beim Loslassen zurückgesetzt, damit desselbe
+    /// Ziehen nicht pro Frame erneut tauscht (Flicker).
+    pub partner_swap_latch: bool,
     /// Maus-Status vom Vorgängerframe zur Erkennung von Drag-Start/Ende.
     pub drag_mouse_was_down: bool,
     /// Standard-Generationenzahl (Einstellungen; 0 = alle).
     pub max_generations: usize,
+    /// Kartenabstand im automatischen Layout (Einstellungen; Standard 48 =
+    /// doppelter ursprünglicher Abstand, damit der Vorfahrenbaum luftiger ist).
+    pub layout_gap: f32,
     /// Datenordner: Speicherort (`save`) und Medien-Basisordner (`media`).
     pub library: PathBuf,
     pub status: String,
@@ -237,8 +244,10 @@ impl MiniGramps {
             manual_offsets: HashMap::new(),
             long_press_used: false,
             card_drag: None,
+            partner_swap_latch: false,
             drag_mouse_was_down: false,
             max_generations: 5,
+            layout_gap: 48.0,
             library,
             status: "Beispielbaum geladen".into(),
             zoom: 1.0,
@@ -964,8 +973,14 @@ impl eframe::App for MiniGramps {
                     .paint_at(ui, watermark_rect);
                 let scroll = ui.input(|i| i.raw_scroll_delta.y);
                 if response.hovered() && scroll != 0.0 {
-                    self.zoom = (self.zoom * (1.0 + scroll * 0.001))
-                        .clamp(0.15, MAX_INTERACTIVE_ZOOM);
+                    // Zoom um den Mauspunkt: derselbe Layoutpunkt bleibt unter
+                    // dem Cursor stehen (`zoom_at` passt den Pan an).
+                    if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                        self.zoom_at(response.rect, pointer, 1.0 + scroll * 0.001);
+                    } else {
+                        self.zoom = (self.zoom * (1.0 + scroll * 0.001))
+                            .clamp(0.15, MAX_INTERACTIVE_ZOOM);
+                    }
                 }
                 // Maus-Transitions-Erkennung für Drag-Logging.
                 let mouse_is_down = ui.input(|i| i.pointer.primary_down());
@@ -999,6 +1014,7 @@ impl eframe::App for MiniGramps {
                     self.manual_offsets.clone()
                 };
                 let mut card_drag = self.card_drag.take();
+                let mut swap_latch = self.partner_swap_latch;
                 let mut frame_drag = false;
                 let content_bounds = tree::draw_tree(
                     &painter,
@@ -1009,9 +1025,11 @@ impl eframe::App for MiniGramps {
                     &mut action,
                     &self.expanded,
                     &mut self.long_press_used,
+                    &mut swap_latch,
                     &mut card_drag,
                     &mut frame_drag,
                     self.max_generations,
+                    self.layout_gap,
                     &mut manual_offsets,
                     &self.library,
                     &mut self.photo_cache,
@@ -1046,6 +1064,7 @@ impl eframe::App for MiniGramps {
                     }
                     self.manual_offsets = manual_offsets;
                     self.card_drag = card_drag;
+                    self.partner_swap_latch = swap_latch;
                 } else {
                     action = None;
                     self.card_drag = None;

@@ -226,6 +226,28 @@ impl Person {
             self.name.clone()
         }
     }
+
+    /// Erste beiden Vornamen (Token) ohne den Nachnamen – für die große
+    /// Fotoansicht, wo der Nachname separat darunter steht.
+    pub fn given_short(&self) -> String {
+        self.given_name
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Kurzname für Baumkarten: höchstens die ersten beiden Vornamen plus
+    /// Nachname, damit lange Namensfolgen die Karten nicht aufblähen.
+    pub fn display_name_short(&self) -> String {
+        let combined = format!("{} {}", self.given_short(), self.family_name);
+        let combined = combined.trim();
+        if !combined.is_empty() {
+            combined.to_string()
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 /// Art der Partnerschaft (Partner-Zeile im Beziehungseditor). Alte

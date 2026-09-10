@@ -158,6 +158,22 @@ pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
                 }
                 ui.selectable_value(&mut app.max_generations, 0, "Alle");
             });
+            let old_gap = app.layout_gap;
+            ui.horizontal(|ui| {
+                ui.label("Baum-Abstand");
+                ui.add(
+                    egui::Slider::new(&mut app.layout_gap, 16.0..=96.0)
+                        .step_by(8.0)
+                        .show_value(true),
+                )
+                .on_hover_text(
+                    "Abstand zwischen den Karten im automatischen Layout \
+                     (Standard: doppelter Grundabstand).",
+                );
+            });
+            if app.layout_gap != old_gap {
+                app.fit_pending = true;
+            }
             ui.separator();
             ui.label(
                 egui::RichText::new("SPEICHERORT")

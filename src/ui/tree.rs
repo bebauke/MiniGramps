@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 
-use crate::media::{initials, round_avatar_texture_cached};
+use crate::media::{cover_uv, initials, photo_preview_texture, round_avatar_texture_cached};
 use crate::model::{Person, TreeData};
 use crate::ui::CardLayout;
 
@@ -224,9 +224,11 @@ pub fn draw_tree(
     action: &mut Option<TreeAction>,
     expanded: &HashSet<String>,
     long_press_used: &mut bool,
+    swap_latch: &mut bool,
     card_drag: &mut Option<(String, Vec<String>)>,
     frame_drag: &mut bool,
     generation_limit: usize,
+    layout_gap: f32,
     manual_offsets: &mut HashMap<String, f32>,
     media_base: &std::path::Path,
     photo_cache: &mut HashMap<String, TextureHandle>,
@@ -336,7 +338,7 @@ pub fn draw_tree(
     } else {
         4.0f32
     };
-    let gap = 24.0f32;
+    let gap = layout_gap;
     // Geschwister-Container werden beim Zeichnen je Seite um 12 Einheiten
     // erweitert. Der Gruppenabstand berücksichtigt diese Außenpolster, damit
     // sich benachbarte Container sichtbar abstoßen statt nur zu berühren.
@@ -1646,13 +1648,19 @@ pub fn draw_tree(
             };
             let swap_axis: f32 = painter.ctx().input(|i| {
                 if !i.pointer.primary_down() {
-                    // Losgelassen: einen hier laufenden Gestus-Latch räumen.
+                    // Losgelassen: Gestus-Latches räumen.
+                    *swap_latch = false;
                     if card_drag
                         .as_ref()
                         .is_some_and(|(id, _)| id == partner.id.as_str())
                     {
                         *card_drag = None;
                     }
+                    return 0.0;
+                }
+                // Nach einem Tausch sperren, bis die Maustaste losgelassen
+                // wird – sonst tauscht dasselbe Ziehen jede Frame hin und her.
+                if *swap_latch {
                     return 0.0;
                 }
                 if !(i.modifiers.shift && free) {
@@ -1679,8 +1687,10 @@ pub fn draw_tree(
                     to.y - from.y
                 };
                 if axis.abs() >= 20.0 {
-                    // Richtung für den Tausch festhalten und Latch lösen.
+                    // Richtung für den Tausch festhalten, Latch lösen (sperrt
+                    // weitere Tausche bis zum Loslassen → kein Flicker).
                     *card_drag = None;
+                    *swap_latch = true;
                     if axis < 0.0 { -20.0 } else { 20.0 }
                 } else {
                     0.0
@@ -2220,18 +2230,35 @@ fn repel_pass<'a>(
             widths[id]
         }
     };
-    let left_offset = |id: &str| -> f32 {
-        own_extent(0, id) / 2.0
+    // Statische Kartengrößen einmalig vorbereiten (ändern sich während der
+    // Verhandlung nicht): linker/rechter Karten-Offset inkl. Partner-Pseudo-
+    // karten sowie der Geburtsdatum-Sortierschlüssel je sichtbarer Person.
+    let birth_key = |id: &'a str| -> (i32, i32, i32, i32, &'a str) {
+        if let Some(p) = relations.find(id) {
+            if let Some((y, m, d)) = crate::model::parse_birth_date(&p.birth) {
+                (0, y, m, d, p.id.as_str())
+            } else {
+                (1, 0, 0, 0, p.id.as_str())
+            }
+        } else {
+            (1, 0, 0, 0, id)
+        }
     };
-    let right_offset = |id: &str| -> f32 {
-        let mut r = own_extent(0, id) / 2.0;
+    let mut left_offsets: HashMap<&str, f32> = HashMap::new();
+    let mut right_offsets: HashMap<&str, f32> = HashMap::new();
+    let mut birth_keys: HashMap<&str, (i32, i32, i32, i32, &str)> = HashMap::new();
+    for &id in levels.keys() {
+        birth_keys.insert(id, birth_key(id));
+        let own = own_extent(0, id);
+        let mut right = own / 2.0;
         for partner in relations.partners_of(id) {
             if !visible(&partner.id) && shown_partners.contains(partner.id.as_str()) {
-                r += partner_extent(0, &partner.id) + couple_gap;
+                right += partner_extent(0, &partner.id) + couple_gap;
             }
         }
-        r
-    };
+        left_offsets.insert(id, own / 2.0);
+        right_offsets.insert(id, right);
+    }
     // Breite des TEILBAUMS je Person: eigener Footprint + alle sichtbaren
     // Nachkommen. Die "breiteste Stelle" bleibt bei Kollisionen stehen,
     // schmalere Gruppen weichen aus.
@@ -2351,12 +2378,12 @@ fn repel_pass<'a>(
                     .map(|(id, _)| (*id, spread[*id]))
                     .collect();
                 inner.sort_by(|a, b| {
-                    let key_a = birth_key(a.0);
-                    let key_b = birth_key(b.0);
+                    let key_a = birth_keys[a.0];
+                    let key_b = birth_keys[b.0];
                     key_a.cmp(&key_b)
                 });
                 for window in inner.windows(2) {
-                    let need = right_offset(window[0].0) + left_offset(window[1].0) + gap;
+                    let need = right_offsets[window[0].0] + left_offsets[window[1].0] + gap;
                     let actual = window[1].1 - window[0].1;
                     if actual < need {
                         // Nur nach rechts schieben: monotone Platzierung,
@@ -2376,11 +2403,11 @@ fn repel_pass<'a>(
                 .map(|group| {
                     let start = group
                         .iter()
-                        .map(|(id, _)| spread[*id] - left_offset(id))
+                        .map(|(id, _)| spread[*id] - left_offsets[id])
                         .fold(f32::MAX, f32::min);
                     let end = group
                         .iter()
-                        .map(|(id, _)| spread[*id] + right_offset(id))
+                        .map(|(id, _)| spread[*id] + right_offsets[id])
                         .fold(f32::MIN, f32::max);
                     // Teilbaum-Breite entscheidet, WER bei Kollision weicht.
                     let branch: f32 = group
@@ -2504,12 +2531,32 @@ fn card_width_for(
 ) -> f32 {
     let name = painter
         .layout_no_wrap(
-            person.display_name(),
+            person.display_name_short(),
             FontId::proportional(13.0),
             Color32::WHITE,
         )
         .size()
         .x;
+    let given = painter
+        .layout_no_wrap(
+            person.given_short(),
+            FontId::proportional(13.0),
+            Color32::WHITE,
+        )
+        .size()
+        .x;
+    let family = if person.family_name.is_empty() {
+        0.0
+    } else {
+        painter
+            .layout_no_wrap(
+                person.family_name.clone(),
+                FontId::proportional(11.0),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+    };
     let birth_text = if person.birth.is_empty() {
         "Unbekannt".to_string()
     } else {
@@ -2521,7 +2568,7 @@ fn card_width_for(
         .x;
     match card_layout {
         CardLayout::Compact => (64.0 + name.max(birth) + 20.0).max(215.0),
-        CardLayout::Portrait => (name.max(birth) + 24.0).max(160.0),
+        CardLayout::Portrait => (given.max(family).max(birth) + 24.0).max(160.0),
     }
 }
 
@@ -2572,26 +2619,56 @@ fn draw_person_card(
         egui::StrokeKind::Outside,
     );
     if zoom < CARD_DETAIL_MIN_ZOOM {
+        // Statt einer leeren Farbfläche das Profilbild als Vollbild-Abdeckung
+        // zeigen (Cover-Beschnitt wie im Profil). Ohne Foto bleibt die
+        // Farbfläche; der Rahmen wird über dem Foto erneut gezeichnet.
+        if let Some(texture) =
+            photo_preview_texture(painter.ctx(), person, photo_cache, media_base)
+        {
+            let tv = texture.size_vec2();
+            let uv = cover_uv(tv.x / tv.y.max(1.0), person.photo_crop.as_ref());
+            painter
+                .with_clip_rect(card)
+                .image(texture.id(), card, uv, Color32::WHITE);
+            painter.rect(
+                card,
+                10. * zoom,
+                Color32::TRANSPARENT,
+                Stroke::new(
+                    if selected_now {
+                        2.5
+                    } else if muted {
+                        0.8
+                    } else {
+                        1.0
+                    },
+                    stroke_color,
+                ),
+                egui::StrokeKind::Outside,
+            );
+        }
         return painter.ctx().input(|i| {
             i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|q| card.contains(q))
         });
     }
-    let (avatar_size, avatar_center, name_at, name_align, birth_at, birth_align) =
+    let (avatar_size, avatar_center, name_at, name_align, name2_at, birth_at, birth_align) =
         match card_layout {
             CardLayout::Compact => (
                 48.0 * zoom,
                 card.left_center() + Vec2::new(35.0 * zoom, 0.0),
                 card.left_top() + Vec2::new(64.0 * zoom, 21.0 * zoom),
                 Align2::LEFT_CENTER,
+                Pos2::ZERO,
                 card.left_bottom() + Vec2::new(64.0 * zoom, -17.0 * zoom),
                 Align2::LEFT_CENTER,
             ),
             CardLayout::Portrait => (
                 78.0 * zoom,
                 card.center_top() + Vec2::new(0.0, 48.0 * zoom),
-                card.center_top() + Vec2::new(0.0, 112.0 * zoom),
+                card.center_top() + Vec2::new(0.0, 106.0 * zoom),
                 Align2::CENTER_CENTER,
-                card.center_top() + Vec2::new(0.0, 136.0 * zoom),
+                card.center_top() + Vec2::new(0.0, 126.0 * zoom),
+                card.center_top() + Vec2::new(0.0, 145.0 * zoom),
                 Align2::CENTER_CENTER,
             ),
         };
@@ -2629,13 +2706,35 @@ fn draw_person_card(
             Color32::WHITE,
         );
     }
-    painter.text(
-        name_at,
-        name_align,
-        person.display_name(),
-        FontId::proportional(13. * zoom),
-        Color32::WHITE,
-    );
+    match card_layout {
+        CardLayout::Compact => {
+            painter.text(
+                name_at,
+                name_align,
+                person.display_name_short(),
+                FontId::proportional(13. * zoom),
+                Color32::WHITE,
+            );
+        }
+        CardLayout::Portrait => {
+            painter.text(
+                name_at,
+                name_align,
+                person.given_short(),
+                FontId::proportional(13. * zoom),
+                Color32::WHITE,
+            );
+            if !person.family_name.is_empty() {
+                painter.text(
+                    name2_at,
+                    Align2::CENTER_CENTER,
+                    person.family_name.clone(),
+                    FontId::proportional(10.5 * zoom),
+                    Color32::from_rgb(214, 218, 218),
+                );
+            }
+        }
+    }
     painter.text(
         birth_at,
         birth_align,
