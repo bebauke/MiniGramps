@@ -350,6 +350,7 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
     for index in 0..person.events.len() {
         let event = &mut person.events[index];
         let standard = event.kind == EventKind::Birth || event.kind == EventKind::Death;
+        // Titelzeile: Ereignisart als (ggf. deaktiviertes) Dropdown.
         ui.horizontal(|ui| {
             if standard {
                 // Standard-Ereignisse sehen wie ein (deaktiviertes) Dropdown aus.
@@ -360,35 +361,39 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
             } else {
                 event_kind_combo(ui, &mut event.kind, ("event-kind", index));
             }
+            if !standard {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("✕")
+                        .on_hover_text("Ereignis entfernen")
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
+            }
+        });
+        // Datenzeile: Datum und Ort.
+        ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut event.date)
                     .hint_text("Datum")
-                    .desired_width(88.0),
+                    .desired_width(90.0),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut event.place)
                     .hint_text("Ort")
-                    .desired_width(ui.available_width().min(140.0)),
+                    .desired_width(ui.available_width()),
             );
-            if !standard
-                && ui
-                    .small_button("✕")
-                    .on_hover_text("Ereignis entfernen")
-                    .clicked()
-            {
-                remove = Some(index);
-            }
         });
         if let EventKind::Custom(text) = &mut event.kind {
-            ui.horizontal(|ui| {
-                ui.add_space(4.0);
-                ui.add(
-                    egui::TextEdit::singleline(text)
-                        .hint_text("Eigene Ereignisart")
-                        .desired_width(160.0),
-                );
-            });
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .hint_text("Eigene Ereignisart")
+                    .desired_width(160.0),
+            );
         }
+        ui.add_space(2.0);
     }
     if let Some(index) = remove {
         person.events.remove(index);
