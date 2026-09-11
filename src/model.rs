@@ -229,12 +229,21 @@ impl Person {
 
     /// Erste beiden Vornamen (Token) ohne den Nachnamen – für die große
     /// Fotoansicht, wo der Nachname separat darunter steht.
+    ///
+    /// Ist ein **Rufname** hinterlegt, werden nur der erste vom Rufnamen
+    /// abweichende Vorname und der Rufname gezeigt (z. B. „Hans Jürgen" für
+    /// „Hans Jürgen" mit Rufname „Jürgen"); gibt es keinen abweichenden
+    /// Vornamen, nur der Rufname.
     pub fn given_short(&self) -> String {
-        self.given_name
-            .split_whitespace()
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(" ")
+        let tokens: Vec<&str> = self.given_name.split_whitespace().collect();
+        let call = self.call_name.trim();
+        if !call.is_empty() {
+            return match tokens.iter().find(|token| !token.eq_ignore_ascii_case(call)) {
+                Some(first) => format!("{first} {call}"),
+                None => call.to_string(),
+            };
+        }
+        tokens.into_iter().take(2).collect::<Vec<_>>().join(" ")
     }
 
     /// Kurzname für Baumkarten: höchstens die ersten beiden Vornamen plus
@@ -246,6 +255,17 @@ impl Person {
             combined.to_string()
         } else {
             self.name.clone()
+        }
+    }
+
+    /// Geburtsdatum für die Baumkarten: normiert („DD Mnt YYYY"), leere
+    /// Angabe wird zu „Unbekannt".
+    pub fn birth_short(&self) -> String {
+        let normalized = normalize_date(&self.birth);
+        if normalized.is_empty() {
+            "Unbekannt".to_string()
+        } else {
+            normalized
         }
     }
 }
@@ -878,6 +898,101 @@ pub fn person(
 /// Struktur (Jahr, Monat, Tag) zu parsen. Unterstützt Deutsch und Englisch,
 /// volle Monatsnamen und Abkürzungen sowie unsichere/ungefähre Angaben
 /// (z. B. "um 1944", "~1966", "1966?").
+/// Monatsnamen/-kürzel (deutsch + englisch) für den Datumsdolmetscher.
+const MONTH_ALIASES: [&[&str]; 12] = [
+    &["jan", "januar", "january"],
+    &["feb", "februar", "february"],
+    &["mar", "mär", "märz", "march"],
+    &["apr", "april"],
+    &["mai", "may"],
+    &["jun", "juni", "june"],
+    &["jul", "juli", "july"],
+    &["aug", "august"],
+    &["sep", "september"],
+    &["okt", "oct", "oktober", "october"],
+    &["nov", "november"],
+    &["dez", "dec", "dezember", "december"],
+];
+
+/// Kurze deutsche Monatsnamen für die normierte Anzeige.
+const MONTHS_DE: [&str; 12] = [
+    "Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez",
+];
+
+/// Datum für die Baumanzeige normieren: vollständige Daten als „DD Mnt YYYY",
+/// Monat+Jahr als „Mnt YYYY". Andere Angaben (nur Jahr, „um …", leer) bleiben
+/// unverändert, damit keine Information verloren geht.
+pub fn normalize_date(date: &str) -> String {
+    let original = date.trim();
+    if original.is_empty() {
+        return String::new();
+    }
+    let lower = original.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return original.to_string();
+    }
+
+    let mut year = None;
+    let mut month = None;
+    let mut day = None;
+    for token in &tokens {
+        let mut found_month = false;
+        for (idx, aliases) in MONTH_ALIASES.iter().enumerate() {
+            if aliases.iter().any(|&alias| token.starts_with(alias)) {
+                month = Some((idx + 1) as i32);
+                found_month = true;
+                break;
+            }
+        }
+        if found_month {
+            continue;
+        }
+        if let Ok(num) = token.parse::<i32>() {
+            if (100..=3000).contains(&num) {
+                year = Some(num);
+            } else if (1..=31).contains(&num) {
+                if day.is_none() {
+                    day = Some(num);
+                } else if month.is_none() && num <= 12 {
+                    month = Some(num);
+                }
+            }
+        }
+    }
+    // Rein numerische Tripel (TT.MM.JJJJ bzw. JJJJ-MM-TT) korrekt zuordnen.
+    if tokens.len() == 3 {
+        if let (Ok(n1), Ok(n2), Ok(n3)) = (
+            tokens[0].parse::<i32>(),
+            tokens[1].parse::<i32>(),
+            tokens[2].parse::<i32>(),
+        ) {
+            if (100..=3000).contains(&n3) {
+                year = Some(n3);
+                month = Some(n2);
+                day = Some(n1);
+            } else if (100..=3000).contains(&n1) {
+                year = Some(n1);
+                month = Some(n2);
+                day = Some(n3);
+            }
+        }
+    }
+
+    match (year, month, day) {
+        (Some(y), Some(m), Some(d)) if (1..=12).contains(&m) && (1..=31).contains(&d) => {
+            format!("{d:02} {} {y}", MONTHS_DE[(m - 1) as usize])
+        }
+        (Some(y), Some(m), _) if (1..=12).contains(&m) => {
+            format!("{} {y}", MONTHS_DE[(m - 1) as usize])
+        }
+        _ => original.to_string(),
+    }
+}
+
 pub fn parse_birth_date(date_str: &str) -> Option<(i32, i32, i32)> {
     let s = date_str.trim().to_lowercase();
     if s.is_empty() || s == "unbekannt" {
@@ -893,20 +1008,7 @@ pub fn parse_birth_date(date_str: &str) -> Option<(i32, i32, i32)> {
     let mut month = None;
     let mut day = None;
 
-    let month_names = [
-        vec!["jan", "januar", "january"],
-        vec!["feb", "februar", "february"],
-        vec!["mar", "mär", "märz", "march"],
-        vec!["apr", "april"],
-        vec!["mai", "may"],
-        vec!["jun", "juni", "june"],
-        vec!["jul", "juli", "july"],
-        vec!["aug", "august"],
-        vec!["sep", "september"],
-        vec!["okt", "oct", "oktober", "october"],
-        vec!["nov", "november"],
-        vec!["dez", "dec", "dezember", "december"],
-    ];
+    let month_names = MONTH_ALIASES;
 
     for token in &tokens {
         let mut found_month = false;
@@ -970,6 +1072,31 @@ mod tests {
         let data = TreeData::demo();
         assert_eq!(data.siblings_of("p5")[0].id, "p6");
         assert!(data.parents_of("p1").is_empty());
+    }
+
+    #[test]
+    fn normalizes_tree_dates() {
+        assert_eq!(normalize_date("29 Feb 1876"), "29 Feb 1876");
+        assert_eq!(normalize_date("29.02.1876"), "29 Feb 1876");
+        assert_eq!(normalize_date("1876-02-29"), "29 Feb 1876");
+        assert_eq!(normalize_date("5. März 1900"), "05 Mär 1900");
+        assert_eq!(normalize_date("Feb 1876"), "Feb 1876");
+        assert_eq!(normalize_date("1876"), "1876");
+        assert_eq!(normalize_date("um 1850"), "um 1850");
+        assert_eq!(normalize_date(""), "");
+    }
+
+    #[test]
+    fn call_name_short_name() {
+        let mut p = person("x", "Jürgen Hans", "Bauke", "", Gender::Male);
+        p.call_name = "Jürgen".into();
+        assert_eq!(p.given_short(), "Hans Jürgen");
+        assert_eq!(p.display_name_short(), "Hans Jürgen Bauke");
+        p.call_name = "Hans".into();
+        assert_eq!(p.given_short(), "Jürgen Hans");
+        let mut q = person("y", "Anna", "Muster", "", Gender::Female);
+        q.call_name = "Anna".into();
+        assert_eq!(q.given_short(), "Anna");
     }
 
     #[test]

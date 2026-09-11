@@ -2706,11 +2706,7 @@ fn card_width_for(
             .size()
             .x
     };
-    let birth_text = if person.birth.is_empty() {
-        "Unbekannt".to_string()
-    } else {
-        person.birth.clone()
-    };
+    let birth_text = person.birth_short();
     let birth = painter
         .layout_no_wrap(birth_text, FontId::proportional(12.0), Color32::WHITE)
         .size()
@@ -2903,11 +2899,7 @@ fn draw_person_card(
     painter.text(
         birth_at,
         birth_align,
-        if person.birth.is_empty() {
-            "Unbekannt"
-        } else {
-            &person.birth
-        },
+        person.birth_short(),
         FontId::proportional(12. * zoom),
         Color32::from_rgb(202, 222, 221),
     );
