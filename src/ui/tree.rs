@@ -1136,7 +1136,9 @@ pub fn draw_tree(
                 let frame_hit = painter.ctx().input(|i| {
                     i.pointer.primary_down()
                         && i.modifiers.shift
-                        && i.pointer.press_origin().is_some_and(|q| outer.contains(q))
+                        && i.pointer.press_origin().is_some_and(|q| {
+                            outer.contains(q) && painter.clip_rect().contains(q)
+                        })
                 });
                 if frame_hit
                     && card_drag
@@ -1477,8 +1479,9 @@ pub fn draw_tree(
         let badge_r = 9.0 * zoom;
         let badge_rect = Rect::from_center_size(badge_at, Vec2::splat(badge_r * 2.0));
         let pointer_pos = painter.ctx().input(|i| i.pointer.interact_pos());
+        let canvas = painter.clip_rect();
         let card_hovered = pointer_pos
-            .is_some_and(|q| card.contains(q) || badge_rect.contains(q));
+            .is_some_and(|q| (card.contains(q) || badge_rect.contains(q)) && canvas.contains(q));
         if card_on_screen
             && view != TreeView::Fan
             && card_hovered
@@ -1518,7 +1521,7 @@ pub fn draw_tree(
                 i.pointer.any_click()
                     && i.pointer
                         .interact_pos()
-                        .is_some_and(|q| badge_rect.contains(q))
+                        .is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
             });
             if badge_clicked {
                 *action = Some(TreeAction::ToggleExpand(person.id.clone()));
@@ -1551,7 +1554,9 @@ pub fn draw_tree(
             let long_pressed = card_on_screen
                 && painter.ctx().input(|i| {
                     i.any_touches()
-                    && i.pointer.press_origin().is_some_and(|q| card.contains(q))
+                    && i.pointer.press_origin().is_some_and(|q| {
+                        card.contains(q) && painter.clip_rect().contains(q)
+                    })
                     && i.pointer
                         .press_start_time()
                         .is_some_and(|t0| i.time - t0 >= 0.6)
@@ -1576,7 +1581,10 @@ pub fn draw_tree(
             if !(i.pointer.primary_down() && i.modifiers.shift) {
                 return (0.0, false);
             }
-            let pressed_here = i.pointer.press_origin().is_some_and(|q| card.contains(q));
+            let pressed_here = i
+                .pointer
+                .press_origin()
+                .is_some_and(|q| card.contains(q) && painter.clip_rect().contains(q));
             if !(pressed_here || is_active) {
                 return (0.0, false);
             }
@@ -1701,7 +1709,7 @@ pub fn draw_tree(
                 i.any_touches()
                     && i.pointer
                         .press_origin()
-                        .is_some_and(|q| partner_card.contains(q))
+                        .is_some_and(|q| partner_card.contains(q) && painter.clip_rect().contains(q))
                     && i.pointer
                         .press_start_time()
                         .is_some_and(|t0| i.time - t0 >= 0.6)
@@ -1761,7 +1769,7 @@ pub fn draw_tree(
                 let pressed_here = i
                     .pointer
                     .press_origin()
-                    .is_some_and(|q| partner_card.contains(q));
+                    .is_some_and(|q| partner_card.contains(q) && painter.clip_rect().contains(q));
                 if pressed_here {
                     *card_drag = Some((partner.id.clone(), Vec::new()));
                 }
@@ -2690,9 +2698,9 @@ fn draw_up_badge(
     let badge_rect = Rect::from_center_size(badge_at, Vec2::splat(badge_r * 2.0));
     // Hover-Zone: Karte ∪ Badge (Badge liegt teils außerhalb der Karte).
     let hovered = painter.ctx().input(|i| {
-        i.pointer
-            .interact_pos()
-            .is_some_and(|q| card.contains(q) || badge_rect.contains(q))
+        i.pointer.interact_pos().is_some_and(|q| {
+            (card.contains(q) || badge_rect.contains(q)) && painter.clip_rect().contains(q)
+        })
     });
     if !hovered {
         return;
@@ -2713,7 +2721,7 @@ fn draw_up_badge(
         i.pointer.any_click()
             && i.pointer
                 .interact_pos()
-                .is_some_and(|q| badge_rect.contains(q))
+                .is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
     });
     if clicked {
         *action = Some(TreeAction::Reference(target_id.to_string()));
@@ -2854,8 +2862,12 @@ fn draw_person_card(
                 Color32::from_rgba_unmultiplied(225, 232, 232, 130),
             );
         }
+        let canvas = painter.clip_rect();
         return painter.ctx().input(|i| {
-            i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|q| card.contains(q))
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|q| card.contains(q) && canvas.contains(q))
         });
     }
     let (avatar_size, avatar_center, name_at, name_align, name2_at, birth_at, birth_align) =
@@ -2951,8 +2963,12 @@ fn draw_person_card(
         FontId::proportional(12. * zoom),
         Color32::from_rgb(202, 222, 221),
     );
+    let canvas = painter.clip_rect();
     painter.ctx().input(|i| {
-        i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|q| card.contains(q))
+        i.pointer.any_click()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|q| card.contains(q) && canvas.contains(q))
     })
 }
 
