@@ -19,6 +19,7 @@
 mod import;
 mod media;
 mod model;
+mod settings;
 mod store;
 mod ui;
 

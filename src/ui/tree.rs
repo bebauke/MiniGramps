@@ -188,7 +188,9 @@ pub enum TreeView {
 }
 
 /// Ausrichtung der Generationsachse (Schalter in der Werkzeugleiste).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
 pub enum TreeOrientation {
     Vertical,
     Horizontal,

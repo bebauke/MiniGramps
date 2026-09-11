@@ -45,19 +45,36 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                         .color(colors.section),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_only_button(ui, ICON_SETTINGS, "group-sort")
-                        .on_hover_text(if app.group_by_count {
-                            "Sortierung: Anzahl (Klick für Alphabet)"
-                        } else {
-                            "Sortierung: Alphabet (Klick für Anzahl)"
-                        })
-                        .clicked()
-                    {
-                        app.group_by_count = !app.group_by_count;
-                        app.people_groups_dirty = true;
-                    }
+                    let sort_button = icon_only_button(ui, ICON_SETTINGS, "group-sort")
+                        .on_hover_text("Sortierung der Personenliste");
+                    egui::Popup::menu(&sort_button).show(|ui| {
+                        ui.label(egui::RichText::new("Sortierung").strong());
+                        ui.separator();
+                        if ui
+                            .selectable_label(app.group_by_count, "Gruppengröße (Anzahl)")
+                            .clicked()
+                        {
+                            app.group_by_count = true;
+                            app.people_groups_dirty = true;
+                            ui.close();
+                        }
+                        if ui
+                            .selectable_label(!app.group_by_count, "Alphabetisch")
+                            .clicked()
+                        {
+                            app.group_by_count = false;
+                            app.people_groups_dirty = true;
+                            ui.close();
+                        }
+                    });
                 });
             });
+            ui.add_space(2.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut app.people_filter)
+                    .hint_text("Person suchen…")
+                    .desired_width(f32::INFINITY),
+            );
             ui.add_space(4.0);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -93,8 +110,23 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                         app.people_groups_dirty = false;
                     }
                     let selected = app.selected.as_deref();
+                    let filter = app.people_filter.trim().to_lowercase();
+                    let filtering = !filter.is_empty();
                     let mut requested_selection = None;
                     for (surname, members) in &app.people_groups {
+                        // Bei aktivem Filter: nur passende Personen; leere
+                        // Gruppen ausblenden. Alle Treffer-Gruppen aufgeklappt.
+                        let shown: Vec<&(String, Gender, String)> = if filtering {
+                            members
+                                .iter()
+                                .filter(|(_, _, name)| name.to_lowercase().contains(&filter))
+                                .collect()
+                        } else {
+                            members.iter().collect()
+                        };
+                        if filtering && shown.is_empty() {
+                            continue;
+                        }
                         let mut chars = surname.chars();
                         let display = match chars.next() {
                             Some(first) => {
@@ -102,12 +134,19 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                             }
                             None => String::new(),
                         };
-                        ui.collapsing(format!("{display} · {}", members.len()), |ui| {
+                        let count = shown.len();
+                        let mut header = egui::CollapsingHeader::new(format!("{display} · {count}"))
+                            .id_salt(surname.as_str());
+                        if filtering {
+                            header = header.open(Some(true));
+                        }
+                        header.show(ui, |ui| {
                             // Namen nicht umbrechen lassen, sondern in „…“
                             // übergehen lassen, damit lange Namen die Liste
                             // nicht stauchen.
                             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                            for (id, gender, name) in members.iter() {
+                            for entry in &shown {
+                                let (id, gender, name) = *entry;
                                 let active = selected == Some(id.as_str());
                                 if ui
                                     .selectable_label(

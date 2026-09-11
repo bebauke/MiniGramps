@@ -97,7 +97,7 @@ pub enum TreeTool {
     Zoom,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CardLayout {
     Compact,
     Portrait,
@@ -165,6 +165,8 @@ pub struct MiniGramps {
     pub show_export: bool,
     /// Sortierung der Personenliste: nach Anzahl (true) oder Alphabet.
     pub group_by_count: bool,
+    /// Suchtext der linken Personenliste (Sitzungszustand).
+    pub people_filter: String,
     /// Vorbereitete linke Personenliste; wird nur nach Daten- oder
     /// Sortieränderungen neu gruppiert und sortiert.
     pub people_groups: Vec<(String, Vec<(String, Gender, String)>)>,
@@ -239,6 +241,8 @@ pub struct MiniGramps {
     /// Zuletzt angewandte Fensterform (Breite, Höhe, maximiert) – verhindert
     /// unnötige `SetWindowRgn`-Aufrufe pro Frame.
     window_region: Option<(i32, i32, bool)>,
+    /// Zuletzt persistierte globale Einstellungen (Änderungserkennung).
+    settings_applied: crate::settings::AppSettings,
     started: std::time::Instant,
 }
 
@@ -273,6 +277,7 @@ impl MiniGramps {
             project_name_before_edit: None,
             show_export: false,
             group_by_count: true,
+            people_filter: String::new(),
             people_groups: Vec::new(),
             people_groups_dirty: true,
             photo_cache: HashMap::new(),
@@ -311,8 +316,18 @@ impl MiniGramps {
             current_data_path: None,
             window_hwnd: None,
             window_region: None,
+            settings_applied: crate::settings::AppSettings::default(),
             started: std::time::Instant::now(),
         };
+        // Globale Einstellungen laden und anwenden (vor dem Projekt-Laden).
+        let settings = crate::settings::load();
+        app.dark_mode = settings.dark_mode;
+        app.max_generations = settings.max_generations;
+        app.group_by_count = settings.group_by_count;
+        app.layout_gap = settings.layout_gap;
+        app.card_layout = settings.card_layout;
+        app.tree_orientation = settings.tree_orientation;
+        app.settings_applied = settings;
         app.log(format!(
             "Start. Datenordner (Speicherort): {}",
             app.library.display()
@@ -368,7 +383,7 @@ impl MiniGramps {
             .collect();
         match store
             .write_data(&self.data)
-            .and_then(|_| store.write_layout(&entries))
+            .and_then(|_| store.write_layout(&entries, self.reference.as_deref()))
         {
             Ok(_) => {
                 self.status = format!("Gespeichert: {}", path.display());
@@ -447,7 +462,14 @@ impl MiniGramps {
                         .to_string();
                 }
                 self.photo_cache.clear();
-                self.manual_offsets = FileSystemStore::for_data_file(path).read_layout();
+                let (offsets, saved_reference) =
+                    FileSystemStore::for_data_file(path).read_layout();
+                self.manual_offsets = offsets;
+                if let Some(ref_id) = saved_reference.filter(|id| self.data.find(id).is_some()) {
+                    self.reference = Some(ref_id.clone());
+                    self.selected = Some(ref_id);
+                }
+                self.reset_reference_navigation();
                 self.current_data_path = Some(path.to_path_buf());
                 if !self.manual_offsets.is_empty() {
                     self.log(format!(
@@ -492,7 +514,8 @@ impl MiniGramps {
                 if let Some(manifest) = store.read_manifest() {
                     data.project.name = manifest.name;
                 }
-                self.manual_offsets = store.read_layout();
+                let (offsets, saved_reference) = store.read_layout();
+                self.manual_offsets = offsets;
                 // Cache schreiben, damit offline weitergearbeitet werden kann.
                 let cache = FileSystemStore::for_root(cache_root);
                 let _ = cache.write_data(&data);
@@ -502,13 +525,17 @@ impl MiniGramps {
                         .iter()
                         .map(|(id, offset)| (id.clone(), *offset))
                         .collect::<Vec<_>>(),
+                    saved_reference.as_deref(),
                 );
                 self.server_online = true;
-self.server_base = Some(base_url.to_string());
-                        self.selected = data.people.first().map(|p| p.id.clone());
-                        self.reference = self.selected.clone();
-                        self.reset_reference_navigation();
-                        self.expanded.clear();
+                self.server_base = Some(base_url.to_string());
+                let reference_id = saved_reference
+                    .filter(|id| data.people.iter().any(|p| &p.id == id))
+                    .or_else(|| data.people.first().map(|p| p.id.clone()));
+                self.selected = reference_id.clone();
+                self.reference = reference_id;
+                self.reset_reference_navigation();
+                self.expanded.clear();
                 self.data = data;
                 self.people_groups_dirty = true;
                 self.undo_stack.clear();
@@ -532,13 +559,17 @@ self.server_base = Some(base_url.to_string());
                         if let Some(manifest) = cache.read_manifest() {
                             data.project.name = manifest.name;
                         }
-                        self.manual_offsets = cache.read_layout();
+                        let (offsets, saved_reference) = cache.read_layout();
+                        self.manual_offsets = offsets;
                         self.server_online = false;
                         self.server_base = Some(base_url.to_string());
-self.selected = data.people.first().map(|p| p.id.clone());
-                self.reference = self.selected.clone();
-                self.reset_reference_navigation();
-                self.expanded.clear();
+                        let reference_id = saved_reference
+                            .filter(|id| data.people.iter().any(|p| &p.id == id))
+                            .or_else(|| data.people.first().map(|p| p.id.clone()));
+                        self.selected = reference_id.clone();
+                        self.reference = reference_id;
+                        self.reset_reference_navigation();
+                        self.expanded.clear();
                         self.data = data;
                         self.people_groups_dirty = true;
                         self.undo_stack.clear();
@@ -880,7 +911,9 @@ self.selected = data.people.first().map(|p| p.id.clone());
             .iter()
             .map(|(id, offset)| (id.clone(), *offset))
             .collect();
-        match FileSystemStore::for_data_file(&data_path).write_layout(&entries) {
+        match FileSystemStore::for_data_file(&data_path)
+            .write_layout(&entries, self.reference.as_deref())
+        {
             Ok(_) => self.log(format!(
                 "Layout gesichert: {} ({} Einträge)",
                 data_path.display(),
@@ -1361,6 +1394,20 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
         // Zuletzt: eigene Rand-Resizerkennung (überschreibt ggf. gesetzte
         // Cursor der Widgets an den Fensterrändern).
         handle_window_resize(ctx);
+
+        // Globale Einstellungen bei Änderung sofort persistieren.
+        let current = crate::settings::AppSettings {
+            dark_mode: self.dark_mode,
+            max_generations: self.max_generations,
+            group_by_count: self.group_by_count,
+            layout_gap: self.layout_gap,
+            card_layout: self.card_layout,
+            tree_orientation: self.tree_orientation,
+        };
+        if current != self.settings_applied {
+            crate::settings::save(&current);
+            self.settings_applied = current;
+        }
     }
 }
 
