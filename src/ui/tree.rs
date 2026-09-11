@@ -2542,7 +2542,21 @@ fn repel_pass<'a>(
                 .or_default()
                 .push(member);
         }
-        let groups: Vec<Vec<(&str, f32)>> = groups_map.into_values().collect();
+        let mut groups: Vec<Vec<(&str, f32)>> = groups_map.into_values().collect();
+        // Deterministische Reihenfolge: Die `HashMap`-Iteration ändert sich pro
+        // `HashMap::new()` und würde das Layout sonst Frame für Frame minimal
+        // verschieben ("konstantes Wandern"). Nach linker Position + ID sortieren.
+        groups.sort_by(|a, b| {
+            let left = |group: &Vec<(&str, f32)>| {
+                group
+                    .iter()
+                    .map(|(id, _)| spread[*id])
+                    .fold(f32::MAX, f32::min)
+            };
+            left(a)
+                .total_cmp(&left(b))
+                .then_with(|| a[0].0.cmp(b[0].0))
+        });
         // Ebenenweise verhandeln: [innen → außen] wiederholen, bis stabil (max 24 Versuche).
         for _ in 0..24 {
             let mut moved = false;
