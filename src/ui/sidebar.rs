@@ -12,13 +12,15 @@
 //! - Fotos laufen über `crate::media` (avatar_ui, import_media_file).
 
 use eframe::egui::{self, Color32, Sense, Stroke, Vec2};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use rfd::FileDialog;
 use std::collections::HashMap;
 
 use crate::media::{
     avatar_ui_live, avatar_ui_preview, clear_person_photo_cache, gallery_thumbnail_ui,
-    import_media_file_async,
 };
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::media::import_media_file_async;
 use crate::model::{ChildRelation, Gender, Person, person};
 use crate::ui::{
     ICON_ADD_PERSON, ICON_CHILD, ICON_EDIT, ICON_PARENT, ICON_PARTNER, ICON_REFERENCE, ICON_SAVE,
@@ -246,6 +248,13 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                     crop.y = (crop.y - delta.y / 32.0).clamp(-1.0, 1.0);
                 }
                 if avatar_response.clicked() {
+                    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+                    {
+                        app.status = "Fotoauswahl ist auf diesem Ziel noch nicht implementiert".into();
+                    }
+
+                    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+                    {
                     if let Some(path) = FileDialog::new()
                         .add_filter("Bilder", &["png", "jpg", "jpeg", "webp"])
                         .pick_file()
@@ -259,6 +268,7 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                             }
                             clear_person_photo_cache(&mut app.photo_cache, &app.draft.id);
                         }
+                    }
                     }
                 }
                 ui.add_space(12.0);

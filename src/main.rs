@@ -22,6 +22,15 @@ mod model;
 mod store;
 mod ui;
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 fn main() -> eframe::Result<()> {
     ui::run()
 }
+
+#[cfg(target_os = "android")]
+fn main() -> eframe::Result<()> {
+    ui::run_android()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}

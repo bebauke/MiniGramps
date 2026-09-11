@@ -13,10 +13,13 @@
 //! Alle Fenster sind fix (`movable(false)`) und mit kleinem Titel.
 
 use eframe::egui::{self, Color32};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use rfd::FileDialog;
 
 use crate::import::{discover_projects, project_display_name};
-use crate::media::{clear_person_photo_cache, import_media_file_async, write_round_avatar_now};
+use crate::media::{clear_person_photo_cache, write_round_avatar_now};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::media::import_media_file_async;
 use crate::model::{Gender, person};
 use crate::ui::{
     CardLayout, ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_EXPORT, ICON_EXTERNAL_LINK,
@@ -388,6 +391,13 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
             });
             ui.horizontal(|ui| {
                 if ui.button("Foto auswählen").clicked() {
+                    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+                    {
+                        app.status = "Fotoauswahl ist auf diesem Ziel noch nicht implementiert".into();
+                    }
+
+                    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+                    {
                     if let Some(path) = FileDialog::new()
                         .add_filter("Bilder", &["png", "jpg", "jpeg", "webp"])
                         .pick_file()
@@ -397,6 +407,7 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
                         {
                             app.draft.photo = Some(relative);
                         }
+                    }
                     }
                 }
                 if app.draft.photo.is_some() && ui.button("Foto entfernen").clicked() {
@@ -468,6 +479,7 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
     app.show_editor = open;
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
     let Some(path) = app.pending_image.clone() else {
         return;
@@ -540,6 +552,14 @@ pub fn show_image_intent(app: &mut MiniGramps, ctx: &egui::Context) {
                 app.pending_image = None;
             }
         });
+}
+
+#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+pub fn show_image_intent(app: &mut MiniGramps, _ctx: &egui::Context) {
+    if app.pending_image.is_some() {
+        app.status = "Foto-Drag-and-drop ist auf diesem Ziel noch nicht implementiert".into();
+        app.pending_image = None;
+    }
 }
 
 pub fn show_lightbox(app: &mut MiniGramps, ctx: &egui::Context) {

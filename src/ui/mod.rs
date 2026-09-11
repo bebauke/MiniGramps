@@ -39,12 +39,12 @@ use eframe::{
     egui,
     egui::{Color32, TextureHandle, Vec2},
 };
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use rfd::FileDialog;
 
-use crate::import::{
-    default_library, load_file, load_last_project, load_project_manifest, save_last_project,
-    save_project_manifest,
-};
+use crate::import::{default_library, load_file, load_project_manifest, save_project_manifest};
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+use crate::import::{load_last_project, save_last_project};
 use crate::model::{ChildRelation, Gender, Person, TreeData, person};
 use crate::store::{DataStore, FileSystemStore};
 use tree::{RelationKind, TreeAction, TreeOrientation, TreeView};
@@ -319,6 +319,7 @@ impl MiniGramps {
         ));
         // Zuletzt geöffnetes Projekt automatisch wiederherstellen; schlägt
         // das fehlen (Datei weg, Format unbekannt), bleibt der Beispielbaum.
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         if let Some(path) = load_last_project() {
             app.log(format!(
                 "Letzte Sitzung wiederherstellen: {}",
@@ -345,6 +346,15 @@ impl MiniGramps {
     /// Verschiebungen, über IDs zugeordnet, relativ zum Eltern-Anker —
     /// angewendet in horizontaler wie vertikaler Ausrichtung.
     pub fn save(&mut self) {
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        {
+            self.status = "Speichern ist auf diesem Ziel noch nicht implementiert".into();
+            self.log(self.status.clone());
+            return;
+        }
+
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        {
         // Erst verwaiste Mediendateien und Cache-Bilder bereinigen, um Plattenplatz zu sparen!
         crate::media::cleanup_unused_media(&self.library, &self.data);
 
@@ -373,10 +383,20 @@ impl MiniGramps {
             Ok(manifest) => self.log(format!("Manifest gespeichert: {}", manifest.display())),
             Err(error) => self.log(format!("Manifest speichern fehlgeschlagen: {error}")),
         }
+        }
     }
 
     /// Manueller Dateidialog ("Datei manuell laden..." im Öffnen-Fenster).
     pub fn import_dialog(&mut self) {
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        {
+            self.status = "Import ist auf diesem Ziel noch nicht implementiert".into();
+            self.log(self.status.clone());
+            return;
+        }
+
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        {
         if let Some(path) = FileDialog::new()
             .add_filter(
                 "Familien-Daten",
@@ -386,6 +406,7 @@ impl MiniGramps {
         {
             self.log(format!("Manueller Ladeversuch: {}", path.display()));
             self.load_path(&path);
+        }
         }
     }
 
@@ -437,6 +458,7 @@ impl MiniGramps {
                 // Nach dem Laden den ganzen Baum passend einpassen.
                 self.fit_pending = true;
                 // Projekt als "zuletzt geöffnet" merken (Start-Wiederherstellung).
+                #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
                 save_last_project(path);
                 self.show_open = false;
                 self.status = format!("Geöffnet: {}", path.display());
@@ -449,6 +471,7 @@ impl MiniGramps {
     }
 
     /// Projekt vom Server laden (Öffnen-Dialog → Server: URL + Login).
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     pub fn load_from_server(&mut self, base_url: &str, token: &str) {
         let store = crate::store::ServerStore::new(
             crate::store::UreqTransport,
@@ -539,6 +562,13 @@ self.selected = data.people.first().map(|p| p.id.clone());
                 }
             }
         }
+    }
+
+    /// Mobile/Web bekommen spaeter einen async Transport statt `ureq` und lokalem Cache.
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    pub fn load_from_server(&mut self, _base_url: &str, _token: &str) {
+        self.status = "Server-Laden ist auf diesem Ziel noch nicht implementiert".into();
+        self.log(self.status.clone());
     }
     /// Person als Referenz setzen (Baum-Wurzel). Genutzt von der
     /// TreeAction-Auswertung, den Listen (Shift/Dreifachklick) und dem
@@ -1517,6 +1547,7 @@ fn handle_window_resize(ctx: &egui::Context) {
 }
 
 /// Einstiegspunkt: Fenster, App-Icon (Logo gerendert via resvg), Schriften.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub fn run() -> eframe::Result<()> {
     // Logging über Level steuern: Standard zeigt die App-Meldungen (info),
     // Layoutdiagnose nur mit `RUST_LOG=minigramps=debug` (oder `trace`).
@@ -1544,7 +1575,31 @@ pub fn run() -> eframe::Result<()> {
     )
 }
 
+#[cfg(target_os = "android")]
+pub fn run_android() -> eframe::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub async fn run_web() -> Result<(), wasm_bindgen::JsValue> {
+    console_error_panic_hook::set_once();
+    let web_options = eframe::WebOptions::default();
+    eframe::WebRunner::new()
+        .start(
+            "minigramps_canvas",
+            web_options,
+            Box::new(|cc| {
+                configure_fonts(&cc.egui_ctx);
+                Ok(Box::new(MiniGramps::new()))
+            }),
+        )
+        .await
+        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+}
+
 /// App-Icon aus dem eingebetteten Logo (`assets/icon.svg`) rasterisieren.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 fn load_app_icon() -> Option<egui::IconData> {
     let tree = resvg::usvg::Tree::from_data(LOGO, &resvg::usvg::Options::default()).ok()?;
     let size = tree.size();

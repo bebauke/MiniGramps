@@ -13,7 +13,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use roxmltree::Document;
 
 use crate::model::{EventKind, Family, Gender, Person, TreeData, person};
@@ -32,9 +31,19 @@ pub struct ProjectManifest {
 /// Standard-Speicherort: App-Datenordner des Betriebssystems
 /// (`...\AppData\Local\minigramps\MiniGramps\data`).
 pub fn default_library() -> PathBuf {
-    ProjectDirs::from("org", "minigramps", "MiniGramps")
-        .map(|d| d.data_local_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("minigramps-data"))
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+    {
+        use directories::ProjectDirs;
+
+        return ProjectDirs::from("org", "minigramps", "MiniGramps")
+            .map(|d| d.data_local_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("minigramps-data"));
+    }
+
+    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+    {
+        PathBuf::from("minigramps-data")
+    }
 }
 
 /// Sitzungsdatei im fixen Datenordner: merkt sich das zuletzt geöffnete
@@ -71,6 +80,7 @@ pub fn save_last_project(path: &Path) {
 /// finden (rekursiv, Tiefe 3).
 pub fn discover_projects(library: &Path) -> Vec<PathBuf> {
     let mut folders = vec![library.to_path_buf(), default_library()];
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
     if let Some(documents) =
         directories::UserDirs::new().and_then(|dirs| dirs.document_dir().map(Path::to_path_buf))
     {

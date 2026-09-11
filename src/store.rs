@@ -185,8 +185,10 @@ pub trait HttpTransport {
 }
 
 /// Blocking-Transport auf Basis von `ureq`.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub struct UreqTransport;
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 impl HttpTransport for UreqTransport {
     fn get(&self, url: &str, token: Option<&str>) -> Result<Vec<u8>, String> {
         use std::io::Read as _;
