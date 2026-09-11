@@ -500,7 +500,7 @@ pub fn draw_tree(
     };
     if view == TreeView::Ancestors {
         // Berechne das perfekte, überschneidungsfreie Vorfahren-Layout rekursiv!
-        spread = layout_ancestors(root, &relations, &levels, &widths, gap);
+        spread = layout_ancestors(root, &relations, data, &levels, &widths, gap);
 
         // Partner-Pseudokarten einmalig an ihre Person koppeln.
         for (row, ids) in rows.iter().enumerate() {
@@ -2963,6 +2963,7 @@ fn draw_person_card(
 fn layout_ancestors<'a>(
     id: &'a str,
     relations: &TreeRelations<'a>,
+    data: &TreeData,
     levels: &HashMap<&str, usize>,
     widths: &HashMap<&str, f32>,
     gap: f32,
@@ -2996,8 +2997,8 @@ fn layout_ancestors<'a>(
     match (father, mother) {
         (Some(f), Some(m)) => {
             // Rekursiv die Layouts für Vater- und Mutter-Teilbäume berechnen (jeweils mit 0.0 als lokales Zentrum)
-            let f_layout = layout_ancestors(f, relations, levels, widths, gap);
-            let m_layout = layout_ancestors(m, relations, levels, widths, gap);
+            let f_layout = layout_ancestors(f, relations, data, levels, widths, gap);
+            let m_layout = layout_ancestors(m, relations, data, levels, widths, gap);
 
             // Bestimme den minimalen Abstand, den wir zwischen dem Vater-Teilbaum und dem Mutter-Teilbaum brauchen,
             // damit sich auf KEINER Ebene (Generation) die Karten überlappen.
@@ -3059,7 +3060,14 @@ fn layout_ancestors<'a>(
             let wf = widths.get(f).copied().unwrap_or(215.0);
             let wm = widths.get(m).copied().unwrap_or(215.0);
             let default_sep = (wf + wm) / 2.0 + gap;
-            let sep = min_distance.max(default_sep);
+            // Zwischen NICHT verheirateten Personen gilt ein um 30px erhöhter
+            // Mindestabstand (verheiratete Paare bleiben kompakt).
+            let extra = if data.partner_relation_of(f, m) == crate::model::PartnerRelation::Married {
+                0.0
+            } else {
+                30.0
+            };
+            let sep = min_distance.max(default_sep) + extra;
 
             // Zentrierung relativ zur Lücke (Zwischenraum) zwischen den beiden Eltern:
             // (c1.r + c2.l)/2 = d1.c -> shift_f + shift_m = (wm - wf) / 2
@@ -3075,7 +3083,7 @@ fn layout_ancestors<'a>(
         }
         (Some(p_id), None) | (None, Some(p_id)) => {
             // Nur ein Elternteil vorhanden -> Direkt zentriert darüber platzieren
-            let p_layout = layout_ancestors(p_id, relations, levels, widths, gap);
+            let p_layout = layout_ancestors(p_id, relations, data, levels, widths, gap);
             for (id, offset) in p_layout {
                 layout.insert(id, offset);
             }
