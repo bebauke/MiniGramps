@@ -366,7 +366,13 @@ pub fn draw_tree(
     let row_widths: Vec<f32> = rows
         .iter()
         .map(|ids| {
-            let mut width = 215.0f32;
+            // Basisbreite je Kartenlayout (Portrait darf schmaler sein als
+            // Compact); sonst würden im Horizontalen alle Karten auf 215
+            // gestreckt.
+            let mut width = match card_layout {
+                CardLayout::Compact => 215.0f32,
+                CardLayout::Portrait => 160.0f32,
+            };
             for id in ids {
                 width = width.max(widths[id]);
                 for partner in relations.partners_of(id) {
