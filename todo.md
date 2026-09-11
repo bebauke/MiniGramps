@@ -4,6 +4,15 @@ Offene Punkte zuerst, danach der erledigte Stand als Nachweis.
 
 ## Offen
 
+### Gramps-Daten & Import
+
+- [ ] Vollständiger Gramps-XML-Import: weitere Namensbestandteile (Rufname,
+      Präfix/Suffix, Titel, mehrere Namen)
+- [ ] Kindesart aus Gramps übernehmen (`mrel`/`frel`: leiblich, adoptiert,
+      Stief-, Pflegekind)
+- [ ] Quellen/Zitate, Notizen, Medien/Galerie, Attribute/Tags und Orts-Objekte
+- [ ] Export nach GEDCOM und Gramps-XML (Export-Dialog ist derzeit Platzhalter)
+
 ### Layout & Darstellung
 
 - [ ] Nachfahrenbaum ab 4 Generationen stabilisieren: Gruppen reißen auseinander

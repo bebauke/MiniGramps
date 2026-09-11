@@ -18,11 +18,11 @@ klobig: viele Dialoge, träge Listen, langsame Interaktion. MiniGramps überträ
 die **notwendigen** Funktionen in ein schlankes, reaktives Bedienkonzept – der
 Datenbestand bleibt dabei vollständig.
 
-- **Vollständige Gramps-Daten-Kompatibilität.** Bestehende Gramps-Daten werden
-  vollständig eingelesen und bleiben verlustfrei nutzbar (Import von Gramps-XML
-  und GEDCOM). Es werden bewusst nicht alle Spezialdialoge nachgebaut, aber die
-  Daten bleiben vollständig erhalten und exportierbar.
-- **Vereinfachtes Bedienkonzept.** Weniger, klarere Schritte: direkt am Baum
+- **Gramps-Daten im Fokus.** Ziel ist die vollständige Unterstützung der
+  Gramps-Daten. Der aktuelle Import deckt die **Kerndaten** ab (Personen,
+  Familien, Kern-Ereignisse mit Datum/Ort, Geschlecht) und wird schrittweise
+  vervollständigt. Bewusst werden nicht alle Spezialdialoge nachgebaut.
+- **Vereinfachtes Bedienkonzept.** Weniger und klarere Schritte: direkt am Baum
   arbeiten, Personen und Beziehungen inline bearbeiten, Referenzperson setzen
   und per **Zurück/Vor** durch die Historie navigieren.
 - **Geschwindigkeit als Teil der User Experience.** Schnelles Laden, flüssiges
@@ -105,14 +105,21 @@ verwaltet; Daten liegen in einem portablen JSON-Format vor.
 
 ## Gramps-Kompatibilität
 
-- **Vollständige Datenunterstützung:** Gramps-XML-Exporte werden umfassend
-  eingelesen – Personen und Namensbestandteile, Beziehungen (inkl. Kindesart),
-  Ereignisse, Datums-/Ortsangaben, Quellen, Notizen sowie Galerie/Medien.
-- **Bewusste Feature-Auswahl:** Es werden nicht alle Spezialfunktionen von
-  Gramps nachgebaut, sondern die für den Alltag wichtigen – dafür deutlich
-  einfacher und schneller bedient.
-- **Daten bleiben portabel:** Das MiniGramps-JSON ist versioniert und
-  exportierbar; GEDCOM- und Gramps-XML-Daten lassen sich weiterverwenden.
+Der Anspruch ist volle Gramps-Datenunterstützung; der **aktuelle Stand** ist
+bewusst ehrlich beschrieben:
+
+- **Bereits importiert (Gramps-XML/GEDCOM):** Personen (Vor- und Nachname,
+  Geschlecht), Familien (Vater, Mutter, Kinder) sowie Ereignisse mit Datum,
+  Ort und Beschreibung.
+- **Noch nicht importiert (Roadmap):** weitere Namensbestandteile (Rufname,
+  Präfix/Suffix, Titel, mehrere Namen), Kindesart (leiblich, adoptiert, Stief-,
+  Pflegekind), Quellen/Zitate, Notizen, Medien/Galerie, Attribute/Tags und
+  Orts-Objekte.
+- **Export:** Derzeit **nicht** implementiert – gespeichert wird im
+  MiniGramps-JSON (versioniert, portabel). GEDCOM-/Gramps-XML-Export ist geplant.
+
+Die Reihenfolge im [Roadmap](todo.md) priorisiert die vollständige
+Gramps-Datenunterstützung.
 
 ---
 
