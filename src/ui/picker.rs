@@ -302,6 +302,17 @@ pub fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.add_space(7.0);
 }
 
+/// Ereignisart im Auswahlfeld kürzen (z. B. „Hochzeit" → „Hochze…").
+fn short_event_label(label: &str) -> String {
+    let mut chars = label.chars();
+    let head: String = chars.by_ref().take(6).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// Dropdown zur Auswahl der Ereignisart (inkl. „Sonstiges" mit Freitext).
 pub fn event_kind_combo(
     ui: &mut egui::Ui,
@@ -310,8 +321,8 @@ pub fn event_kind_combo(
 ) {
     use crate::model::EventKind;
     egui::ComboBox::from_id_salt(id_salt)
-        .selected_text(kind.label().to_string())
-        .width(118.0)
+        .selected_text(short_event_label(kind.label()))
+        .width(96.0)
         .show_ui(ui, |ui| {
             for variant in EventKind::all_variants() {
                 if ui
