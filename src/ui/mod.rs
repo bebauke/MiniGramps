@@ -167,6 +167,10 @@ pub struct MiniGramps {
     pub group_by_count: bool,
     /// Suchtext der linken Personenliste (Sitzungszustand).
     pub people_filter: String,
+    /// Ob zuletzt ein Suchfilter aktiv war (erkennt das Leeren der Suche).
+    pub people_filter_was_active: bool,
+    /// ID-Generation der Nachnamensgruppen: Erhöhen klappt alle wieder ein.
+    pub people_group_generation: u32,
     /// Vorbereitete linke Personenliste; wird nur nach Daten- oder
     /// Sortieränderungen neu gruppiert und sortiert.
     pub people_groups: Vec<(String, Vec<(String, Gender, String)>)>,
@@ -278,6 +282,8 @@ impl MiniGramps {
             show_export: false,
             group_by_count: true,
             people_filter: String::new(),
+            people_filter_was_active: false,
+            people_group_generation: 0,
             people_groups: Vec::new(),
             people_groups_dirty: true,
             photo_cache: HashMap::new(),

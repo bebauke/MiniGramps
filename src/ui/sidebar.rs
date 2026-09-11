@@ -36,6 +36,13 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
         .default_width(230.0)
         .frame(egui::Frame::new().fill(colors.panel).inner_margin(10))
         .show(ctx, |ui| {
+            // Suche geleert → alle Nachnamensgruppen wieder einklappen
+            // (neue ID-Generation setzt den Auf-/Zu-Zustand zurück).
+            let filtering_now = !app.people_filter.trim().is_empty();
+            if !filtering_now && app.people_filter_was_active {
+                app.people_group_generation = app.people_group_generation.wrapping_add(1);
+            }
+            app.people_filter_was_active = filtering_now;
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(
@@ -136,7 +143,7 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                         };
                         let count = shown.len();
                         let mut header = egui::CollapsingHeader::new(format!("{display} · {count}"))
-                            .id_salt(surname.as_str());
+                            .id_salt((surname.as_str(), app.people_group_generation));
                         if filtering {
                             header = header.open(Some(true));
                         }
