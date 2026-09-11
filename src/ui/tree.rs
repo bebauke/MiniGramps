@@ -618,6 +618,16 @@ pub fn draw_tree(
                     let mean =
                         children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
                     let delta = 0.5 * (junction - mean);
+                    if log_layout && delta.abs() > 500.0 {
+                        log::debug!(
+                            "NEG_ATTR_CHILD family={} delta={:.0} junction={:.0} mean={:.0} n={}",
+                            family.id,
+                            delta,
+                            junction,
+                            mean,
+                            children.len()
+                        );
+                    }
                     for child in &children {
                         if let Some(value) = spread.get_mut(child) {
                             *value += delta;
@@ -635,6 +645,15 @@ pub fn draw_tree(
                 let parent_mean =
                     parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
                 let delta = 0.4 * (target - parent_mean);
+                if log_layout && delta.abs() > 500.0 {
+                    log::debug!(
+                        "NEG_ATTR_PARENT family={} delta={:.0} target={:.0} parent_mean={:.0}",
+                        family.id,
+                        delta,
+                        target,
+                        parent_mean
+                    );
+                }
                 for parent in &parents {
                     if let Some(value) = spread.get_mut(parent) {
                         *value += delta;
@@ -2505,14 +2524,17 @@ fn repel_pass<'a>(
         fn group_key<'b>(group_of: &'b HashMap<&'b str, &'b str>, id: &'b str) -> &'b str {
             group_of.get(id).copied().unwrap_or(id)
         }
-        let mut groups: Vec<Vec<(&str, f32)>> = Vec::new();
+        // Familien strikt per Schlüssel gruppieren (NICHT nach benachbarter
+        // x-Position): so bleiben Geschwister immer ein starrer Block und
+        // können im Repel nicht auseinandergerissen werden.
+        let mut groups_map: HashMap<&str, Vec<(&str, f32)>> = HashMap::new();
         for member in members {
-            let key = group_key(group_of, member.0);
-            match groups.last_mut() {
-                Some(last) if group_key(group_of, last[0].0) == key => last.push(member),
-                _ => groups.push(vec![member]),
-            }
+            groups_map
+                .entry(group_key(group_of, member.0))
+                .or_default()
+                .push(member);
         }
+        let groups: Vec<Vec<(&str, f32)>> = groups_map.into_values().collect();
         // Ebenenweise verhandeln: [innen → außen] wiederholen, bis stabil (max 24 Versuche).
         for _ in 0..24 {
             let mut moved = false;
@@ -2540,6 +2562,16 @@ fn repel_pass<'a>(
                         // Nur nach rechts schieben: monotone Platzierung,
                         // dadurch keine neu erzeugten Überlappungen links.
                         let deficit = need - actual;
+                        if deficit > 500.0 {
+                            log::debug!(
+                                "NEG_REPEL_INNER deficit={:.0} need={:.0} actual={:.0} left={} right={}",
+                                deficit,
+                                need,
+                                actual,
+                                window[0].0,
+                                window[1].0
+                            );
+                        }
                         if let Some(value) = spread.get_mut(window[1].0) {
                             *value += deficit;
                             moved = true;
@@ -2593,6 +2625,16 @@ fn repel_pass<'a>(
                 let actual = window[1].1 - window[0].2; // right_start - left_end
                 if actual < need {
                     let deficit = need - actual;
+                    if deficit > 500.0 {
+                        log::debug!(
+                            "NEG_REPEL_BIG deficit={:.0} need={:.0} actual={:.0} left=[{}] right=[{}]",
+                            deficit,
+                            need,
+                            actual,
+                            window[0].0.join(","),
+                            window[1].0.join(",")
+                        );
+                    }
                     // Die SCHMÄLERE Gruppe (kleinere Teilbaum-Breite) weicht
                     // aus; die breitere bleibt stehen.
                     if window[1].3 <= window[0].3 {
