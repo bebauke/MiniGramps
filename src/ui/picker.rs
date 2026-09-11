@@ -17,7 +17,7 @@ use eframe::egui::{self, TextureHandle};
 use crate::media::avatar_ui_preview;
 use crate::model::{ChildRelation, Gender, Person, person};
 use crate::ui::tree::RelationKind;
-use crate::ui::{MiniGramps, icon};
+use crate::ui::{ICON_CLOSE, MiniGramps, icon, icon_only_button};
 
 /// Kategorieüberschrift mit `+`-Schalter (nur Bearbeitungsmodus).
 pub fn relation_header(
@@ -342,7 +342,8 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
         let standard = event.kind == EventKind::Birth || event.kind == EventKind::Death;
         // Titelzeile: Ereignisart als (ggf. deaktiviertes) Dropdown.
         // Titelzeile: Ereignisart als (ggf. deaktiviertes) Dropdown über die
-        // volle Breite; bei entfernbaren Ereignissen bleibt Platz für „✕".
+        // volle Breite; bei entfernbaren Ereignissen bleibt Platz für das
+        // Entfernen-Icon.
         let combo_width = (ui.available_width() - if standard { 0.0 } else { 28.0 }).max(80.0);
         ui.horizontal(|ui| {
             if standard {
@@ -356,8 +357,7 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
             }
             if !standard {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button("✕")
+                    if icon_only_button(ui, ICON_CLOSE, "event-remove")
                         .on_hover_text("Ereignis entfernen")
                         .clicked()
                     {
