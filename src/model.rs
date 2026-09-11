@@ -129,6 +129,18 @@ pub struct Event {
     pub description: String,
 }
 
+impl Event {
+    /// Leeres Ereignis der angegebenen Art.
+    pub fn new(kind: EventKind) -> Self {
+        Self {
+            kind,
+            date: String::new(),
+            place: String::new(),
+            description: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PhotoCrop {
     /// Verschiebung des Ausschnitts in [-1, 1] relativ zum Spielraum.
@@ -266,6 +278,81 @@ impl Person {
             "Unbekannt".to_string()
         } else {
             normalized
+        }
+    }
+
+    /// Stellt sicher, dass **Geburt** und **Tod** als Standard-Ereignisse
+    /// vorhanden sind (Gramps-Prinzip: Ereignisse mit Typ). Geburt steht
+    /// zuerst, dann Tod; die übrigen Ereignisse folgen in ihrer Reihenfolge.
+    /// Fehlende Standard-Ereignisse werden aus den Kurzfeldern erzeugt.
+    pub fn ensure_standard_events(&mut self) {
+        if !self.events.iter().any(|event| event.kind == EventKind::Birth) {
+            let mut event = Event::new(EventKind::Birth);
+            event.date = self.birth.clone();
+            event.place = self.birth_place.clone();
+            self.events.insert(0, event);
+        }
+        if !self.events.iter().any(|event| event.kind == EventKind::Death) {
+            let mut event = Event::new(EventKind::Death);
+            event.date = self.death.clone();
+            event.place = self.death_place.clone();
+            let position = self
+                .events
+                .iter()
+                .position(|event| event.kind == EventKind::Birth)
+                .map(|index| index + 1)
+                .unwrap_or(self.events.len());
+            self.events.insert(position, event);
+        }
+        // Reihenfolge normalisieren: Geburt, Tod, dann alle übrigen.
+        let mut birth = None;
+        let mut death = None;
+        let mut rest = Vec::new();
+        for event in self.events.drain(..) {
+            match event.kind {
+                EventKind::Birth => birth = Some(event),
+                EventKind::Death => death = Some(event),
+                _ => rest.push(event),
+            }
+        }
+        self.events.extend(birth);
+        self.events.extend(death);
+        self.events.extend(rest);
+    }
+
+    /// Schreibt Datum/Ort der Standard-Ereignisse in die Kurzfelder
+    /// (`birth`/`death`) zurück, damit Baum, Sortierung und Import konsistent
+    /// bleiben.
+    pub fn sync_standard_fields(&mut self) {
+        match self
+            .events
+            .iter()
+            .find(|event| event.kind == EventKind::Birth)
+            .cloned()
+        {
+            Some(event) => {
+                self.birth = event.date;
+                self.birth_place = event.place;
+            }
+            None => {
+                self.birth.clear();
+                self.birth_place.clear();
+            }
+        }
+        match self
+            .events
+            .iter()
+            .find(|event| event.kind == EventKind::Death)
+            .cloned()
+        {
+            Some(event) => {
+                self.death = event.date;
+                self.death_place = event.place;
+            }
+            None => {
+                self.death.clear();
+                self.death_place.clear();
+            }
         }
     }
 }
@@ -1097,6 +1184,22 @@ mod tests {
         let mut q = person("y", "Anna", "Muster", "", Gender::Female);
         q.call_name = "Anna".into();
         assert_eq!(q.given_short(), "Anna");
+    }
+
+    #[test]
+    fn standard_events_are_ensured_and_synced() {
+        let mut p = person("x", "Max", "Muster", "1876", Gender::Male);
+        p.death = "1940".into();
+        p.ensure_standard_events();
+        assert_eq!(p.events.len(), 2);
+        assert_eq!(p.events[0].kind, EventKind::Birth);
+        assert_eq!(p.events[0].date, "1876");
+        assert_eq!(p.events[1].kind, EventKind::Death);
+        assert_eq!(p.events[1].date, "1940");
+        // Kurzfelder werden aus den Standard-Ereignissen zurückgeschrieben.
+        p.events[0].date = "01 Jan 1876".into();
+        p.sync_standard_fields();
+        assert_eq!(p.birth, "01 Jan 1876");
     }
 
     #[test]

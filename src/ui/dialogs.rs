@@ -367,28 +367,13 @@ pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
                     .desired_width(200.0),
             );
             ui.horizontal(|ui| {
-                ui.label("Geboren");
-                ui.add(
-                    egui::TextEdit::singleline(&mut app.draft.birth)
-                        .hint_text("Jahr")
-                        .desired_width(80.0),
-                );
-                ui.label("Ort");
-                ui.add(egui::TextEdit::singleline(&mut app.draft.birth_place).hint_text("Ort"));
-                ui.label("Gestorben");
-                ui.add(
-                    egui::TextEdit::singleline(&mut app.draft.death)
-                        .hint_text("Jahr")
-                        .desired_width(80.0),
-                );
-                ui.label("Ort");
-                ui.add(egui::TextEdit::singleline(&mut app.draft.death_place).hint_text("Ort"));
-            });
-            ui.horizontal(|ui| {
                 ui.radio_value(&mut app.draft.gender, Gender::Female, "Weiblich");
                 ui.radio_value(&mut app.draft.gender, Gender::Male, "Männlich");
                 ui.radio_value(&mut app.draft.gender, Gender::Unknown, "Unbekannt");
             });
+            ui.separator();
+            ui.label(egui::RichText::new("EREIGNISSE").small().strong());
+            crate::ui::picker::events_editor(ui, &mut app.draft);
             ui.horizontal(|ui| {
                 if ui.button("Foto auswählen").clicked() {
                     #[cfg(any(target_arch = "wasm32", target_os = "android"))]

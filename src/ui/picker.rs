@@ -265,26 +265,89 @@ pub fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.add_space(7.0);
 }
 
-/// Bearbeitbare Zeile: Jahresfeld (schmal) + Ortsfeld mit Platzhaltern.
-pub fn editable_info_row(ui: &mut egui::Ui, label: &str, date: &mut String, place: &mut String) {
-    ui.label(
-        egui::RichText::new(label)
-            .small()
-            .color(crate::ui::panels::dim_text(ui)),
-    );
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(date)
-                .hint_text("Jahr")
-                .desired_width(80.0),
-        );
-        ui.add(
-            egui::TextEdit::singleline(place)
-                .hint_text("Ort")
-                .desired_width(ui.available_width()),
-        );
-    });
-    ui.add_space(5.0);
+/// Dropdown zur Auswahl der Ereignisart (inkl. „Sonstiges" mit Freitext).
+pub fn event_kind_combo(
+    ui: &mut egui::Ui,
+    kind: &mut crate::model::EventKind,
+    id_salt: impl std::hash::Hash,
+) {
+    use crate::model::EventKind;
+    egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(kind.label().to_string())
+        .width(118.0)
+        .show_ui(ui, |ui| {
+            for variant in EventKind::all_variants() {
+                if ui
+                    .selectable_label(EventKind::eq(kind, variant), variant.label())
+                    .clicked()
+                {
+                    *kind = variant.clone();
+                }
+            }
+            let is_custom = matches!(kind, EventKind::Custom(_));
+            if ui.selectable_label(is_custom, "Sonstiges").clicked() && !is_custom {
+                *kind = EventKind::Custom(String::new());
+            }
+        });
+}
+
+/// Ereignis-Editor (Gramps-nah): **Geburt** und **Tod** sind
+/// Standard-Ereignisse (immer vorhanden, Art fest, nicht löschbar), weitere
+/// Ereignisse sind frei wählbar. Je Ereignis: Typ als Dropdown, Datum und Ort
+/// direkt als Textfelder. Danach werden die Kurzfelder synchronisiert.
+pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
+    use crate::model::{Event, EventKind};
+    person.ensure_standard_events();
+    let mut remove: Option<usize> = None;
+    for index in 0..person.events.len() {
+        let event = &mut person.events[index];
+        let standard = event.kind == EventKind::Birth || event.kind == EventKind::Death;
+        ui.horizontal(|ui| {
+            if standard {
+                ui.add_sized(
+                    egui::Vec2::new(118.0, 0.0),
+                    egui::Label::new(egui::RichText::new(event.kind.label()).strong()),
+                );
+            } else {
+                event_kind_combo(ui, &mut event.kind, ("event-kind", index));
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut event.date)
+                    .hint_text("Datum")
+                    .desired_width(88.0),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut event.place)
+                    .hint_text("Ort")
+                    .desired_width(ui.available_width().min(140.0)),
+            );
+            if !standard
+                && ui
+                    .small_button("✕")
+                    .on_hover_text("Ereignis entfernen")
+                    .clicked()
+            {
+                remove = Some(index);
+            }
+        });
+        if let EventKind::Custom(text) = &mut event.kind {
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(text)
+                        .hint_text("Eigene Ereignisart")
+                        .desired_width(160.0),
+                );
+            });
+        }
+    }
+    if let Some(index) = remove {
+        person.events.remove(index);
+    }
+    if ui.small_button("+ Ereignis").clicked() {
+        person.events.push(Event::new(EventKind::Residence));
+    }
+    person.sync_standard_fields();
 }
 
 /// Optionen unter einer aufgeklappten Beziehungszeile (Beziehungseditor):

@@ -360,18 +360,14 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
         }
         ui.add_space(12.0);
         if app.inline_edit {
-            picker::editable_info_row(
-                ui,
-                "GEBOREN",
-                &mut app.draft.birth,
-                &mut app.draft.birth_place,
+            ui.label(
+                egui::RichText::new("EREIGNISSE")
+                    .small()
+                    .strong()
+                    .color(section_accent),
             );
-            picker::editable_info_row(
-                ui,
-                "GESTORBEN",
-                &mut app.draft.death,
-                &mut app.draft.death_place,
-            );
+            picker::events_editor(ui, &mut app.draft);
+            ui.add_space(6.0);
             ui.label("QUELLE");
             ui.add(egui::TextEdit::singleline(&mut app.draft.source).hint_text("Quelle"));
             ui.label("NOTIZEN");
