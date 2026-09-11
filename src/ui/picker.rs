@@ -341,10 +341,11 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
         let standard = event.kind == EventKind::Birth || event.kind == EventKind::Death;
         ui.horizontal(|ui| {
             if standard {
-                ui.add_sized(
-                    egui::Vec2::new(118.0, 0.0),
-                    egui::Label::new(egui::RichText::new(event.kind.label()).strong()),
-                );
+                // Standard-Ereignisse sehen wie ein (deaktiviertes) Dropdown aus.
+                let mut fixed = event.kind.clone();
+                ui.add_enabled_ui(false, |ui| {
+                    event_kind_combo(ui, &mut fixed, ("event-kind-fixed", index));
+                });
             } else {
                 event_kind_combo(ui, &mut event.kind, ("event-kind", index));
             }
@@ -381,7 +382,11 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
     if let Some(index) = remove {
         person.events.remove(index);
     }
-    if ui.small_button("+ Ereignis").clicked() {
+    let width = ui.available_width();
+    if ui
+        .add_sized([width, 20.0], egui::Button::new("+ Ereignis"))
+        .clicked()
+    {
         person.events.push(Event::new(EventKind::Residence));
     }
     person.sync_standard_fields();
@@ -401,77 +406,85 @@ pub fn relation_options(
     ui.indent(format!("relation-editor-{relative_id}"), |ui| {
         match kind {
             RelationKind::Partner => {
-                // Art der Partnerschaft: Unbekannt/Verheiratet/Geschieden/…
-                ui.horizontal_wrapped(|ui| {
-                    for relation in [
-                        crate::model::PartnerRelation::Unknown,
-                        crate::model::PartnerRelation::Married,
-                        crate::model::PartnerRelation::Divorced,
-                        crate::model::PartnerRelation::Partnered,
-                    ] {
-                        let active =
-                            app.data.partner_relation_of(person_id, relative_id) == relation;
-                        if ui.selectable_label(active, relation.label()).clicked() {
-                            let name = app
-                                .data
-                                .find(relative_id)
-                                .map(|person| person.display_name())
-                                .unwrap_or_else(|| relative_id.to_string());
-                            app.snapshot(format!("Partnerbeziehung ändern: {name}"));
-                            app.data
-                                .set_partner_relation(person_id, relative_id, relation);
+                // Art der Partnerschaft als Auswahlbox (Dropdown).
+                let current = app.data.partner_relation_of(person_id, relative_id);
+                let mut selected = current;
+                egui::ComboBox::from_id_salt(("partner-rel", relative_id))
+                    .selected_text(current.label())
+                    .show_ui(ui, |ui| {
+                        for relation in [
+                            crate::model::PartnerRelation::Unknown,
+                            crate::model::PartnerRelation::Married,
+                            crate::model::PartnerRelation::Divorced,
+                            crate::model::PartnerRelation::Partnered,
+                        ] {
+                            ui.selectable_value(&mut selected, relation, relation.label());
                         }
-                    }
-                });
+                    });
+                if selected != current {
+                    let name = app
+                        .data
+                        .find(relative_id)
+                        .map(|person| person.display_name())
+                        .unwrap_or_else(|| relative_id.to_string());
+                    app.snapshot(format!("Partnerbeziehung ändern: {name}"));
+                    app.data
+                        .set_partner_relation(person_id, relative_id, selected);
+                }
             }
             RelationKind::Parent => {
-                // Beziehung zur eigenen Herkunft: leiblich/adoptiert/Stief-/
-                // Pflegekind (KIND-Beziehung in der Eltern-Familie).
-                ui.horizontal_wrapped(|ui| {
-                    for relation in [
-                        ChildRelation::Birth,
-                        ChildRelation::Adopted,
-                        ChildRelation::Step,
-                        ChildRelation::Foster,
-                    ] {
-                        let active =
-                            app.data.relation_of_child(relative_id, person_id) == relation;
-                        if ui.selectable_label(active, relation.label()).clicked() {
-                            let name = app
-                                .data
-                                .find(relative_id)
-                                .map(|person| person.display_name())
-                                .unwrap_or_else(|| relative_id.to_string());
-                            app.snapshot(format!("Elternbeziehung ändern: {name}"));
-                            app.data
-                                .set_child_relation(relative_id, person_id, relation);
+                // Beziehung zur eigenen Herkunft als Dropdown.
+                let current = app.data.relation_of_child(relative_id, person_id);
+                let mut selected = current;
+                egui::ComboBox::from_id_salt(("parent-rel", relative_id))
+                    .selected_text(current.label())
+                    .show_ui(ui, |ui| {
+                        for relation in [
+                            ChildRelation::Birth,
+                            ChildRelation::Adopted,
+                            ChildRelation::Step,
+                            ChildRelation::Foster,
+                        ] {
+                            ui.selectable_value(&mut selected, relation, relation.label());
                         }
-                    }
-                });
+                    });
+                if selected != current {
+                    let name = app
+                        .data
+                        .find(relative_id)
+                        .map(|person| person.display_name())
+                        .unwrap_or_else(|| relative_id.to_string());
+                    app.snapshot(format!("Elternbeziehung ändern: {name}"));
+                    app.data
+                        .set_child_relation(relative_id, person_id, selected);
+                }
             }
             RelationKind::Child => {
-                // Beziehung des Kindes: leiblich/adoptiert/Stief-/Pflegekind.
-                ui.horizontal_wrapped(|ui| {
-                    for relation in [
-                        ChildRelation::Birth,
-                        ChildRelation::Adopted,
-                        ChildRelation::Step,
-                        ChildRelation::Foster,
-                    ] {
-                        let active =
-                            app.data.relation_of_child(person_id, relative_id) == relation;
-                        if ui.selectable_label(active, relation.label()).clicked() {
-                            let name = app
-                                .data
-                                .find(relative_id)
-                                .map(|person| person.display_name())
-                                .unwrap_or_else(|| relative_id.to_string());
-                            app.snapshot(format!("Kindbeziehung ändern: {name}"));
-                            app.data
-                                .set_child_relation(person_id, relative_id, relation);
+                // Beziehung des Kindes als Dropdown.
+                let current = app.data.relation_of_child(person_id, relative_id);
+                let mut selected = current;
+                egui::ComboBox::from_id_salt(("child-rel", relative_id))
+                    .selected_text(current.label())
+                    .show_ui(ui, |ui| {
+                        for relation in [
+                            ChildRelation::Birth,
+                            ChildRelation::Adopted,
+                            ChildRelation::Step,
+                            ChildRelation::Foster,
+                        ] {
+                            ui.selectable_value(&mut selected, relation, relation.label());
                         }
-                    }
-                });
+                    });
+                if selected != current {
+                    let name = app
+                        .data
+                        .find(relative_id)
+                        .map(|person| person.display_name())
+                        .unwrap_or_else(|| relative_id.to_string());
+                    app.snapshot(format!("Kindbeziehung ändern: {name}"));
+                    app.data
+                        .set_child_relation(person_id, relative_id, selected);
+                }
                 // Geburt und Ort des Kindes direkt pflegbar.
                 if let Some(child) = app
                     .data
