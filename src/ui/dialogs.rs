@@ -5,19 +5,17 @@
 //!   von `tree::draw_tree`) und Speicherort (`MiniGramps::change_library`).
 //! - `show_open`      → Projektliste (`crate::import::discover_projects`),
 //!   Suchordner (`MiniGramps::project_locations`), manuelles Laden.
-//! - `show_editor`    → Modal zum Anlegen/Bearbeiten/Löschen; schreibt in
-//!   `MiniGramps::draft`/`data.people`, Fotos via `media::import_media_file`.
 //! - `show_image_intent` → fragt nach Drag-and-drop, ob das Foto Profilbild
 //!   oder Galeriebild wird (kopiert nach `media/`).
 //!
-//! Alle Fenster sind fix (`movable(false)`) und mit kleinem Titel.
+//! Personen werden **ausschließlich in der rechten Seitenleiste** bearbeitet
+//! (kein Modal). Alle Fenster hier sind fix (`movable(false)`) und mit
+//! kleinem Titel.
 
-use eframe::egui::{self, Color32};
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-use rfd::FileDialog;
+use eframe::egui;
 
 use crate::import::{discover_projects, project_display_name};
-use crate::media::{clear_person_photo_cache, write_round_avatar_now};
+use crate::media::clear_person_photo_cache;
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use crate::media::import_media_file_async;
 use crate::model::{Gender, person};
@@ -274,13 +272,11 @@ pub fn show_close_confirm(app: &mut MiniGramps, ctx: &egui::Context) {
                     app.save();
                     app.pending_close = false;
                     app.inline_edit = false;
-                    app.show_editor = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 if ui.button("Verwerfen").clicked() {
                     app.pending_close = false;
                     app.inline_edit = false;
-                    app.show_editor = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 if ui.button("Abbrechen").clicked() {
@@ -337,131 +333,6 @@ pub fn show_pending_select_confirm(app: &mut MiniGramps, ctx: &egui::Context) {
     if !open {
         app.pending_select = None;
     }
-}
-
-pub fn show_editor(app: &mut MiniGramps, ctx: &egui::Context) {
-    if !app.show_editor {
-        return;
-    }
-    let mut open = true;
-    let title = if app.editing.is_some() {
-        "Profil bearbeiten"
-    } else {
-        "Neue Person"
-    };
-    egui::Window::new(window_title(title))
-        .open(&mut open)
-        .movable(false)
-        .default_width(420.0)
-        .show(ctx, |ui| {
-            ui.label("Vorname");
-            ui.add(
-                egui::TextEdit::singleline(&mut app.draft.given_name)
-                    .hint_text("Vorname")
-                    .desired_width(200.0),
-            );
-            ui.label("Nachname");
-            ui.add(
-                egui::TextEdit::singleline(&mut app.draft.family_name)
-                    .hint_text("Nachname")
-                    .desired_width(200.0),
-            );
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut app.draft.gender, Gender::Female, "Weiblich");
-                ui.radio_value(&mut app.draft.gender, Gender::Male, "Männlich");
-                ui.radio_value(&mut app.draft.gender, Gender::Unknown, "Unbekannt");
-            });
-            ui.separator();
-            ui.label(egui::RichText::new("EREIGNISSE").small().strong());
-            crate::ui::picker::events_editor(ui, &mut app.draft);
-            ui.horizontal(|ui| {
-                if ui.button("Foto auswählen").clicked() {
-                    #[cfg(any(target_arch = "wasm32", target_os = "android"))]
-                    {
-                        app.status = "Fotoauswahl ist auf diesem Ziel noch nicht implementiert".into();
-                    }
-
-                    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-                    {
-                    if let Some(path) = FileDialog::new()
-                        .add_filter("Bilder", &["png", "jpg", "jpeg", "webp"])
-                        .pick_file()
-                    {
-                        if let Some(relative) =
-                            import_media_file_async(ui.ctx(), &app.library, &path)
-                        {
-                            app.draft.photo = Some(relative);
-                        }
-                    }
-                    }
-                }
-                if app.draft.photo.is_some() && ui.button("Foto entfernen").clicked() {
-                    app.draft.photo = None;
-                }
-            });
-            ui.label("Notizen");
-            ui.add(
-                egui::TextEdit::multiline(&mut app.draft.notes)
-                    .hint_text("Notizen")
-                    .desired_rows(3),
-            );
-            ui.label("Quelle");
-            ui.add(egui::TextEdit::singleline(&mut app.draft.source).hint_text("Quelle"));
-            ui.separator();
-            if ui.button("Speichern").clicked() {
-                let id = app.draft.id.clone();
-                let name = app.draft.display_name();
-                let action = if app.editing.is_some() {
-                    format!("Profil bearbeiten: {name}")
-                } else {
-                    format!("Person anlegen: {name}")
-                };
-                app.snapshot(action);
-                if let Some(existing) = &app.editing {
-                    if let Some(person) = app
-                        .data
-                        .people
-                        .iter_mut()
-                        .find(|person| person.id == *existing)
-                    {
-                        *person = app.draft.clone();
-                    }
-                } else {
-                    app.data.people.push(app.draft.clone());
-                }
-                let _ = write_round_avatar_now(&app.library, &app.draft);
-                clear_person_photo_cache(&mut app.photo_cache, &id);
-                app.selected = Some(id);
-                app.status = "Profil gespeichert".into();
-                app.show_editor = false;
-            }
-            if let Some(id) = app.editing.clone() {
-                if ui
-                    .button(egui::RichText::new("Person löschen").color(Color32::LIGHT_RED))
-                    .clicked()
-                {
-                    let name = app
-                        .data
-                        .find(&id)
-                        .map(|person| person.display_name())
-                        .unwrap_or_else(|| id.clone());
-                    app.snapshot(format!("Person löschen: {name}"));
-                    app.data.people.retain(|person| person.id != id);
-                    app.data.families.iter_mut().for_each(|family| {
-                        if family.parent_a.as_deref() == Some(&id) {
-                            family.parent_a = None;
-                        }
-                        if family.parent_b.as_deref() == Some(&id) {
-                            family.parent_b = None;
-                        }
-                        family.children.retain(|child| child != &id);
-                    });
-                    app.selected = app.data.people.first().map(|person| person.id.clone());
-                    app.show_editor = false;
-                }
-            }
-        });
-    app.show_editor = open;
 }
 
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]

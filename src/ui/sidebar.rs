@@ -23,9 +23,9 @@ use crate::media::{
 use crate::media::import_media_file_async;
 use crate::model::{ChildRelation, Gender, Person, person};
 use crate::ui::{
-    ICON_ADD_PERSON, ICON_CHILD, ICON_EDIT, ICON_PARENT, ICON_PARTNER, ICON_REFERENCE, ICON_SAVE,
-    ICON_SETTINGS, ICON_SIBLING, MiniGramps, icon_button, icon_only_button, panels::palette,
-    picker,
+    ICON_ADD_PERSON, ICON_CHILD, ICON_CLOSE, ICON_EDIT, ICON_PARENT, ICON_PARTNER, ICON_REFERENCE,
+    ICON_SAVE, ICON_SETTINGS, ICON_SIBLING, ICON_TRASH, ICON_UNLINK, MiniGramps, icon_button,
+    icon_only_button, panels::palette, picker,
 };
 
 /// Linke Seitenleiste: Personen nach Nachnamen gruppiert.
@@ -176,7 +176,9 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                 });
             ui.separator();
             if icon_button(ui, ICON_ADD_PERSON, "add-person", "Person hinzufügen").clicked() {
+                // Neue Person direkt in der Seitenleiste bearbeiten (kein Modal).
                 app.editing = None;
+                app.selected = None;
                 app.draft = person(
                     &format!("p{}", app.data.people.len() + 1),
                     "",
@@ -184,7 +186,10 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                     "",
                     Gender::Unknown,
                 );
-                app.show_editor = true;
+                app.draft.ensure_standard_events();
+                app.inline_edit = true;
+                app.relation_picker = None;
+                app.relation_query.clear();
             }
             ui.add_space(10.0);
             ui.label(
@@ -211,14 +216,51 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                 section_title(ui, "PERSON", colors.section, app);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Stift (Bearbeiten starten) / Diskette (speichern).
-                    let icon = if app.inline_edit {
-                        ICON_SAVE
-                    } else {
-                        ICON_EDIT
-                    };
-                    // Als-Referenz-Icon (Stern) neben dem Stift, nur wenn die
-                    // angezeigte Person nicht bereits Referenz ist.
-                    if app.reference.as_deref() != app.selected.as_deref() {
+                    let icon = if app.inline_edit { ICON_SAVE } else { ICON_EDIT };
+                    if app.inline_edit {
+                        // Abbrechen (Draft verwerfen) – alles bleibt in der Leiste.
+                        if icon_only_button(ui, ICON_CLOSE, "edit-cancel")
+                            .on_hover_text("Bearbeiten abbrechen")
+                            .clicked()
+                        {
+                            if let Some(id) = &app.selected {
+                                if let Some(person) = app.data.find(id).cloned() {
+                                    app.draft = person;
+                                }
+                            }
+                            app.inline_edit = false;
+                            app.relation_picker = None;
+                            app.relation_query.clear();
+                        }
+                        // Löschen (nur bestehende Personen).
+                        if app.selected.is_some()
+                            && icon_only_button(ui, ICON_TRASH, "person-delete")
+                                .on_hover_text("Person löschen")
+                                .clicked()
+                        {
+                            if let Some(id) = app.selected.clone() {
+                                let name = app
+                                    .data
+                                    .find(&id)
+                                    .map(|person| person.display_name())
+                                    .unwrap_or_else(|| id.clone());
+                                app.snapshot(format!("Person löschen: {name}"));
+                                app.data.people.retain(|person| person.id != id);
+                                app.data.families.iter_mut().for_each(|family| {
+                                    if family.parent_a.as_deref() == Some(&id) {
+                                        family.parent_a = None;
+                                    }
+                                    if family.parent_b.as_deref() == Some(&id) {
+                                        family.parent_b = None;
+                                    }
+                                    family.children.retain(|child| child != &id);
+                                });
+                                app.selected = app.data.people.first().map(|p| p.id.clone());
+                                app.inline_edit = false;
+                            }
+                        }
+                    } else if app.reference.as_deref() != app.selected.as_deref() {
+                        // Als-Referenz-Icon (Stern), nur wenn abweichend.
                         if icon_only_button(ui, ICON_REFERENCE, "set-reference")
                             .on_hover_text("Als Referenz setzen")
                             .clicked()
@@ -241,6 +283,7 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                         } else if let Some(id) = &app.selected {
                             if let Some(person) = app.data.find(id).cloned() {
                                 app.draft = person;
+                                app.draft.ensure_standard_events();
                                 app.inline_edit = true;
                             }
                         }
@@ -250,26 +293,67 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // Einheitliches Verhalten: Personenwechsel während der
-                    // Inline-Bearbeitung lädt die neue Person in das
-                    // Bearbeitungsformular (Familie und Felder synchron).
                     if app.inline_edit {
-                        match &app.selected {
-                            Some(id) if id != &app.draft.id => {
+                        // Personenwechsel während der Bearbeitung lädt die neue
+                        // Person ins Bearbeitungsformular (Felder synchron).
+                        if let Some(id) = &app.selected {
+                            if id != &app.draft.id {
                                 if let Some(person) = app.data.find(id).cloned() {
                                     app.draft = person;
+                                    app.draft.ensure_standard_events();
                                 }
                             }
-                            _ => {}
                         }
-                    }
-                    if let Some(id) = &app.selected.clone() {
+                        // Auch ohne Auswahl (neue Person) das Draft-Formular zeigen.
+                        let draft = app.draft.clone();
+                        profile(app, ui, colors.section, &draft);
+                    } else if let Some(id) = &app.selected.clone() {
                         if let Some(p) = app.data.find(id).cloned() {
                             profile(app, ui, colors.section, &p);
                         }
                     }
                 });
         });
+}
+
+/// Nur-Lesen-Darstellung der Ereignisse (Geburt/Tod + weitere + Partner-Heirat).
+fn events_readonly(ui: &mut egui::Ui, p: &Person, partners: &[Person]) {
+    let mut has_any = false;
+    if !p.birth.is_empty() || !p.birth_place.is_empty() {
+        picker::info_row(ui, "Geburt", &picker::dated_place(&p.birth, &p.birth_place));
+        has_any = true;
+    }
+    if !p.death.is_empty() || !p.death_place.is_empty() {
+        picker::info_row(ui, "Tod", &picker::dated_place(&p.death, &p.death_place));
+        has_any = true;
+    }
+    for event in &p.events {
+        if event.kind != crate::model::EventKind::Birth
+            && event.kind != crate::model::EventKind::Death
+        {
+            let value = picker::dated_place(&event.date, &event.place);
+            picker::info_row(ui, event.kind.label(), &value);
+            has_any = true;
+        }
+    }
+    for partner in partners {
+        for event in &partner.events {
+            if event.kind == crate::model::EventKind::Marriage
+                || event.kind == crate::model::EventKind::Divorce
+            {
+                let value = picker::dated_place(&event.date, &event.place);
+                picker::info_row(ui, event.kind.label(), &value);
+                has_any = true;
+            }
+        }
+    }
+    if !has_any {
+        ui.label(
+            egui::RichText::new("Keine Ereignisse")
+                .italics()
+                .color(crate::ui::panels::dim_text(ui)),
+        );
+    }
 }
 
 /// Profilinhalt (Avatar, Daten, Familie, Galerie) der angezeigten Person.
@@ -360,14 +444,6 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
         }
         ui.add_space(12.0);
         if app.inline_edit {
-            ui.label(
-                egui::RichText::new("EREIGNISSE")
-                    .small()
-                    .strong()
-                    .color(section_accent),
-            );
-            picker::events_editor(ui, &mut app.draft);
-            ui.add_space(6.0);
             ui.label("QUELLE");
             ui.add(egui::TextEdit::singleline(&mut app.draft.source).hint_text("Quelle"));
             ui.label("NOTIZEN");
@@ -435,50 +511,10 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
         ui.separator();
         section_title(ui, "EREIGNISSE", section_accent, app);
         if !app.collapsed_sections.contains("EREIGNISSE") {
-            let mut has_any = false;
-
-            // 1. Geburt (Birth)
-            if !p.birth.is_empty() || !p.birth_place.is_empty() {
-                picker::info_row(ui, "Geburt", &picker::dated_place(&p.birth, &p.birth_place));
-                has_any = true;
-            }
-
-            // 2. Tod (Death)
-            if !p.death.is_empty() || !p.death_place.is_empty() {
-                picker::info_row(ui, "Tod", &picker::dated_place(&p.death, &p.death_place));
-                has_any = true;
-            }
-
-            // 3. Andere Ereignisse (die nicht Geburt/Tod sind, um Duplikate zu vermeiden!)
-            for event in &p.events {
-                if event.kind != crate::model::EventKind::Birth
-                    && event.kind != crate::model::EventKind::Death
-                {
-                    let value = picker::dated_place(&event.date, &event.place);
-                    picker::info_row(ui, event.kind.label(), &value);
-                    has_any = true;
-                }
-            }
-
-            // 4. Heirat / Scheidung von Partnern (falls nicht schon gelistet)
-            for partner in &partners {
-                for event in &partner.events {
-                    if event.kind == crate::model::EventKind::Marriage
-                        || event.kind == crate::model::EventKind::Divorce
-                    {
-                        let value = picker::dated_place(&event.date, &event.place);
-                        picker::info_row(ui, event.kind.label(), &value);
-                        has_any = true;
-                    }
-                }
-            }
-
-            if !has_any {
-                ui.label(
-                    egui::RichText::new("Keine Ereignisse")
-                        .italics()
-                        .color(crate::ui::panels::dim_text(ui)),
-                );
+            if app.inline_edit {
+                picker::events_editor(ui, &mut app.draft);
+            } else {
+                events_readonly(ui, p, &partners);
             }
         }
     }
@@ -551,7 +587,10 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                                 _ => Some((crate::ui::tree::RelationKind::Child, child.id.clone())),
                             };
                         }
-                        if ui.small_button("✕").clicked() {
+                        if icon_only_button(ui, ICON_UNLINK, "unlink-child")
+                            .on_hover_text("Kind-Verknüpfung lösen (Person bleibt erhalten)")
+                            .clicked()
+                        {
                             app.snapshot(format!(
                                 "Kind-Verknüpfung lösen: {}",
                                 child.display_name()
@@ -795,7 +834,10 @@ fn relation_section(
                         _ => Some((kind, entry.id.clone())),
                     };
                 }
-                if ui.small_button("✕").clicked() {
+                if icon_only_button(ui, ICON_UNLINK, "unlink-relation")
+                    .on_hover_text("Verknüpfung lösen (Person bleibt erhalten)")
+                    .clicked()
+                {
                     let relation = match kind {
                         crate::ui::tree::RelationKind::Partner => "Partner-Verknüpfung",
                         crate::ui::tree::RelationKind::Parent => "Eltern-Verknüpfung",

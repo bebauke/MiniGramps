@@ -62,6 +62,7 @@ pub(crate) const ICON_PARTNER: &[u8] = include_bytes!("../../assets/icons/heart.
 pub(crate) const ICON_PARENT: &[u8] = include_bytes!("../../assets/icons/arrow-up.svg");
 pub(crate) const ICON_SIBLING: &[u8] = include_bytes!("../../assets/icons/git-branch.svg");
 pub(crate) const ICON_CHILD: &[u8] = include_bytes!("../../assets/icons/arrow-down.svg");
+pub(crate) const ICON_UNLINK: &[u8] = include_bytes!("../../assets/icons/unlink.svg");
 pub(crate) const ICON_EDIT: &[u8] = include_bytes!("../../assets/icons/edit-3.svg");
 pub(crate) const ICON_REFERENCE: &[u8] = include_bytes!("../../assets/icons/star.svg");
 pub(crate) const ICON_CHEVRON_LEFT: &[u8] = include_bytes!("../../assets/icons/chevron-left.svg");
@@ -153,7 +154,6 @@ pub struct MiniGramps {
     /// Zoom-Fit beim nächsten Frame ausführen (nach Laden/Referenzwechsel).
     pub fit_pending: bool,
     pub pan: Vec2,
-    pub show_editor: bool,
     pub show_open: bool,
     pub show_settings: bool,
     /// Projekteigenschaften hinter dem Logo in der Titelleiste.
@@ -209,6 +209,9 @@ pub struct MiniGramps {
     pub pending_child_for: Option<String>,
     pub pending_child_partner: Option<String>,
     pub pending_child_relation: ChildRelation,
+    /// Geburtsdatum/-ort für ein neu anzulegendes Kind (Relationsbearbeitung).
+    pub pending_child_birth: String,
+    pub pending_child_birth_place: String,
     /// Offene Beziehungskategorie (`+`-Schalter, nur im Bearbeitungsmodus).
     pub relation_picker: Option<RelationKind>,
     /// Aufgeklappte Beziehungszeile im Beziehungseditor: Kategorie + ID der
@@ -274,7 +277,6 @@ impl MiniGramps {
             zoom: 1.0,
             fit_pending: false,
             pan: Vec2::ZERO,
-            show_editor: false,
             show_open: false,
             show_settings: false,
             show_project: false,
@@ -305,6 +307,8 @@ impl MiniGramps {
             pending_child_for: None,
             pending_child_partner: None,
             pending_child_relation: ChildRelation::Birth,
+            pending_child_birth: String::new(),
+            pending_child_birth_place: String::new(),
             relation_picker: None,
             relation_editor: None,
             collapsed_sections: HashSet::new(),
@@ -453,7 +457,6 @@ impl MiniGramps {
                 self.redo_stack.clear();
                 self.pending_select = None;
                 self.inline_edit = false;
-                self.show_editor = false;
                 self.editing = None;
                 self.relation_picker = None;
                 if let Some(manifest) = load_project_manifest(path) {
@@ -548,7 +551,6 @@ impl MiniGramps {
                 self.redo_stack.clear();
                 self.pending_select = None;
                 self.inline_edit = false;
-                self.show_editor = false;
                 self.editing = None;
                 self.relation_picker = None;
                 self.photo_cache.clear();
@@ -582,7 +584,6 @@ impl MiniGramps {
                         self.redo_stack.clear();
                         self.pending_select = None;
                         self.inline_edit = false;
-                        self.show_editor = false;
                         self.editing = None;
                         self.relation_picker = None;
                         self.photo_cache.clear();
@@ -781,7 +782,6 @@ impl MiniGramps {
     fn refresh_after_rollback(&mut self) {
         self.people_groups_dirty = true;
         self.inline_edit = false;
-        self.show_editor = false;
         self.editing = None;
         self.relation_picker = None;
         self.relation_editor = None;
@@ -811,7 +811,17 @@ impl MiniGramps {
     /// Personenwechsel-Dialog.
     pub fn commit_draft(&mut self) {
         let name = self.draft.display_name();
-        self.snapshot(format!("Profil bearbeiten: {name}"));
+        let is_new = self
+            .data
+            .people
+            .iter()
+            .all(|person| person.id != self.draft.id);
+        let action = if is_new {
+            format!("Person anlegen: {name}")
+        } else {
+            format!("Profil bearbeiten: {name}")
+        };
+        self.snapshot(action);
         if let Some(person) = self
             .data
             .people
@@ -819,9 +829,13 @@ impl MiniGramps {
             .find(|person| person.id == self.draft.id)
         {
             *person = self.draft.clone();
+        } else {
+            self.data.people.push(self.draft.clone());
         }
         let _ = crate::media::write_round_avatar_now(&self.library, &self.draft);
         crate::media::clear_person_photo_cache(&mut self.photo_cache, &self.draft.id);
+        self.selected = Some(self.draft.id.clone());
+        self.editing = Some(self.draft.id.clone());
     }
 
     /// Person auswählen. Läuft gerade eine Bearbeitung mit ungespeicherten
@@ -1015,7 +1029,7 @@ impl eframe::App for MiniGramps {
         let native_close = ctx.input(|i| i.viewport().close_requested());
         if self.pending_close || native_close {
             // Ungespeichert = eine Bearbeitung läuft gerade (Profil/Editor).
-            if self.inline_edit || self.show_editor {
+            if self.inline_edit {
                 if native_close {
                     ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 }
@@ -1403,7 +1417,6 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
 
         // Dialoge (fixe Fenster, siehe dialogs.rs).
         dialogs::show_close_confirm(self, ctx);
-        dialogs::show_editor(self, ctx);
         dialogs::show_open(self, ctx);
         dialogs::show_settings(self, ctx);
         dialogs::show_project(self, ctx);

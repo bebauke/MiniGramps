@@ -110,6 +110,19 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                     }
                 });
         });
+        ui.horizontal(|ui| {
+            ui.label("Geburt");
+            ui.add(
+                egui::TextEdit::singleline(&mut app.pending_child_birth)
+                    .hint_text("Datum")
+                    .desired_width(90.0),
+            );
+            ui.label("Ort");
+            ui.add(
+                egui::TextEdit::singleline(&mut app.pending_child_birth_place)
+                    .hint_text("Ort"),
+            );
+        });
     }
     if app.relation_family_name.is_empty() {
         if let Some(p) = app.data.find(selected_id) {
@@ -156,9 +169,17 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                 "{relation} anlegen: {} {}",
                 app.relation_query, app.relation_family_name
             ));
-            app.data
-                .people
-                .push(person(&new_id, &app.relation_query, &app.relation_family_name, "", Gender::Unknown));
+            app.data.people.push(person(
+                &new_id,
+                &app.relation_query,
+                &app.relation_family_name,
+                &app.pending_child_birth,
+                Gender::Unknown,
+            ));
+            if let Some(new_person) = app.data.people.last_mut() {
+                new_person.birth_place = app.pending_child_birth_place.clone();
+                new_person.ensure_standard_events();
+            }
             match kind {
                 RelationKind::Partner => {
                     app.data.link_partner(selected_id, &new_id);
@@ -192,6 +213,8 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
             app.relation_picker = None;
             app.relation_query.clear();
             app.relation_family_name.clear();
+            app.pending_child_birth.clear();
+            app.pending_child_birth_place.clear();
             app.log(format!("Neue Person angelegt: {new_id}"));
         }
     });
@@ -425,6 +448,26 @@ pub fn relation_options(
                         app.data
                             .set_child_relation(person_id, relative_id, relation);
                     }
+                }
+                // Geburt und Ort des Kindes direkt pflegbar.
+                if let Some(child) = app
+                    .data
+                    .people
+                    .iter_mut()
+                    .find(|person| person.id == relative_id)
+                {
+                    ui.horizontal(|ui| {
+                        ui.label("Geburt");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut child.birth)
+                                .hint_text("Datum")
+                                .desired_width(90.0),
+                        );
+                        ui.label("Ort");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut child.birth_place).hint_text("Ort"),
+                        );
+                    });
                 }
             }
             RelationKind::Sibling => {
