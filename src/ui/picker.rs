@@ -302,27 +302,17 @@ pub fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.add_space(7.0);
 }
 
-/// Ereignisart im Auswahlfeld kürzen (z. B. „Hochzeit" → „Hochze…").
-fn short_event_label(label: &str) -> String {
-    let mut chars = label.chars();
-    let head: String = chars.by_ref().take(6).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
-    }
-}
-
 /// Dropdown zur Auswahl der Ereignisart (inkl. „Sonstiges" mit Freitext).
 pub fn event_kind_combo(
     ui: &mut egui::Ui,
     kind: &mut crate::model::EventKind,
     id_salt: impl std::hash::Hash,
+    width: f32,
 ) {
     use crate::model::EventKind;
     egui::ComboBox::from_id_salt(id_salt)
-        .selected_text(short_event_label(kind.label()))
-        .width(96.0)
+        .selected_text(kind.label())
+        .width(width)
         .show_ui(ui, |ui| {
             for variant in EventKind::all_variants() {
                 if ui
@@ -351,15 +341,18 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
         let event = &mut person.events[index];
         let standard = event.kind == EventKind::Birth || event.kind == EventKind::Death;
         // Titelzeile: Ereignisart als (ggf. deaktiviertes) Dropdown.
+        // Titelzeile: Ereignisart als (ggf. deaktiviertes) Dropdown über die
+        // volle Breite; bei entfernbaren Ereignissen bleibt Platz für „✕".
+        let combo_width = (ui.available_width() - if standard { 0.0 } else { 28.0 }).max(80.0);
         ui.horizontal(|ui| {
             if standard {
                 // Standard-Ereignisse sehen wie ein (deaktiviertes) Dropdown aus.
                 let mut fixed = event.kind.clone();
                 ui.add_enabled_ui(false, |ui| {
-                    event_kind_combo(ui, &mut fixed, ("event-kind-fixed", index));
+                    event_kind_combo(ui, &mut fixed, ("event-kind-fixed", index), combo_width);
                 });
             } else {
-                event_kind_combo(ui, &mut event.kind, ("event-kind", index));
+                event_kind_combo(ui, &mut event.kind, ("event-kind", index), combo_width);
             }
             if !standard {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
