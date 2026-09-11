@@ -662,13 +662,33 @@ pub fn gallery_thumbnail_ui(
 
 /// Initialen für den Platzhalter-Avatar (maximal 2 Buchstaben).
 pub fn initials(person: &Person) -> String {
-    person
-        .display_name()
-        .split_whitespace()
-        .filter_map(|word| word.chars().next())
-        .take(2)
-        .collect::<String>()
-        .to_uppercase()
+    // Erster Buchstabe aus Rufname (falls vorhanden) sonst erstem Vornamen,
+    // plus erster Buchstabe des Nachnamens.
+    let first = {
+        let call = person.call_name.trim();
+        if call.is_empty() {
+            person.given_name.split_whitespace().next().unwrap_or("")
+        } else {
+            call
+        }
+    };
+    let family = person.family_name.split_whitespace().next().unwrap_or("");
+    let mut out = String::new();
+    if let Some(c) = first.chars().next() {
+        out.extend(c.to_uppercase());
+    }
+    if let Some(c) = family.chars().next() {
+        out.extend(c.to_uppercase());
+    }
+    if out.is_empty() {
+        out = person
+            .display_name()
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_default();
+    }
+    out
 }
 
 /// Avatar-Vorschau: runder Avatar aus Cache oder Live-Vorschau.
@@ -819,5 +839,19 @@ mod tests {
         // Erneutes Importieren derselben Daten liefert denselben Pfad.
         assert_eq!(import_media_file(&temp, &source).unwrap(), relative);
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn initials_prefer_call_name() {
+        let mut p = crate::model::person(
+            "x",
+            "Hans Jürgen",
+            "Bauke",
+            "",
+            crate::model::Gender::Male,
+        );
+        assert_eq!(initials(&p), "HB");
+        p.call_name = "Jürgen".into();
+        assert_eq!(initials(&p), "JB");
     }
 }
