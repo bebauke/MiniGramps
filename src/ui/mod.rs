@@ -1037,43 +1037,59 @@ impl eframe::App for MiniGramps {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
-                    ui.label(
-                        egui::RichText::new("STAMMBAUM")
-                            .size(13.0)
-                            .strong()
-                            .color(section_accent),
-                    );
-                    ui.separator();
+                    // Schmale Leiste: Titel „STAMMBAUM" ausblenden und die
+                    // Ansichts-Schalter abkürzen (Tooltips = volle Bedeutung).
+                    let wide = ui.available_width() >= 640.0;
+                    if wide {
+                        ui.label(
+                            egui::RichText::new("STAMMBAUM")
+                                .size(13.0)
+                                .strong()
+                                .color(section_accent),
+                        );
+                        ui.separator();
+                    }
                 // Manuelle Offsets gelten in BEIDEN Ausrichtungen (Layout-
                 // Datei) und bleiben beim Ansichtwechsel erhalten.
                 let old_view = self.tree_view;
                 let old_orientation = self.tree_orientation;
+                let (label_desc, label_anc, label_fan) = if wide {
+                    ("Nachfahrenbaum", "Vorfahrenbaum", "Ahnenfächer")
+                } else {
+                    ("Nachf.", "Vorf.", "Fächer")
+                };
+                let (label_v, label_h) = if wide { ("Vertikal", "Horizontal") } else { ("V", "H") };
                 ui.selectable_value(
                     &mut self.tree_view,
                     TreeView::Descendants,
-                    egui::RichText::new("Nachfahrenbaum").size(11.0),
-                );
+                    egui::RichText::new(label_desc).size(11.0),
+                )
+                .on_hover_text("Nachfahrenbaum");
                 ui.selectable_value(
                     &mut self.tree_view,
                     TreeView::Ancestors,
-                    egui::RichText::new("Vorfahrenbaum").size(11.0),
-                );
+                    egui::RichText::new(label_anc).size(11.0),
+                )
+                .on_hover_text("Vorfahrenbaum");
                 ui.selectable_value(
                     &mut self.tree_view,
                     TreeView::Fan,
-                    egui::RichText::new("Ahnenfächer").size(11.0),
-                );
+                    egui::RichText::new(label_fan).size(11.0),
+                )
+                .on_hover_text("Ahnenfächer");
                 ui.separator();
                 ui.selectable_value(
                     &mut self.tree_orientation,
                     TreeOrientation::Vertical,
-                    egui::RichText::new("Vertikal").size(11.0),
-                );
+                    egui::RichText::new(label_v).size(11.0),
+                )
+                .on_hover_text("Vertikal");
                 ui.selectable_value(
                     &mut self.tree_orientation,
                     TreeOrientation::Horizontal,
-                    egui::RichText::new("Horizontal").size(11.0),
-                );
+                    egui::RichText::new(label_h).size(11.0),
+                )
+                .on_hover_text("Horizontal");
                 if self.tree_view != old_view || self.tree_orientation != old_orientation {
                     self.fit_pending = true;
                 }
