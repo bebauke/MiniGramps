@@ -23,10 +23,14 @@ pub trait DataStore {
     fn read_data(&self) -> Result<TreeData, String>;
     /// Projektdaten schreiben (atomar genug für den aktuellen Zweck).
     fn write_data(&self, data: &TreeData) -> Result<(), String>;
-    /// Manuelle Layout-Versätze lesen (leer = keine vorhanden).
-    fn read_layout(&self) -> HashMap<String, f32>;
-    /// Manuelle Layout-Versätze schreiben.
-    fn write_layout(&self, entries: &[(String, f32)]) -> Result<(), String>;
+    /// Manuelle Layout-Versätze + zuletzt aktive Referenzperson lesen.
+    fn read_layout(&self) -> (HashMap<String, f32>, Option<String>);
+    /// Manuelle Layout-Versätze + Referenzperson schreiben.
+    fn write_layout(
+        &self,
+        entries: &[(String, f32)],
+        reference: Option<&str>,
+    ) -> Result<(), String>;
     /// Projektmanifest lesen (Name, Format, Datendatei).
     fn read_manifest(&self) -> Option<ProjectManifest>;
     /// Projektmanifest schreiben.
@@ -46,6 +50,9 @@ pub trait DataStore {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct LayoutFile {
     pub version: u32,
+    /// Zuletzt aktive Referenzperson des Projekts (optional, abwärtskompatibel).
+    #[serde(default)]
+    pub reference: Option<String>,
     pub entries: Vec<LayoutEntry>,
 }
 
@@ -58,16 +65,18 @@ pub struct LayoutEntry {
 /// Aktuelle Layout-Dateiversion.
 pub const LAYOUT_VERSION: u32 = 2;
 
-fn parse_layout(text: &str) -> HashMap<String, f32> {
+fn parse_layout(text: &str) -> (HashMap<String, f32>, Option<String>) {
     serde_json::from_str::<LayoutFile>(text)
         .map(|file| {
             if file.version < LAYOUT_VERSION {
-                return HashMap::new();
+                return (HashMap::new(), None);
             }
-            file.entries
+            let entries = file
+                .entries
                 .into_iter()
                 .map(|entry| (entry.id, entry.offset))
-                .collect()
+                .collect();
+            (entries, file.reference)
         })
         .unwrap_or_default()
 }
@@ -123,15 +132,20 @@ impl DataStore for FileSystemStore {
         fs::write(&self.data_file, text).map_err(|error| error.to_string())
     }
 
-    fn read_layout(&self) -> HashMap<String, f32> {
+    fn read_layout(&self) -> (HashMap<String, f32>, Option<String>) {
         fs::read_to_string(self.layout_path())
             .map(|text| parse_layout(&text))
             .unwrap_or_default()
     }
 
-    fn write_layout(&self, entries: &[(String, f32)]) -> Result<(), String> {
+    fn write_layout(
+        &self,
+        entries: &[(String, f32)],
+        reference: Option<&str>,
+    ) -> Result<(), String> {
         let file = LayoutFile {
             version: LAYOUT_VERSION,
+            reference: reference.map(str::to_string),
             entries: entries
                 .iter()
                 .map(|(id, offset)| LayoutEntry {
@@ -258,22 +272,27 @@ impl<T: HttpTransport> DataStore for ServerStore<T> {
             .put(&self.url("data/tree.json"), &bytes, self.token())
     }
 
-    fn read_layout(&self) -> HashMap<String, f32> {
+    fn read_layout(&self) -> (HashMap<String, f32>, Option<String>) {
         let bytes = match self
             .transport
             .get(&self.url("layout/tree.json"), self.token())
         {
             Ok(bytes) => bytes,
-            Err(_) => return HashMap::new(),
+            Err(_) => return (HashMap::new(), None),
         };
         std::str::from_utf8(&bytes)
             .map(parse_layout)
             .unwrap_or_default()
     }
 
-    fn write_layout(&self, entries: &[(String, f32)]) -> Result<(), String> {
+    fn write_layout(
+        &self,
+        entries: &[(String, f32)],
+        reference: Option<&str>,
+    ) -> Result<(), String> {
         let file = LayoutFile {
             version: LAYOUT_VERSION,
+            reference: reference.map(str::to_string),
             entries: entries
                 .iter()
                 .map(|(id, offset)| LayoutEntry {
@@ -343,8 +362,10 @@ mod tests {
         store.write_data(&data).unwrap();
         assert_eq!(store.read_data().unwrap().people.len(), 1);
 
-        store.write_layout(&[("p1".into(), -42.5)]).unwrap();
-        assert_eq!(store.read_layout().get("p1"), Some(&-42.5));
+        store.write_layout(&[("p1".into(), -42.5)], Some("p1")).unwrap();
+        let (layout, reference) = store.read_layout();
+        assert_eq!(layout.get("p1"), Some(&-42.5));
+        assert_eq!(reference.as_deref(), Some("p1"));
 
         store
             .write_manifest(&ProjectManifest {
@@ -416,8 +437,8 @@ mod tests {
         store.write_data(&data).unwrap();
         assert_eq!(store.read_data().unwrap().people[0].family_name, "Lovelace");
 
-        store.write_layout(&[("p1".into(), 12.0)]).unwrap();
-        assert_eq!(store.read_layout().get("p1"), Some(&12.0));
+        store.write_layout(&[("p1".into(), 12.0)], None).unwrap();
+        assert_eq!(store.read_layout().0.get("p1"), Some(&12.0));
 
         store.write_media("media/x.jpg", b"jpeg").unwrap();
         assert_eq!(store.read_media("media/x.jpg").unwrap(), b"jpeg");
