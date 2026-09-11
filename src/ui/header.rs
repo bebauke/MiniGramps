@@ -104,8 +104,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_UNDO,
                                             "global-undo",
-                                            10.0,
-                                            egui::Vec2::new(30.0, 10.0),
+                                            8.0,
+                                            egui::Vec2::new(30.0, 8.0),
                                         )
                                         .on_hover_text(&undo_tip)
                                     })
@@ -135,8 +135,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_REDO,
                                             "global-redo",
-                                            10.0,
-                                            egui::Vec2::new(30.0, 10.0),
+                                            8.0,
+                                            egui::Vec2::new(30.0, 8.0),
                                         )
                                         .on_hover_text(&redo_tip)
                                         .clicked()
@@ -153,8 +153,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_CHEVRON_LEFT,
                                             "nav-back",
-                                            10.0,
-                                            egui::Vec2::new(30.0, 10.0),
+                                            8.0,
+                                            egui::Vec2::new(30.0, 8.0),
                                         )
                                         .on_hover_text(if nav_back_ok {
                                             "Vorherige Referenzperson"
@@ -172,8 +172,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                                             ui,
                                             ICON_CHEVRON_RIGHT,
                                             "nav-forward",
-                                            10.0,
-                                            egui::Vec2::new(30.0, 10.0),
+                                            8.0,
+                                            egui::Vec2::new(30.0, 8.0),
                                         )
                                         .on_hover_text(if nav_forward_ok {
                                             "Nächste Referenzperson"
