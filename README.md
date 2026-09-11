@@ -1,22 +1,44 @@
 # MiniGramps
 
-Ein kleines, visuelles Familienarchiv als native Desktop-Anwendung (Rust + egui/eframe).
+Ein modernes, schnelles Familienarchiv als native Desktop-Anwendung (Rust + egui/eframe).
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition%20(1.85%2B)-orange?logo=rust)](https://www.rust-lang.org/)
 [![egui](https://img.shields.io/badge/egui%2Feframe-0.33-blue)](https://github.com/emilk/egui)
 [![Plattform](https://img.shields.io/badge/Plattform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#voraussetzungen)
 [![Tests](https://img.shields.io/badge/Tests-21%20passed-brightgreen)](#entwicklung)
 
-MiniGramps stellt Stammbäume als interaktiven Graphen dar, lässt Personen und
-Beziehungen bearbeiten und importiert bestehende Daten aus **GEDCOM** und
-**Gramps XML**. Fotos werden nach dem Gramps-Prinzip als relative Pfade mit
-Inhalts-Hash verwaltet. Daten liegen in einem portablen JSON-Format vor.
+MiniGramps modernisiert **Gramps**: Das mächtige, aber im Alltag oft sperrige
+und langsame Programm wird in Bedienung und Tempo auf einen schlanken, schnellen
+Kern gebracht – ohne den Datenbestand einzuschränken.
+
+## Idee & Ziel
+
+**Gramps modernisieren.** Gramps ist funktional stark, wirkt im Alltag aber
+klobig: viele Dialoge, träge Listen, langsame Interaktion. MiniGramps überträgt
+die **notwendigen** Funktionen in ein schlankes, reaktives Bedienkonzept – der
+Datenbestand bleibt dabei vollständig.
+
+- **Vollständige Gramps-Daten-Kompatibilität.** Bestehende Gramps-Daten werden
+  vollständig eingelesen und bleiben verlustfrei nutzbar (Import von Gramps-XML
+  und GEDCOM). Es werden bewusst nicht alle Spezialdialoge nachgebaut, aber die
+  Daten bleiben vollständig erhalten und exportierbar.
+- **Vereinfachtes Bedienkonzept.** Weniger, klarere Schritte: direkt am Baum
+  arbeiten, Personen und Beziehungen inline bearbeiten, Referenzperson setzen
+  und per **Zurück/Vor** durch die Historie navigieren.
+- **Geschwindigkeit als Teil der User Experience.** Schnelles Laden, flüssiges
+  Zoomen/Schwenken und ein Layout, das auch große Bäume (900+ Personen) zügig
+  darstellt. Performance ist kein Nebeneffekt, sondern ein Entwurfsziel.
+
+Fotos werden nach dem Gramps-Prinzip als relative Pfade mit Inhalts-Hash
+verwaltet; Daten liegen in einem portablen JSON-Format vor.
 
 ---
 
 ## Inhaltsverzeichnis
 
+- [Idee & Ziel](#idee--ziel)
 - [Funktionen](#funktionen)
+- [Gramps-Kompatibilität](#gramps-kompatibilität)
 - [Voraussetzungen](#voraussetzungen)
 - [Bauen & Starten](#bauen--starten)
 - [Web (WASM)](#web-wasm)
@@ -78,6 +100,19 @@ Inhalts-Hash verwaltet. Daten liegen in einem portablen JSON-Format vor.
 
 - Hell/Dunkel-Theme mit eigener Farbwelt
 - Datumsnormierung und Rufnamen-Regel auf den Baumkarten (siehe unten)
+
+---
+
+## Gramps-Kompatibilität
+
+- **Vollständige Datenunterstützung:** Gramps-XML-Exporte werden umfassend
+  eingelesen – Personen und Namensbestandteile, Beziehungen (inkl. Kindesart),
+  Ereignisse, Datums-/Ortsangaben, Quellen, Notizen sowie Galerie/Medien.
+- **Bewusste Feature-Auswahl:** Es werden nicht alle Spezialfunktionen von
+  Gramps nachgebaut, sondern die für den Alltag wichtigen – dafür deutlich
+  einfacher und schneller bedient.
+- **Daten bleiben portabel:** Das MiniGramps-JSON ist versioniert und
+  exportierbar; GEDCOM- und Gramps-XML-Daten lassen sich weiterverwenden.
 
 ---
 
