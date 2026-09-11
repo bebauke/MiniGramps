@@ -89,12 +89,14 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     let nav_forward_ok = app.can_navigate_forward();
                     // Undo/Redo und Referenz-Pfeile als kompakte zweizeilige
                     // Befehlsgruppe (Zeile 1 = Rückgängig/Wiederholen, Zeile 2
-                    // = Zurück/Vor direkt darunter), vertikal zentriert zu den
-                    // großen Buttons.
+                    // = Zurück/Vor direkt darunter). Der Rahmen ist so hoch wie
+                    // die großen Buttons (34px); der Inhalt (2×8px + 1px = 17px)
+                    // wird darin explizit zentriert.
                     ui.allocate_ui_with_layout(
-                        egui::Vec2::new(96.0, 17.0),
+                        egui::Vec2::new(96.0, 34.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
+                            ui.add_space((34.0 - 17.0) * 0.5);
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.spacing_mut().button_padding = egui::vec2(5.0, 0.0);
                             ui.horizontal(|ui| {
