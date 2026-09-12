@@ -101,12 +101,11 @@ pub fn collect_project_files(folder: &Path, projects: &mut Vec<PathBuf>, depth: 
             if path.is_dir() && depth > 0 {
                 collect_project_files(&path, projects, depth - 1);
             }
-            let is_metadata = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.ends_with(".layout.json") || name.ends_with(".manifest.json")
-                });
+            let name_str = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let is_metadata = name_str.ends_with(".layout.json")
+                || name_str.ends_with(".manifest.json")
+                || name_str == "letzte-sitzung.json"
+                || name_str == "settings.json";
             let supported = !is_metadata
                 && path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
                     matches!(
@@ -500,6 +499,55 @@ fn parse_gramps_xml(text: &str) -> Result<TreeData, String> {
     )
     .map_err(|e| e.to_string())?;
     let mut data = TreeData::default();
+    // Gramps-Quellen (Titel aus stitle/sauthor/spubinfo) und Citations
+    // (Quellverweis + Seite), den Personen über citationref zugeordnet.
+    let mut source_titles: HashMap<String, String> = HashMap::new();
+    for node in doc.descendants().filter(|n| n.has_tag_name("source")) {
+        let handle = node.attribute("handle").unwrap_or_default().to_string();
+        let text = |tag: &str| {
+            node.descendants()
+                .find(|n| n.has_tag_name(tag))
+                .and_then(|n| n.text())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let title = text("stitle");
+        let author = text("sauthor");
+        let pubinfo = text("spubinfo");
+        let mut full = title;
+        for part in [author, pubinfo] {
+            if !part.is_empty() {
+                if !full.is_empty() {
+                    full.push_str(" — ");
+                }
+                full.push_str(&part);
+            }
+        }
+        if !full.is_empty() {
+            source_titles.insert(handle, full);
+        }
+    }
+    let mut citation_targets: HashMap<String, (String, String)> = HashMap::new();
+    for node in doc.descendants().filter(|n| n.has_tag_name("citation")) {
+        let handle = node.attribute("handle").unwrap_or_default().to_string();
+        let source = node
+            .children()
+            .find(|n| n.has_tag_name("sourceref"))
+            .and_then(|n| n.attribute("hlink"))
+            .unwrap_or_default()
+            .to_string();
+        let page = node
+            .descendants()
+            .find(|n| n.has_tag_name("page"))
+            .and_then(|n| n.text())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !handle.is_empty() {
+            citation_targets.insert(handle, (source, page));
+        }
+    }
     let mut events: HashMap<String, (String, String, String, String)> = HashMap::new();
     for node in doc.descendants().filter(|n| n.has_tag_name("event")) {
         let handle = node.attribute("handle").unwrap_or_default().to_string();
@@ -560,10 +608,28 @@ fn parse_gramps_xml(text: &str) -> Result<TreeData, String> {
                 }
             }
         }
+        let mut person_sources = Vec::new();
+        for reference in node.children().filter(|n| n.has_tag_name("citationref")) {
+            let Some(link) = reference.attribute("hlink") else {
+                continue;
+            };
+            if let Some((source, page)) = citation_targets.get(link) {
+                if let Some(title) = source_titles.get(source.as_str()) {
+                    let entry = crate::model::SourceEntry {
+                        title: title.clone(),
+                        detail: page.clone(),
+                    };
+                    if !person_sources.contains(&entry) {
+                        person_sources.push(entry);
+                    }
+                }
+            }
+        }
         data.people.push(person(&id, name, surname, &birth, gender));
         if let Some(p) = data.people.last_mut() {
             p.death = death;
             p.events = person_events;
+            p.sources = person_sources;
         }
     }
     for node in doc.descendants().filter(|n| n.has_tag_name("family")) {

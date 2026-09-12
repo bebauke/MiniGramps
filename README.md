@@ -1,5 +1,7 @@
 # MiniGramps
 
+![Screenshot](screenshot.png)
+
 Ein modernes, schnelles Familienarchiv als native Desktop-Anwendung (Rust + egui/eframe).
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition%20(1.85%2B)-orange?logo=rust)](https://www.rust-lang.org/)

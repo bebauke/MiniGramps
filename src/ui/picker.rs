@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use eframe::egui::{self, TextureHandle};
 
 use crate::media::avatar_ui_preview;
-use crate::model::{ChildRelation, Gender, Person, person};
+use crate::model::{ChildRelation, Event, EventKind, Gender, Person, person};
 use crate::ui::tree::RelationKind;
 use crate::ui::{ICON_CLOSE, MiniGramps, icon, icon_only_button};
 
@@ -48,7 +48,108 @@ pub fn wants_reference(ui: &egui::Ui) -> bool {
     ui.ctx().input(|i| i.modifiers.shift)
 }
 
+/// Text auf höchstens `max_chars` Zeichen kürzen („…" als letztes Zeichen).
+pub(crate) fn ellipsize(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut result: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    result.push('…');
+    result
+}
+
+/// Platz für einen nachfolgenden Icon-Knopf (z. B. Entfernen), den die
+/// Namensbox freihalten muss, damit die Zeile nicht übersteht.
+pub(crate) const TRAILING_ICON_RESERVE: f32 = 36.0;
+
+/// Klickbare, linksbündige Namenszeile mit FESTEM Rechteck (Flattersatz,
+/// kein Blocksatz): Sie belegt exakt `verfügbare Breite minus reserve` und
+/// meldet dem Layout nie Wunschbreiten zurück — lange Namen können
+/// größenverstellbare Panels dadurch nicht aufziehen
+/// (Rückkopplungsschleife). Gekürzt wird ohne Textvermessung per
+/// Zeichenbudget aus der tatsächlichen Breite.
+pub fn truncated_person_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    hover: &str,
+    active: bool,
+    reserve: f32,
+) -> egui::Response {
+    let height = ui.spacing().interact_size.y;
+    let width = (ui.available_width() - reserve).max(40.0);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::Vec2::new(width, height), egui::Sense::click());
+    let response = response.on_hover_text(hover);
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact_selectable(&response, active);
+        if active || response.hovered() {
+            ui.painter()
+                .rect_filled(rect, visuals.corner_radius, visuals.bg_fill);
+        }
+        let budget = ((rect.width() / 6.5) as usize).max(8);
+        ui.painter().text(
+            rect.left_center() + egui::Vec2::new(6.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            ellipsize(text, budget),
+            egui::FontId::proportional(13.0),
+            visuals.text_color(),
+        );
+    }
+    response
+}
+
+/// Text linksbündig in festem Rechteck, ggf. über mehrere Zeilen umbrechend.
+/// Keine Wunschbreiten ans Layout (kein Aufziehen von Panels).
+pub fn left_label_wrapped(ui: &mut egui::Ui, text: &str, size: f32, color: egui::Color32) {
+    let width = ui.available_width();
+    let galley = ui.painter().layout(
+        text.to_owned(),
+        egui::FontId::proportional(size),
+        color,
+        width,
+    );
+    let height = galley.size().y.max(1.0);
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::new(width, height), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().galley(rect.min, galley, color);
+    }
+}
+
+/// Einzeiliger Text linksbündig in festem Rechteck, bei Bedarf mit „…" am
+/// Ende gekürzt (Tooltip nur dann).
+pub fn left_label_single(ui: &mut egui::Ui, text: &str, size: f32, color: egui::Color32) {
+    let width = ui.available_width();
+    let budget = ((width / (size * 0.5)) as usize).max(8);
+    let shown = ellipsize(text, budget);
+    let font = egui::FontId::proportional(size);
+    let height = ui
+        .painter()
+        .layout(shown.clone(), font.clone(), color, f32::INFINITY)
+        .size()
+        .y
+        .max(1.0);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::Vec2::new(width, height), egui::Sense::hover());
+    let response = if shown == text {
+        response
+    } else {
+        response.on_hover_text(text)
+    };
+    let _ = response;
+    if ui.is_rect_visible(rect) {
+        ui.painter().text(
+            rect.left_center(),
+            egui::Align2::LEFT_CENTER,
+            shown,
+            font,
+            color,
+        );
+    }
+}
+
 /// Beziehungszeile: Avatar + Icon + klickbarer Name (öffnet zur Ansicht).
+/// `trailing` reserviert Platz für einen nachfolgenden Knopf (z. B.
+/// Entfernen im Bearbeitungsmodus, sonst 0).
 pub fn relationship_row(
     ui: &mut egui::Ui,
     icon_bytes: &'static [u8],
@@ -56,18 +157,39 @@ pub fn relationship_row(
     person: &Person,
     cache: &mut HashMap<String, TextureHandle>,
     media_base: &std::path::Path,
+    trailing: f32,
 ) -> bool {
     let mut selected = false;
     ui.horizontal(|ui| {
-        avatar_ui_preview(ui, person, cache, media_base, 27.0);
+        avatar_ui_preview(ui, person, cache, media_base, 27.0, egui::Vec2::ZERO);
         icon(ui, icon_bytes, icon_id);
-        selected = ui.selectable_label(false, person.display_name()).clicked();
+        let name = person.display_name();
+        selected = truncated_person_button(ui, &name, &name, false, trailing).clicked();
     });
     selected
 }
 
 /// Suchfeld + Vorschläge der offenen Beziehungskategorie.
 pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, selected_id: &str) {
+    // Explizite Geschlechtswahl gilt nur für die aktuelle Kategorie +
+    // Bezugsperson (sonst zurück auf automatisch).
+    if app.new_person_gender_for != Some((kind, selected_id.to_string())) {
+        app.new_person_gender = None;
+        app.new_person_gender_for = Some((kind, selected_id.to_string()));
+    }
+    // Neuer Partner erhält per Default das andere Geschlecht.
+    let auto_gender = match kind {
+        RelationKind::Partner => app
+            .data
+            .find(selected_id)
+            .map(|person| match person.gender {
+                Gender::Male => Gender::Female,
+                Gender::Female => Gender::Male,
+                Gender::Unknown => Gender::Unknown,
+            })
+            .unwrap_or(Gender::Unknown),
+        _ => Gender::Unknown,
+    };
     if kind == RelationKind::Child {
         let partners: Vec<_> = app
             .data
@@ -81,7 +203,7 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                 .pending_child_partner
                 .as_deref()
                 .and_then(|id| partners.iter().find(|person| person.id == id))
-                .map(|person| person.display_name())
+                .map(|person| ellipsize(&person.display_name(), 26))
                 .unwrap_or_else(|| "Ohne Partner".into());
             egui::ComboBox::from_id_salt("child-partner-inline")
                 .selected_text(selected_text)
@@ -152,11 +274,33 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
         }
     }
 
+    // Zwei Zeilen statt einer: So bleibt das "+" immer sichtbar, egal wie
+    // schmal die Leiste ist.
+    ui.horizontal(|ui| {
+        ui.label("Geschlecht:");
+        let mut gender = app.new_person_gender.unwrap_or(auto_gender);
+        let before = gender;
+        ui.radio_value(&mut gender, Gender::Female, "W");
+        ui.radio_value(&mut gender, Gender::Male, "M");
+        ui.radio_value(&mut gender, Gender::Unknown, "?");
+        if gender != before {
+            app.new_person_gender = Some(gender);
+        }
+    });
     ui.horizontal(|ui| {
         ui.label("Vorname:");
-        ui.text_edit_singleline(&mut app.relation_query);
+        ui.add(
+            egui::TextEdit::singleline(&mut app.relation_query)
+                .desired_width(ui.available_width()),
+        );
+    });
+    ui.horizontal(|ui| {
         ui.label("Nachname:");
-        ui.text_edit_singleline(&mut app.relation_family_name);
+        // Platz für das "+" freihalten (feste Reserve statt Wunschbreite).
+        let field = (ui.available_width() - 34.0).max(60.0);
+        ui.add(
+            egui::TextEdit::singleline(&mut app.relation_family_name).desired_width(field),
+        );
         if ui.button("+").on_hover_text("Person anlegen und direkt verknüpfen").clicked() {
             let new_id = format!("p{}", app.data.people.len() + 1);
             let relation = match kind {
@@ -169,19 +313,7 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
                 "{relation} anlegen: {} {}",
                 app.relation_query, app.relation_family_name
             ));
-            // Neuer Partner erhält per Default das andere Geschlecht.
-            let new_gender = match kind {
-                RelationKind::Partner => app
-                    .data
-                    .find(selected_id)
-                    .map(|person| match person.gender {
-                        Gender::Male => Gender::Female,
-                        Gender::Female => Gender::Male,
-                        Gender::Unknown => Gender::Unknown,
-                    })
-                    .unwrap_or(Gender::Unknown),
-                _ => Gender::Unknown,
-            };
+            let new_gender = app.new_person_gender.unwrap_or(auto_gender);
             app.data.people.push(person(
                 &new_id,
                 &app.relation_query,
@@ -226,6 +358,8 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
             app.relation_picker = None;
             app.relation_query.clear();
             app.relation_family_name.clear();
+            app.new_person_gender = None;
+            app.new_person_gender_for = None;
             app.pending_child_birth.clear();
             app.pending_child_birth_place.clear();
             app.log(format!("Neue Person angelegt: {new_id}"));
@@ -248,7 +382,12 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
             ui.horizontal_wrapped(|ui| {
             ui.label("Verknüpfen:");
             for candidate in suggestions {
-                if ui.small_button(candidate.display_name()).clicked() {
+                let name = candidate.display_name();
+                if ui
+                    .small_button(ellipsize(&name, 30))
+                    .on_hover_text(&name)
+                    .clicked()
+                {
                     let relation = match kind {
                         RelationKind::Partner => "Partner",
                         RelationKind::Parent => "Elternteil",
@@ -298,7 +437,8 @@ pub fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
             .small()
             .color(crate::ui::panels::dim_text(ui)),
     );
-    ui.label(if value.is_empty() { "-" } else { value });
+    let value = if value.is_empty() { "-" } else { value };
+    left_label_single(ui, value, 13.0, ui.visuals().text_color());
     ui.add_space(7.0);
 }
 
@@ -439,6 +579,52 @@ pub fn relation_options(
                     app.snapshot(format!("Partnerbeziehung ändern: {name}"));
                     app.data
                         .set_partner_relation(person_id, relative_id, selected);
+                }
+                // Beziehungsereignisse (Gramps: Ereignisse an der Beziehung):
+                // gemeinsame Heirat/Scheidung/Partnerschaft beider Personen,
+                // nur Lesen + Hinzufügen (Details pflegt der Personen-Editor).
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("BEZIEHUNGSEREIGNISSE")
+                        .small()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+                let mut couple_events = 0;
+                for pid in [person_id, relative_id] {
+                    if let Some(partner) = app.data.find(pid) {
+                        for event in &partner.events {
+                            if matches!(event.kind, EventKind::Marriage | EventKind::Divorce) {
+                                info_row(
+                                    ui,
+                                    event.kind.label(),
+                                    &dated_place(&event.date, &event.place),
+                                );
+                                couple_events += 1;
+                            }
+                        }
+                    }
+                }
+                if couple_events == 0 {
+                    ui.label(
+                        egui::RichText::new("Noch keine")
+                            .italics()
+                            .color(crate::ui::panels::dim_text(ui)),
+                    );
+                }
+                if ui.small_button("+ Beziehungsereignis").clicked() {
+                    let name = app
+                        .data
+                        .find(relative_id)
+                        .map(|person| person.display_name())
+                        .unwrap_or_else(|| relative_id.to_string());
+                    app.snapshot(format!("Beziehungsereignis hinzufügen: {name}"));
+                    for pid in [person_id, relative_id] {
+                        if let Some(partner) =
+                            app.data.people.iter_mut().find(|person| person.id == pid)
+                        {
+                            partner.events.push(Event::new(EventKind::Marriage));
+                        }
+                    }
                 }
             }
             RelationKind::Parent => {

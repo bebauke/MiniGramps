@@ -12,16 +12,12 @@
 //! - Fotos laufen über `crate::media` (avatar_ui, import_media_file).
 
 use eframe::egui::{self, Color32, Sense, Stroke, Vec2};
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-use rfd::FileDialog;
 use std::collections::HashMap;
 
 use crate::media::{
     avatar_ui_live, avatar_ui_preview, clear_person_photo_cache, gallery_thumbnail_ui,
 };
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
-use crate::media::import_media_file_async;
-use crate::model::{ChildRelation, Gender, Person, person};
+use crate::model::{ChildRelation, Gender, Person, parse_birth_date, person};
 use crate::ui::{
     ICON_ADD_PERSON, ICON_CHILD, ICON_CLOSE, ICON_EDIT, ICON_PARENT, ICON_PARTNER, ICON_REFERENCE,
     ICON_SAVE, ICON_SETTINGS, ICON_SIBLING, ICON_TRASH, ICON_UNLINK, MiniGramps, icon_button,
@@ -34,6 +30,9 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
     egui::SidePanel::left("people")
         .resizable(true)
         .default_width(230.0)
+        // Harte Obergrenze: Kein Inhalt darf die Leiste je aufziehen
+        // (der Panel-Zustand übernimmt sonst Inhaltsbreiten).
+        .width_range(96.0..=380.0)
         .frame(egui::Frame::new().fill(colors.panel).inner_margin(10))
         .show(ctx, |ui| {
             // Suche geleert → alle Nachnamensgruppen wieder einklappen
@@ -87,7 +86,7 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if app.people_groups_dirty {
-                        let mut grouped: HashMap<String, Vec<(String, Gender, String)>> =
+                        let mut grouped: HashMap<String, Vec<(String, Gender, String, Option<i32>)>> =
                             HashMap::new();
                         for person in &app.data.people {
                             let surname = if person.family_name.is_empty() {
@@ -100,11 +99,12 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                                 person.id.clone(),
                                 person.gender,
                                 person.display_name(),
+                                parse_birth_date(&person.birth).map(|(year, _, _)| year),
                             ));
                         }
                         let mut groups: Vec<_> = grouped.into_iter().collect();
                         for (_, members) in &mut groups {
-                            members.sort_by_key(|(_, _, name)| name.to_lowercase());
+                            members.sort_by_key(|(_, _, name, _)| name.to_lowercase());
                         }
                         if app.group_by_count {
                             groups.sort_by(|(a, members_a), (b, members_b)| {
@@ -123,10 +123,10 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                     for (surname, members) in &app.people_groups {
                         // Bei aktivem Filter: nur passende Personen; leere
                         // Gruppen ausblenden. Alle Treffer-Gruppen aufgeklappt.
-                        let shown: Vec<&(String, Gender, String)> = if filtering {
+                        let shown: Vec<&(String, Gender, String, Option<i32>)> = if filtering {
                             members
                                 .iter()
-                                .filter(|(_, _, name)| name.to_lowercase().contains(&filter))
+                                .filter(|(_, _, name, _)| name.to_lowercase().contains(&filter))
                                 .collect()
                         } else {
                             members.iter().collect()
@@ -142,24 +142,28 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
                             None => String::new(),
                         };
                         let count = shown.len();
-                        let mut header = egui::CollapsingHeader::new(format!("{display} · {count}"))
-                            .id_salt((surname.as_str(), app.people_group_generation));
+                        let mut header = egui::CollapsingHeader::new(format!(
+                            "{} · {count}",
+                            picker::ellipsize(&display, 28)
+                        ))
+                        .id_salt((surname.as_str(), app.people_group_generation));
                         if filtering {
                             header = header.open(Some(true));
                         }
                         header.show(ui, |ui| {
-                            // Namen nicht umbrechen lassen, sondern in „…“
-                            // übergehen lassen, damit lange Namen die Liste
-                            // nicht stauchen.
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                             for entry in &shown {
-                                let (id, gender, name) = *entry;
+                                let (id, gender, name, birth_year) = *entry;
                                 let active = selected == Some(id.as_str());
-                                if ui
-                                    .selectable_label(
-                                        active,
-                                        format!("{}  {}", picker::gender_symbol(*gender), name),
-                                    )
+                                let year = birth_year
+                                    .map(|year| format!(" ({year})"))
+                                    .unwrap_or_default();
+                                let text = format!(
+                                    "{}  {}{}",
+                                    picker::gender_symbol(*gender),
+                                    name,
+                                    year
+                                );
+                                if picker::truncated_person_button(ui, &text, name, active, 0.0)
                                     .clicked()
                                 {
                                     // Ansicht öffnen; Shift/Dreifachklick
@@ -204,11 +208,75 @@ pub fn show_left(app: &mut MiniGramps, ctx: &egui::Context) {
         });
 }
 
+/// Nur vertikal scrollen: Der Inhalt passt sich der Leistenbreite an, statt
+/// sie aufzuziehen (überbreite Edit-Zeilen werden unten einzeln begrenzt).
+fn profile_scroll_area() -> egui::ScrollArea {
+    egui::ScrollArea::vertical()
+        .id_salt("profile-content")
+        .auto_shrink([false, false])
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn edit_row_with_trailing_unlink_does_not_grow_panel_across_frames() {
+        let ctx = egui::Context::default();
+        let person = crate::model::person(
+            "p1",
+            "Elizabeth Angela Marguerite Bowes-Lyon",
+            "Windsor",
+            "",
+            crate::model::Gender::Female,
+        );
+        let mut cache: HashMap<String, egui::TextureHandle> = HashMap::new();
+        let media = std::env::temp_dir();
+        for _ in 0..12 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1280.0, 760.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                // Wie relation_section im Bearbeitungsmodus: Namensbox mit
+                // Reserve plus Entfernen-Knopf dahinter.
+                let panel = egui::SidePanel::right("regression-edit-row")
+                    .default_width(250.0)
+                    .show(ctx, |ui| {
+                        profile_scroll_area().show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                picker::relationship_row(
+                                    ui,
+                                    crate::ui::ICON_UNLINK,
+                                    "test",
+                                    &person,
+                                    &mut cache,
+                                    &media,
+                                    picker::TRAILING_ICON_RESERVE,
+                                );
+                                let _ = crate::ui::icon_only_button(
+                                    ui,
+                                    crate::ui::ICON_UNLINK,
+                                    "unlink-test",
+                                );
+                            });
+                        });
+                    });
+                assert!((panel.response.rect.width() - 250.0).abs() < 1.0);
+            });
+        }
+    }
+}
+
 /// Rechte Seitenleiste: Ansicht/Bearbeitung der ausgewählten Person.
 pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
     let colors = palette(app.dark_mode);
     egui::SidePanel::right("details")
         .default_width(250.0)
+        .width_range(200.0..=480.0)
         .frame(egui::Frame::new().fill(colors.panel).inner_margin(10))
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -270,29 +338,24 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                             }
                         }
                     }
-                    if icon_only_button(ui, icon, "profile-edit").clicked() {
-                        if app.inline_edit {
-                            app.commit_draft();
-                            app.status = "Profil gespeichert".into();
-                            // Auch auf die Festplatte schreiben — sonst sind
-                            // Foto/Änderungen nach Neustart weg.
-                            app.save();
-                            app.inline_edit = false;
-                            app.relation_picker = None;
-                            app.relation_query.clear();
-                        } else if let Some(id) = &app.selected {
-                            if let Some(person) = app.data.find(id).cloned() {
-                                app.draft = person;
-                                app.draft.ensure_standard_events();
-                                app.inline_edit = true;
-                            }
-                        }
+                    if icon_only_button(ui, icon, "profile-edit")
+                        .on_hover_text("Bearbeiten/Speichern (Strg+E)")
+                        .clicked()
+                    {
+                        app.toggle_inline_edit();
                     }
                 });
             });
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+            // Personenwechsel: Profil ans Anfang scrollen, sonst bleibt ein
+            // alter Offset stehen und schneidet das neue Profilbild an.
+            let profile_changed = app.selected != app.profile_shown_for;
+            let mut profile_scroll = profile_scroll_area();
+            if profile_changed {
+                profile_scroll = profile_scroll.vertical_scroll_offset(0.0);
+            }
+            profile_scroll.show(ui, |ui| {
+                    // Profilinhalt erzwungen linksbündig (ScrollArea zentriert sonst).
+                    ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                     if app.inline_edit {
                         // Personenwechsel während der Bearbeitung lädt die neue
                         // Person ins Bearbeitungsformular (Felder synchron).
@@ -312,7 +375,9 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                             profile(app, ui, colors.section, &p);
                         }
                     }
+                    });
                 });
+            app.profile_shown_for = app.selected.clone();
         });
 }
 
@@ -385,20 +450,10 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
 
                     #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
                     {
-                    if let Some(path) = FileDialog::new()
-                        .add_filter("Bilder", &["png", "jpg", "jpeg", "webp"])
-                        .pick_file()
-                    {
-                        if let Some(relative) =
-                            import_media_file_async(ui.ctx(), &app.library, &path)
-                        {
-                            app.draft.photo = Some(relative.clone());
-                            if !app.draft.gallery.iter().any(|entry| entry == &relative) {
-                                app.draft.gallery.push(relative);
-                            }
-                            clear_person_photo_cache(&mut app.photo_cache, &app.draft.id);
-                        }
-                    }
+                        // Auswahl aus vorhandenen Projektbildern (oder neue Datei).
+                        app.photo_chooser_gallery = false;
+                        app.photo_chooser =
+                            Some(crate::media::list_media_images(&app.library));
                     }
                 }
                 ui.add_space(12.0);
@@ -416,6 +471,22 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                         );
                         if ui.small_button("Reset").clicked() {
                             app.draft.photo_crop = None;
+                        }
+                        if ui
+                            .small_button("Drehen")
+                            .on_hover_text("Profilbild um 90° im Uhrzeigersinn drehen")
+                            .clicked()
+                        {
+                            if let Some(photo) = app.draft.photo.clone() {
+                                if crate::media::rotate_image_file_90(&app.library, &photo) {
+                                    crate::media::delete_person_thumbs(&app.library, &app.draft);
+                                    clear_person_photo_cache(&mut app.photo_cache, &app.draft.id);
+                                    app.draft.photo_crop = None;
+                                    app.status = "Foto um 90° gedreht".into();
+                                } else {
+                                    app.status = "Drehen fehlgeschlagen".into();
+                                }
+                            }
                         }
                     });
                     ui.horizontal(|ui| {
@@ -436,11 +507,42 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                 ui.radio_value(&mut app.draft.gender, Gender::Unknown, "?");
             });
         } else {
-            avatar_ui_preview(ui, p, &mut app.photo_cache, &app.library, 64.0);
+            // Profilbild garantiert links (horizontales Layout startet links)
+            // und 3px vom Rand weg (rechts/unten) feinjustiert. Klick ersetzt
+            // das Bild direkt — ohne vorherigen Bearbeitungsmodus.
+            let avatar_response = ui.horizontal(|ui| {
+                avatar_ui_preview(
+                    ui,
+                    p,
+                    &mut app.photo_cache,
+                    &app.library,
+                    64.0,
+                    egui::Vec2::new(3.0, 3.0),
+                )
+            }).inner;
+            if avatar_response.clicked() {
+                #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+                {
+                    app.status = "Fotoauswahl ist auf diesem Ziel noch nicht implementiert".into();
+                }
+                #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+                {
+                    // Entwurf laden, Editor öffnen, Auswahl aus vorhandenen
+                    // Projektbildern (oder neuer Datei) anbieten.
+                    app.draft = p.clone();
+                    app.draft.ensure_standard_events();
+                    app.inline_edit = true;
+                    app.photo_chooser_gallery = false;
+                    app.photo_chooser =
+                        Some(crate::media::list_media_images(&app.library));
+                }
+            }
             // Größerer Abstand zwischen Profilbild und Name.
             ui.add_space(8.0);
-            ui.heading(p.display_name());
-            ui.label(picker::gender_label(p.gender));
+            let name = p.display_name();
+            // Profilname bricht um statt zu kürzen (kein Tooltip nötig).
+            picker::left_label_wrapped(ui, &name, 18.0, ui.visuals().text_color());
+            ui.add(egui::Label::new(picker::gender_label(p.gender)).halign(egui::Align::LEFT));
         }
         ui.add_space(12.0);
         if app.inline_edit {
@@ -576,6 +678,7 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                             &display,
                             &mut app.photo_cache,
                             &app.library,
+                            picker::TRAILING_ICON_RESERVE,
                         );
                         if clicked {
                             app.relation_editor = match app.relation_editor.take() {
@@ -605,6 +708,7 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                         &display,
                         &mut app.photo_cache,
                         &app.library,
+                        0.0,
                     ) {
                         let child_id = child.id.clone();
                         app.request_select(&child_id, picker::wants_reference(ui));
@@ -664,6 +768,7 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                         entry,
                         &mut app.photo_cache,
                         &app.library,
+                        0.0,
                     );
                 }
             }
@@ -674,7 +779,15 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
         section_title(ui, "GALERIE", section_accent, app);
         if !app.collapsed_sections.contains("GALERIE") {
             let (drop_response, _) =
-                ui.allocate_painter(Vec2::new(ui.available_width(), 70.0), Sense::hover());
+                ui.allocate_painter(Vec2::new(ui.available_width(), 70.0), Sense::click());
+            // Klick öffnet ebenfalls den Fotowähler (Entwurf ggf. laden).
+            if drop_response.clicked() {
+                // Aus der Ablagefläche: nur in die Galerie, nie Profilbild —
+                // und ohne Bearbeitungsmodus direkt ans Datenobjekt.
+                app.photo_chooser_gallery = true;
+                app.photo_chooser =
+                    Some(crate::media::list_media_images(&app.library));
+            }
             ui.painter().rect_stroke(
                 drop_response.rect,
                 6.0,
@@ -688,8 +801,17 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                 eframe::egui::FontId::proportional(12.0),
                 crate::ui::panels::dim_text(ui),
             );
+            // Explizite Positionsprüfung statt hovered(): Während eines
+            // OS-Datei-Drags meldet hovered() nicht zuverlässig.
+            let drop_rect = drop_response.rect;
             for file in ui.ctx().input(|input| input.raw.dropped_files.clone()) {
-                if drop_response.hovered() {
+                let over_zone = ui.ctx().input(|input| {
+                    input
+                        .pointer
+                        .hover_pos()
+                        .is_some_and(|pos| drop_rect.contains(pos))
+                });
+                if over_zone {
                     if let Some(path) = file.path {
                         app.pending_image = Some(path);
                     }
@@ -824,6 +946,7 @@ fn relation_section(
                     entry,
                     &mut app.photo_cache,
                     &app.library,
+                    picker::TRAILING_ICON_RESERVE,
                 );
                 if clicked && kind != crate::ui::tree::RelationKind::Sibling {
                     // Geschwister haben keine Beziehungsoptionen -> nicht aufklappbar.
@@ -869,6 +992,7 @@ fn relation_section(
                     entry,
                     &mut app.photo_cache,
                     &app.library,
+                    0.0,
                 ) {
                     app.request_select(&entry.id, picker::wants_reference(ui));
                 }

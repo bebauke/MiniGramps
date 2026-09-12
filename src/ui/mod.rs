@@ -45,7 +45,7 @@ use rfd::FileDialog;
 use crate::import::{default_library, load_file, load_project_manifest, save_project_manifest};
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use crate::import::{load_last_project, save_last_project};
-use crate::model::{ChildRelation, Gender, Person, TreeData, person};
+use crate::model::{ChildRelation, Gender, MergeCandidate, Person, TreeData, person};
 use crate::store::{DataStore, FileSystemStore};
 use tree::{RelationKind, TreeAction, TreeOrientation, TreeView};
 
@@ -75,14 +75,25 @@ pub(crate) const ICON_UNDO: &[u8] = include_bytes!("../../assets/icons/rotate-cc
 pub(crate) const ICON_REDO: &[u8] = include_bytes!("../../assets/icons/rotate-cw.svg");
 pub(crate) const ICON_POINTER: &[u8] = include_bytes!("../../assets/icons/mouse-pointer.svg");
 pub(crate) const ICON_ZOOM: &[u8] = include_bytes!("../../assets/icons/zoom-in.svg");
+pub(crate) const ICON_DEBUG: &[u8] = include_bytes!("../../assets/icons/tool.svg");
 pub(crate) const LOGO: &[u8] = include_bytes!("../../assets/icon.svg");
 const MAX_INTERACTIVE_ZOOM: f32 = 8.0;
 
+/// Offene Duplikat-Prüfung nach angehängtem Import: Kandidaten mit Auswahl
+/// (zusammenführen?) plus endgültig abgelehnte Paare (kein Match).
+pub struct MergeReview {
+    pub candidates: Vec<(MergeCandidate, bool)>,
+    pub rejected: Vec<(String, String)>,
+}
+
 /// Angefragter Personenwechsel während offener ungespeicherter Bearbeitung.
+/// Mit `image` wird nach dem Wechsel direkt der Editor mit dem Bild als
+/// neuem Profilbild geöffnet (Bild-Drop auf eine Baumkarte).
 #[derive(Clone, Debug)]
 pub struct PendingSelect {
     pub target: String,
     pub set_reference: bool,
+    pub image: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -108,7 +119,8 @@ impl CardLayout {
     pub(crate) fn height(self) -> f32 {
         match self {
             Self::Compact => 78.0,
-            Self::Portrait => 158.0,
+            // Platz für Geburts- UND Sterbezeile untereinander.
+            Self::Portrait => 178.0,
         }
     }
 }
@@ -144,9 +156,27 @@ pub struct MiniGramps {
     pub drag_mouse_was_down: bool,
     /// Standard-Generationenzahl (Einstellungen; 0 = alle).
     pub max_generations: usize,
+    /// Personenbudget der automatischen Vorfahrenansicht und dessen
+    /// persistierte Start-/Schrittwerte.
+    pub tree_person_limit: usize,
+    pub tree_initial_person_limit: usize,
+    pub tree_load_step: usize,
+    /// Treffer-Schwelle für den Duplikat-Abgleich beim Anhängen (0–100 %).
+    pub match_threshold: f32,
+    /// Offene Duplikat-Prüfung: Kandidaten mit Auswahl plus abgelehnte Paare.
+    pub merge_review: Option<MergeReview>,
+    /// Review-Dialog für Duplikate einblenden.
+    pub show_merge_review: bool,
     /// Kartenabstand im automatischen Layout (Einstellungen; Standard 48 =
     /// doppelter ursprünglicher Abstand, damit der Vorfahrenbaum luftiger ist).
     pub layout_gap: f32,
+    /// Fixe Kartenbreiten je Kartenlayout (Einstellungen; Kompakt 215,
+    /// großes Foto 160). Namen werden bei Bedarf mit „…" gekürzt.
+    pub compact_card_width: f32,
+    pub portrait_card_width: f32,
+    /// Symbole vor Geburts-/Todesdatum auf den Baumkarten (Einstellungen).
+    pub birth_symbol: String,
+    pub death_symbol: String,
     /// Datenordner: Speicherort (`save`) und Medien-Basisordner (`media`).
     pub library: PathBuf,
     pub status: String,
@@ -173,14 +203,24 @@ pub struct MiniGramps {
     pub people_group_generation: u32,
     /// Vorbereitete linke Personenliste; wird nur nach Daten- oder
     /// Sortieränderungen neu gruppiert und sortiert.
-    pub people_groups: Vec<(String, Vec<(String, Gender, String)>)>,
+    pub people_groups: Vec<(String, Vec<(String, Gender, String, Option<i32>)>)>,
     pub people_groups_dirty: bool,
+    /// Auswahl, für die das rechte Profil zuletzt an den Anfang gescrollt
+    /// wurde (Scroll-Offset soll Personenwechsel nicht überleben).
+    pub profile_shown_for: Option<String>,
+    /// Bildschirm-Rechtecke der im letzten Baum-Frame gezeichneten
+    /// Personenkarten (Personen-ID, Rechteck) für Datei-Drops auf Karten.
+    pub tree_card_rects: Vec<(String, egui::Rect)>,
     /// Textur-Cache (`media::photo_texture`), Schlüssel = `Person::id`
     /// bzw. Galerie-Pseudo-IDs `gallery-<id>-<index>`.
     pub photo_cache: HashMap<String, TextureHandle>,
     pub tree_view: TreeView,
     /// Im Öffnen-Dialog ausgewähltes Projekt (wird mit "Laden" geöffnet).
     pub selected_project: Option<PathBuf>,
+    /// Zwischengespeicherte Projektliste samt Anzeigenamen für den
+    /// Öffnen-Dialog (kein Datei-IO pro Frame bei großen Projekten).
+    pub project_list_cache: Vec<PathBuf>,
+    pub project_list_names: Vec<String>,
     pub dark_mode: bool,
     /// Darstellung der Personenkarten im Stammbaum.
     pub card_layout: CardLayout,
@@ -195,8 +235,21 @@ pub struct MiniGramps {
     pub relation_query: String,
     /// Nachname des Beziehungspickers.
     pub relation_family_name: String,
+    /// Explizit gewähltes Geschlecht für neu anzulegende Beziehungspersonen
+    /// (None = automatisch: Partner → Gegengeschlecht, sonst Unbekannt).
+    pub new_person_gender: Option<Gender>,
+    /// Wofür die explizite Wahl gilt (Art + Bezugsperson); bei Wechsel zurücksetzen.
+    pub new_person_gender_for: Option<(RelationKind, String)>,
     /// Per Drag-and-drop eingefügte Datei mit unklarer Verwendung.
     pub pending_image: Option<PathBuf>,
+    /// Gelesene Bild-Metadaten je Projektbild (Infozeile Bildbetrachter).
+    pub photo_meta_cache: HashMap<String, crate::media::PhotoMeta>,
+    /// Offene Foto-Auswahl (None = geschlossen, sonst vorhandene
+    /// Projektbilder zur Wiederverwendung).
+    pub photo_chooser: Option<Vec<String>>,
+    /// True, wenn die Foto-Auswahl aus der Galerie-Ablage geöffnet wurde:
+    /// Gewähltes landet dann in der Galerie, nicht als Profilbild.
+    pub photo_chooser_gallery: bool,
     /// Vollbildansicht eines Galerie-Bildes.
     pub lightbox_image: Option<String>,
     /// Sender für asynchrone Lightbox-Dekodierung (`crate::media::AsyncImage`).
@@ -271,7 +324,17 @@ impl MiniGramps {
             partner_swap_latch: false,
             drag_mouse_was_down: false,
             max_generations: 5,
+            tree_person_limit: 60,
+            tree_initial_person_limit: 60,
+            tree_load_step: 60,
+            match_threshold: 80.0,
+            merge_review: None,
+            show_merge_review: false,
             layout_gap: 48.0,
+            compact_card_width: 215.0,
+            portrait_card_width: 160.0,
+            birth_symbol: "ᛉ".into(),
+            death_symbol: "ᛦ".into(),
             library,
             status: "Beispielbaum geladen".into(),
             zoom: 1.0,
@@ -288,9 +351,13 @@ impl MiniGramps {
             people_group_generation: 0,
             people_groups: Vec::new(),
             people_groups_dirty: true,
+            profile_shown_for: None,
+            tree_card_rects: Vec::new(),
             photo_cache: HashMap::new(),
             tree_view: TreeView::Descendants,
             selected_project: None,
+            project_list_cache: Vec::new(),
+            project_list_names: Vec::new(),
             dark_mode: true,
             card_layout: CardLayout::Compact,
             tree_orientation: TreeOrientation::Vertical,
@@ -299,7 +366,12 @@ impl MiniGramps {
             inline_edit: false,
             relation_query: String::new(),
             relation_family_name: String::new(),
+            new_person_gender: None,
+            new_person_gender_for: None,
             pending_image: None,
+            photo_meta_cache: HashMap::new(),
+            photo_chooser: None,
+            photo_chooser_gallery: false,
             lightbox_image: None,
             lightbox_tx,
             lightbox_rx,
@@ -333,8 +405,16 @@ impl MiniGramps {
         let settings = crate::settings::load();
         app.dark_mode = settings.dark_mode;
         app.max_generations = settings.max_generations;
+        app.tree_initial_person_limit = settings.tree_initial_person_limit.max(1);
+        app.tree_load_step = settings.tree_load_step.max(1);
+        app.match_threshold = settings.match_threshold.clamp(50.0, 100.0);
+        app.tree_person_limit = app.tree_initial_person_limit;
         app.group_by_count = settings.group_by_count;
-        app.layout_gap = settings.layout_gap;
+        app.layout_gap = settings.layout_gap.clamp(5.0, 150.0);
+        app.compact_card_width = settings.compact_card_width.clamp(120.0, 400.0);
+        app.portrait_card_width = settings.portrait_card_width.clamp(120.0, 400.0);
+        app.birth_symbol = settings.birth_symbol.clone();
+        app.death_symbol = settings.death_symbol.clone();
         app.card_layout = settings.card_layout;
         app.tree_orientation = settings.tree_orientation;
         app.settings_applied = settings;
@@ -365,6 +445,24 @@ impl MiniGramps {
         log::info!("{line}");
     }
 
+    /// Debug: alle zwischengespeicherten Vorschaubilder verwerfen (werden
+    /// bei Bedarf neu aus den Originalen erzeugt).
+    pub fn debug_clear_thumbs(&mut self) {
+        let count = crate::media::delete_all_thumbs(&self.library);
+        self.photo_cache.clear();
+        self.status = format!("{count} Vorschaubilder gelöscht — werden neu erzeugt");
+        self.log(format!("Debug: {count} Thumbnails gelöscht"));
+    }
+
+    /// Debug: runde Profilbilder aus den Originalen neu erzeugen (neue
+    /// Zuschnitt-Logik für alle Bilder übernehmen).
+    pub fn debug_rebuild_avatars(&mut self) {
+        let count = crate::media::delete_avatar_thumbs(&self.library);
+        self.photo_cache.clear();
+        self.status = format!("{count} Profilbilder werden neu erzeugt");
+        self.log(format!("Debug: {count} Avatar-Thumbs gelöscht"));
+    }
+
     /// Projekt in den Datenordner schreiben (`<library>/familienbaum…json`).
     /// Zusätzlich wird das Baum-Layout in einer SEPARATEN Datei
     /// (`<projekt>.layout.json`) neben den Daten gespeichert: manuelle
@@ -380,34 +478,51 @@ impl MiniGramps {
 
         #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
         {
-        // Erst verwaiste Mediendateien und Cache-Bilder bereinigen, um Plattenplatz zu sparen!
-        crate::media::cleanup_unused_media(&self.library, &self.data);
-
-        let path = self.library.join("familienbaum.minigramps.json");
-        self.current_data_path = Some(path.clone());
-        let store = FileSystemStore::for_data_file(&path);
         let entries: Vec<(String, f32)> = self
             .manual_offsets
             .iter()
             .map(|(id, offset)| (id.clone(), *offset))
             .collect();
+        let path = match self.current_data_path.clone().filter(|path| {
+            path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        }) {
+            Some(path) => path,
+            None => {
+                match crate::projects::create(
+                    &default_library().join("projects"), &self.data, &self.library,
+                    &entries, self.reference.as_deref(),
+                ) {
+                    Ok(path) => self.load_path(&path),
+                    Err(error) => self.status = format!("Projekt anlegen fehlgeschlagen: {error}"),
+                }
+                return;
+            }
+        };
+        let store = FileSystemStore::for_data_file(&path);
         match store
             .write_data(&self.data)
             .and_then(|_| store.write_layout(&entries, self.reference.as_deref()))
         {
             Ok(_) => {
+                save_last_project(&path);
                 self.status = format!("Gespeichert: {}", path.display());
                 self.log(format!("Gespeichert: {}", path.display()));
             }
             Err(e) => {
                 self.status = format!("Speichern fehlgeschlagen: {e}");
                 self.log(format!("Speichern fehlgeschlagen: {e}"));
+                return;
             }
         }
         match save_project_manifest(&path, &self.data) {
             Ok(manifest) => self.log(format!("Manifest gespeichert: {}", manifest.display())),
             Err(error) => self.log(format!("Manifest speichern fehlgeschlagen: {error}")),
         }
+        // Bereinigung nur innerhalb des eigenen Projektordners.
+        if let Some(root) = path.parent() {
+            crate::media::cleanup_unused_media(root, &self.data);
+        }
+        self.refresh_project_list();
         }
     }
 
@@ -430,18 +545,188 @@ impl MiniGramps {
             .pick_file()
         {
             self.log(format!("Manueller Ladeversuch: {}", path.display()));
-            self.load_path(&path);
+            self.import_project(&path);
         }
         }
+    }
+
+    /// Import erstellt immer eine neue Projektkopie, niemals ein bestehendes Ziel.
+    pub fn import_project(&mut self, source: &Path) {
+        let result = (|| {
+            let mut data = load_file(source)?;
+            data.project.name = crate::import::project_display_name(source);
+            let (offsets, reference) = FileSystemStore::for_data_file(source).read_layout();
+            let offsets: Vec<_> = offsets.into_iter().collect();
+            crate::projects::create(
+                &default_library().join("projects"), &data,
+                source.parent().unwrap_or(Path::new(".")),
+                &offsets, reference.as_deref(),
+            )
+        })();
+        match result {
+            Ok(path) => self.load_path(&path),
+            Err(error) => self.status = format!("Import fehlgeschlagen: {error}"),
+        }
+    }
+
+    pub fn new_project(&mut self) {
+        match crate::projects::create(
+            &default_library().join("projects"), &TreeData::default(),
+            &self.library, &[], None,
+        ) {
+            Ok(path) => self.load_path(&path),
+            Err(error) => self.status = format!("Projekt anlegen fehlgeschlagen: {error}"),
+        }
+    }
+
+    /// Datei ans AKTUELLE Projekt anhängen (statt ersetzen): IDs werden frisch
+    /// vergeben, danach Abgleich (Duplikat-Verdacht ab Schwelle) ins Review.
+    pub fn import_append_dialog(&mut self) {
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        {
+            self.status = "Import ist auf diesem Ziel noch nicht implementiert".into();
+            return;
+        }
+
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        {
+            if let Some(path) = FileDialog::new()
+                .add_filter(
+                    "Familien-Daten",
+                    &["json", "ged", "gedcom", "gramps", "xml"],
+                )
+                .pick_file()
+            {
+                self.import_and_match(&path);
+            }
+        }
+    }
+
+    /// Datei laden, anhängen und Duplikate erkennen (Review-Dialog).
+    pub fn import_and_match(&mut self, source: &Path) {
+        let imported = match load_file(source) {
+            Ok(data) => data,
+            Err(error) => {
+                self.status = format!("Import fehlgeschlagen: {error}");
+                return;
+            }
+        };
+        let name = crate::import::project_display_name(source);
+        self.snapshot(format!("Import anhängen: {name}"));
+        let fresh: HashSet<String> = self.data.append_import(imported).into_iter().collect();
+        let threshold = (self.match_threshold / 100.0).clamp(0.0, 1.0);
+        let candidates = self.data.find_merge_candidates(&fresh, threshold);
+        self.people_groups_dirty = true;
+        self.photo_cache.clear();
+        self.fit_pending = true;
+        if candidates.is_empty() {
+            self.status = format!("Angehängt: {} Personen, keine Duplikate", fresh.len());
+            self.log(format!("Import angehängt: {} ({})", source.display(), fresh.len()));
+        } else {
+            self.merge_review = Some(MergeReview {
+                candidates: candidates.into_iter().map(|c| (c, true)).collect(),
+                rejected: Vec::new(),
+            });
+            self.show_merge_review = true;
+            let count = self.merge_review.as_ref().map(|r| r.candidates.len()).unwrap_or(0);
+            self.status = format!("Angehängt — bitte {count} Treffer prüfen");
+        }
+    }
+
+    /// Ausgewählte Review-Treffer zusammenführen (Daten + Layoutversatz).
+    pub fn apply_merge_review(&mut self) {
+        let selected: Vec<(String, String)> = self
+            .merge_review
+            .as_ref()
+            .map(|review| {
+                review
+                    .candidates
+                    .iter()
+                    .filter(|(_, checked)| *checked)
+                    .map(|(candidate, _)| (candidate.keep_id.clone(), candidate.drop_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if selected.is_empty() {
+            return;
+        }
+        for (keep, drop) in &selected {
+            self.data.merge_persons(keep, drop);
+            if !self.manual_offsets.contains_key(keep) {
+                if let Some(offset) = self.manual_offsets.remove(drop) {
+                    self.manual_offsets.insert(keep.clone(), offset);
+                }
+            } else {
+                self.manual_offsets.remove(drop);
+            }
+            crate::media::clear_person_photo_cache(&mut self.photo_cache, keep);
+        }
+        if let Some(review) = self.merge_review.as_mut() {
+            let done: HashSet<String> = selected.iter().map(|(_, drop)| drop.clone()).collect();
+            review
+                .candidates
+                .retain(|(candidate, _)| !done.contains(&candidate.drop_id));
+        }
+        self.people_groups_dirty = true;
+        // Verweise auf gelöschte Duplikate auf die erste Person umbiegen.
+        if self
+            .reference
+            .as_deref()
+            .is_some_and(|id| self.data.find(id).is_none())
+        {
+            self.reference = self.data.people.first().map(|person| person.id.clone());
+            self.selected = self.reference.clone();
+        }
+        if self
+            .selected
+            .as_deref()
+            .is_some_and(|id| self.data.find(id).is_none())
+        {
+            self.selected = self.data.people.first().map(|person| person.id.clone());
+        }
+        self.reference_history.clear();
+        self.reset_reference_navigation();
+        self.status = format!("{} Treffer zusammengeführt", selected.len());
+        self.log(format!("Merge: {} Treffer", selected.len()));
+    }
+
+    /// Treffer endgültig ablehnen (kein Match — bleibt getrennt, kein
+    /// erneuter Vorschlag in dieser Prüfung).
+    pub fn reject_merge_candidate(&mut self, drop_id: &str) {
+        if let Some(review) = self.merge_review.as_mut() {
+            if let Some(position) = review
+                .candidates
+                .iter()
+                .position(|(candidate, _)| candidate.drop_id == drop_id)
+            {
+                let (candidate, _) = review.candidates.remove(position);
+                review.rejected.push((candidate.keep_id, candidate.drop_id));
+            }
+        }
+    }
+
+    /// Projektliste für den Öffnen-Dialog neu einlesen (einmalig statt pro Frame).
+    pub fn refresh_project_list(&mut self) {
+        let paths = crate::import::discover_projects(&self.library);
+        self.project_list_names = paths
+            .iter()
+            .map(|path| crate::import::project_display_name(path))
+            .collect();
+        self.project_list_cache = paths;
     }
 
     /// Datei laden (`crate::import::load_file`) und Ansichtszustand zurücksetzen.
     /// Das Baum-Layout wird aus der separaten `.layout.json` geladen (falls
     /// vorhanden) und in beiden Ausrichtungen angewendet.
     pub fn load_path(&mut self, path: &Path) {
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("json")) {
+            self.import_project(path);
+            return;
+        }
         self.log(format!("Lade: {}", path.display()));
         match load_file(path) {
             Ok(data) => {
+                self.library = path.parent().unwrap_or(Path::new(".")).to_path_buf();
                 self.selected = data.people.first().map(|p| p.id.clone());
                 self.reference = self.selected.clone();
                 self.expanded.clear();
@@ -491,6 +776,7 @@ impl MiniGramps {
                 // Projekt als "zuletzt geöffnet" merken (Start-Wiederherstellung).
                 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
                 save_last_project(path);
+                self.refresh_project_list();
                 self.show_open = false;
                 self.status = format!("Geöffnet: {}", path.display());
             }
@@ -620,6 +906,7 @@ impl MiniGramps {
             .unwrap_or_default();
         self.reference = Some(id.to_string());
         self.selected = Some(id.to_string());
+        self.tree_person_limit = self.tree_initial_person_limit;
         // Verlauf pflegen: neue Referenz hinten anhängen, Vorwärtszweig
         // abschneiden (Browser-Muster), auf 100 Einträge begrenzen.
         let on_current = self
@@ -680,6 +967,7 @@ impl MiniGramps {
         {
             self.reference = Some(id.clone());
             self.selected = Some(id.clone());
+            self.tree_person_limit = self.tree_initial_person_limit;
             self.pan = Vec2::ZERO;
             self.fit_pending = true;
             let name = self
@@ -696,6 +984,7 @@ impl MiniGramps {
     fn reset_reference_navigation(&mut self) {
         self.reference_history = self.reference.clone().into_iter().collect();
         self.reference_history_index = self.reference_history.len().saturating_sub(1);
+        self.tree_person_limit = self.tree_initial_person_limit;
     }
 
     /// Arbeitskopie hat im Vergleich zur Datenbank ungespeicherte Änderungen?
@@ -849,6 +1138,7 @@ impl MiniGramps {
             self.pending_select = Some(PendingSelect {
                 target: id.into(),
                 set_reference,
+                image: None,
             });
             return;
         }
@@ -863,15 +1153,133 @@ impl MiniGramps {
         }
     }
 
-    /// Vom Wechsel-Dialog bestätigten Zielwechsel ausführen.
-    pub(crate) fn apply_pending_select(&mut self) {
-        if let Some(pending) = self.pending_select.take() {
-            self.apply_select(&pending.target, pending.set_reference);
+    /// Bild nur in die Galerie des Entwurfs legen (Profilbild unverändert).
+    pub fn add_gallery_photo(&mut self, relative: String) {
+        if !self.draft.gallery.iter().any(|entry| entry == &relative) {
+            self.draft.gallery.push(relative);
         }
     }
 
-    /// Zeichenfläche (Strg+Z / Strg+Y) zurück- und vorlaufen lassen.
+    /// Bild direkt in die Galerie der gespeicherten Person legen — ohne
+    /// Bearbeitungsmodus, mit Undo-Snapshot.
+    pub fn add_gallery_photo_to_person(&mut self, id: &str, relative: String) {
+        let Some(name) = self.data.find(id).map(|person| person.display_name()) else {
+            return;
+        };
+        if self
+            .data
+            .find(id)
+            .is_some_and(|person| person.gallery.iter().any(|entry| entry == &relative))
+        {
+            self.status = "Bild ist bereits in der Galerie".into();
+            return;
+        }
+        self.snapshot(format!("Galeriebild hinzufügen: {name}"));
+        if let Some(person) = self.data.people.iter_mut().find(|person| person.id == id) {
+            person.gallery.push(relative);
+        }
+        self.status = "Bild in Galerie gelegt".into();
+    }
+
+    /// Übernommenes Bild als Profilbild in den Entwurf setzen (plus
+    /// Galerie-Eintrag) und Foto-Cache der Person verwerfen.
+    pub fn set_draft_photo(&mut self, relative: String) {
+        self.draft.photo = Some(relative.clone());
+        if !self.draft.gallery.iter().any(|entry| entry == &relative) {
+            self.draft.gallery.push(relative);
+        }
+        let id = self.draft.id.clone();
+        crate::media::clear_person_photo_cache(&mut self.photo_cache, &id);
+    }
+
+    /// Vom Wechsel-Dialog bestätigten Zielwechsel ausführen. War ein
+    /// Bild-Drop der Auslöser, wird danach der Editor mit dem Bild in der
+    /// Galerie geöffnet (Profilbild bleibt unverändert).
+    pub(crate) fn apply_pending_select(&mut self, ctx: &egui::Context) {
+        if let Some(pending) = self.pending_select.take() {
+            self.apply_select(&pending.target, pending.set_reference);
+            if let Some(image) = pending.image {
+                self.open_draft_with_image(ctx, &pending.target, &image);
+            }
+        }
+    }
+
+    /// Editor der Person öffnen und ein Bild in die Galerie legen (das
+    /// Profilbild wird dabei NICHT angetastet). Bei ungespeicherten
+    /// Änderungen an einer anderen Person erscheint zuerst der
+    /// Wechsel-Dialog (Speichern/Verwerfen/Abbrechen).
+    pub fn open_editor_with_image(&mut self, ctx: &egui::Context, id: &str, path: &Path) {
+        if !crate::media::is_image_file(path) {
+            self.status = "Nur Bilddateien (png, jpg, jpeg, webp) können abgelegt werden".into();
+            return;
+        }
+        if self.inline_edit
+            && self.draft_has_changes()
+            && self.selected.as_deref() != Some(id)
+        {
+            self.pending_select = Some(PendingSelect {
+                target: id.into(),
+                set_reference: false,
+                image: Some(path.to_path_buf()),
+            });
+            return;
+        }
+        self.apply_select(id, false);
+        self.open_draft_with_image(ctx, id, path);
+    }
+
+    /// Entwurf der Person laden, Editor öffnen und Bild in die Galerie legen.
+    fn open_draft_with_image(&mut self, ctx: &egui::Context, id: &str, path: &Path) {
+        let Some(person) = self.data.find(id).cloned() else {
+            return;
+        };
+        self.draft = person;
+        self.draft.ensure_standard_events();
+        self.inline_edit = true;
+        if let Some(relative) = crate::media::import_media_file_async(ctx, &self.library, path) {
+            if !self.draft.gallery.iter().any(|entry| entry == &relative) {
+                self.draft.gallery.push(relative);
+            }
+            let id = self.draft.id.clone();
+            crate::media::clear_person_photo_cache(&mut self.photo_cache, &id);
+            self.status = "Bild in Galerie gelegt — Speichern nicht vergessen".into();
+        } else {
+            self.status = "Bild konnte nicht übernommen werden".into();
+        }
+    }
+
+    /// Stift/Diskette als Methode: Strg+E schaltet zwischen Bearbeiten und
+    /// Speichern um (Entwurf laden bzw. übernehmen + Datei schreiben).
+    pub fn toggle_inline_edit(&mut self) {
+        if self.inline_edit {
+            self.commit_draft();
+            self.status = "Profil gespeichert".into();
+            // Auch auf die Festplatte schreiben — sonst sind
+            // Foto/Änderungen nach Neustart weg.
+            self.save();
+            self.inline_edit = false;
+            self.relation_picker = None;
+            self.relation_query.clear();
+        } else if let Some(id) = self.selected.clone() {
+            if let Some(person) = self.data.find(&id).cloned() {
+                self.draft = person;
+                self.draft.ensure_standard_events();
+                self.inline_edit = true;
+            }
+        }
+    }
+
+    /// Zeichenfläche (Strg+Z / Strg+Y) zurück- und vorlaufen lassen,
+    /// Strg+E schaltet Bearbeiten/Speichern um — auch aus Textfeldern heraus.
     pub fn handle_undo_redo_shortcuts(&mut self, ctx: &egui::Context) {
+        // Strg+E zuerst: Speichern muss auch bei aktivem Textfeld gehen.
+        let toggle_edit = ctx.input(|i| {
+            i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::E)
+        });
+        if toggle_edit {
+            self.toggle_inline_edit();
+            return;
+        }
         // Während ein Textfeld fokussiert ist, gehört Strg+Z dem Texteditor.
         if ctx.wants_keyboard_input() {
             return;
@@ -1263,6 +1671,8 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
                 let mut card_drag = self.card_drag.take();
                 let mut swap_latch = self.partner_swap_latch;
                 let mut frame_drag = false;
+                let mut more_people_available = false;
+                let mut loaded_more_people = false;
                 let content_bounds = tree::draw_tree(
                     &painter,
                     response.rect,
@@ -1275,38 +1685,79 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
                     &mut swap_latch,
                     &mut card_drag,
                     &mut frame_drag,
+                    &mut self.tree_card_rects,
                     self.max_generations,
+                    self.tree_person_limit,
+                    &mut more_people_available,
                     self.layout_gap,
+                    self.compact_card_width,
+                    self.portrait_card_width,
                     &mut manual_offsets,
                     &self.library,
                     &mut self.photo_cache,
                     self.tree_view,
                     self.tree_orientation,
                     self.card_layout,
+                    &self.birth_symbol,
+                    &self.death_symbol,
                     self.zoom,
                     self.pan,
                     drag_started,
                     drag_ended,
                     log_layout,
                 );
+                if more_people_available
+                    && self.max_generations == 0
+                    && self.tree_view == TreeView::Ancestors
+                {
+                    let button_size = egui::Vec2::new(190.0, 30.0);
+                    let button_center = egui::pos2(
+                        response.rect.center().x,
+                        response.rect.bottom() - button_size.y / 2.0 - 10.0,
+                    );
+                    let button_rect = egui::Rect::from_center_size(button_center, button_size);
+                    if ui
+                        .put(
+                            button_rect,
+                            egui::Button::new(format!(
+                                "Weitere {} laden",
+                                self.tree_load_step
+                            )),
+                        )
+                        .clicked()
+                    {
+                        self.tree_person_limit = self
+                            .tree_person_limit
+                            .saturating_add(self.tree_load_step.max(1));
+                        self.fit_pending = true;
+                        self.status = format!(
+                            "Vorfahrenlimit auf {} Personen erhöht",
+                            self.tree_person_limit
+                        );
+                        loaded_more_people = true;
+                        ctx.request_repaint();
+                    }
+                }
                 if self.tree_tool == TreeTool::Cursor {
                     if !card_drag_was_active && card_drag.is_some() {
                         if let Some(previous_manual_offsets) = previous_manual_offsets
                             .filter(|previous| previous != &manual_offsets)
                         {
-                            let drag_id = card_drag
+                            let (drag_id, drag_count) = card_drag
                                 .as_ref()
-                                .map(|(id, _)| id.as_str())
+                                .map(|(id, members)| (id.as_str(), members.len()))
                                 .unwrap_or_default();
-                            let name = self
-                                .data
-                                .find(drag_id)
-                                .map(|person| person.display_name())
-                                .unwrap_or_else(|| drag_id.to_string());
-                            self.snapshot_layout_before(
-                                format!("Baumposition verschieben: {name}"),
-                                previous_manual_offsets,
-                            );
+                            let label = if drag_id.starts_with("container:") {
+                                format!("Geschwistergruppe verschieben ({drag_count} Personen)")
+                            } else {
+                                let name = self
+                                    .data
+                                    .find(drag_id)
+                                    .map(|person| person.display_name())
+                                    .unwrap_or_else(|| drag_id.to_string());
+                                format!("Baumposition verschieben: {name}")
+                            };
+                            self.snapshot_layout_before(label, previous_manual_offsets);
                         }
                     }
                     self.manual_offsets = manual_offsets;
@@ -1319,7 +1770,7 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
                 // Zoom-Fit: den gelieferten Inhaltsbereich (Layout-Koordo-
                 // dinaten) passend in die Zeichenfläche skalieren und mittig
                 // setzen — einmalig nach Laden/Referenzwechsel.
-                if self.fit_pending {
+                if self.fit_pending && !loaded_more_people {
                     self.fit_pending = false;
                     let canvas = response.rect.size();
                     let size = content_bounds.size();
@@ -1387,6 +1838,18 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
                         self.pan += response.drag_delta();
                     }
                 }
+                // Offene Dialogfenster fangen Klicks ab: Dahinterliegende
+                // Baumkarten dürfen nicht gleichzeitig reagieren
+                // (Click-through, z. B. Person hinter Fotowähler-Button).
+                let action = if self.photo_chooser.is_some()
+                    || self.pending_image.is_some()
+                    || self.pending_select.is_some()
+                    || self.lightbox_image.is_some()
+                {
+                    None
+                } else {
+                    action
+                };
                 match action {
                     Some(TreeAction::View(id)) => self.request_select(&id, false),
                     Some(TreeAction::Reference(id)) => self.request_select(&id, true),
@@ -1411,7 +1874,32 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
                             "Partner getauscht: {person_id} <-> {partner_id} ({direction})"
                         ));
                     }
+                    Some(TreeAction::PanTo(pos)) => {
+                        self.pan = -pos * self.zoom;
+                    }
                     None => {}
+                }
+                // Bilddatei auf eine Personenkarte gezogen: Editor dieser
+                // Person öffnen und Bild in die Galerie legen.
+                let tree_drop = ui.input(|input| {
+                    let hover = input.pointer.hover_pos()?;
+                    if !response.rect.contains(hover) {
+                        return None;
+                    }
+                    input.raw.dropped_files.iter().find_map(|file| {
+                        let path = file.path.clone()?;
+                        let hit = self
+                            .tree_card_rects
+                            .iter()
+                            .rev()
+                            .find(|(_, rect)| rect.contains(hover))
+                            .map(|(id, _)| id.clone())?;
+                        Some((hit, path))
+                    })
+                });
+                if let Some((id, path)) = tree_drop {
+                    let ctx = ui.ctx().clone();
+                    self.open_editor_with_image(&ctx, &id, &path);
                 }
             });
 
@@ -1422,6 +1910,8 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
         dialogs::show_project(self, ctx);
         dialogs::show_export(self, ctx);
         dialogs::show_image_intent(self, ctx);
+        dialogs::show_photo_chooser(self, ctx);
+        dialogs::show_merge_review(self, ctx);
         dialogs::show_lightbox(self, ctx);
         // Wechsel-Dialog bei ungespeicherten Änderungen (vor dem nächsten Frame).
         dialogs::show_pending_select_confirm(self, ctx);
@@ -1431,15 +1921,52 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
         handle_window_resize(ctx);
 
         // Globale Einstellungen bei Änderung sofort persistieren.
+        let mut window_x = self.settings_applied.window_x;
+        let mut window_y = self.settings_applied.window_y;
+        let mut window_width = self.settings_applied.window_width;
+        let mut window_height = self.settings_applied.window_height;
+        let mut window_maximized = self.settings_applied.window_maximized;
+
+        let info = ctx.input(|i| i.viewport().clone());
+        if let Some(inner) = info.inner_rect {
+            let is_maximized = info.maximized.unwrap_or(false);
+            window_maximized = Some(is_maximized);
+            if !is_maximized && !info.minimized.unwrap_or(false) {
+                window_x = Some(inner.min.x);
+                window_y = Some(inner.min.y);
+                window_width = Some(inner.width());
+                window_height = Some(inner.height());
+            }
+        }
+
         let current = crate::settings::AppSettings {
             dark_mode: self.dark_mode,
             max_generations: self.max_generations,
+            tree_initial_person_limit: self.tree_initial_person_limit,
+            tree_load_step: self.tree_load_step,
+            match_threshold: self.match_threshold,
             group_by_count: self.group_by_count,
             layout_gap: self.layout_gap,
             card_layout: self.card_layout,
+            compact_card_width: self.compact_card_width,
+            portrait_card_width: self.portrait_card_width,
+            birth_symbol: self.birth_symbol.clone(),
+            death_symbol: self.death_symbol.clone(),
             tree_orientation: self.tree_orientation,
+            window_x,
+            window_y,
+            window_width,
+            window_height,
+            window_maximized,
         };
         if current != self.settings_applied {
+            if current.tree_initial_person_limit
+                != self.settings_applied.tree_initial_person_limit
+                || (current.max_generations == 0 && self.settings_applied.max_generations != 0)
+            {
+                self.tree_person_limit = current.tree_initial_person_limit.max(1);
+                self.fit_pending = true;
+            }
             crate::settings::save(&current);
             self.settings_applied = current;
         }
@@ -1628,6 +2155,30 @@ fn handle_window_resize(ctx: &egui::Context) {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+fn is_position_on_any_monitor(x: f32, y: f32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::c_void;
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MonitorFromPoint(pt: POINT, dwFlags: u32) -> *mut c_void;
+        }
+        #[repr(C)]
+        struct POINT {
+            x: i32,
+            y: i32,
+        }
+        let pt = POINT { x: x as i32, y: y as i32 };
+        let monitor = unsafe { MonitorFromPoint(pt, 0) }; // MONITOR_DEFAULTTONULL = 0
+        !monitor.is_null()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
 /// Einstiegspunkt: Fenster, App-Icon (Logo gerendert via resvg), Schriften.
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 pub fn run() -> eframe::Result<()> {
@@ -1637,10 +2188,29 @@ pub fn run() -> eframe::Result<()> {
         env_logger::Env::default().default_filter_or("minigramps=info,warn"),
     )
     .init();
+    
+    let settings = crate::settings::load();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1280., 760.])
         .with_min_inner_size([900., 560.])
         .with_decorations(false);
+
+    let mut use_default_size = true;
+    if let (Some(x), Some(y)) = (settings.window_x, settings.window_y) {
+        if is_position_on_any_monitor(x, y) {
+            viewport = viewport.with_position([x, y]);
+            if let (Some(w), Some(h)) = (settings.window_width, settings.window_height) {
+                viewport = viewport.with_inner_size([w as f32, h as f32]);
+                use_default_size = false;
+            }
+        }
+    }
+    if use_default_size {
+        viewport = viewport.with_inner_size([1280., 760.]);
+    }
+    if settings.window_maximized.unwrap_or(false) {
+        viewport = viewport.with_maximized(true);
+    }
+
     if let Some(icon) = load_app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -1699,6 +2269,8 @@ fn load_app_icon() -> Option<egui::IconData> {
 
 /// Schriftarten: Libre Baskerville eingebettet (`assets/fonts`, OFL-Lizenz,
 /// frei mitauslieferbar), SVG-Image-Loader für die Icons installieren.
+/// Baskerville kennt keine Runen (Elhaz-Symbole) — unter Windows hängt daher
+/// die System-Symbol-Schrift als Fallback dahinter (nur für fehlende Glyphen).
 fn configure_fonts(ctx: &egui::Context) {
     egui_extras::install_image_loaders(ctx);
     let mut fonts = egui::FontDefinitions::default();
@@ -1713,6 +2285,20 @@ fn configure_fonts(ctx: &egui::Context) {
         .entry(egui::FontFamily::Proportional)
         .or_default()
         .insert(0, "libre-baskerville".into());
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), target_os = "windows"))]
+    {
+        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf") {
+            fonts.font_data.insert(
+                "system-symbols".into(),
+                Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .push("system-symbols".into());
+        }
+    }
     ctx.set_fonts(fonts);
 }
 

@@ -10,7 +10,7 @@
 //! - `ui::tree` traversiert dieselben Abfragen für die Generations-Berechnung
 //!   und liest `Person`-Felder für die Karten (Name, Geburtsjahr, Foto).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -190,6 +190,15 @@ pub struct Person {
     // Galerie-Pfade, gleiche Regel wie `photo`.
     #[serde(default)]
     pub gallery: Vec<String>,
+    /// Dokument-Dateien (Urkunden, Scans, PDFs …), gleiche Regel wie `photo`.
+    /// Gramps-Gegenstück: Media-Objekte einer Person (ohne Galerie-Bilder).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<DocumentEntry>,
+    /// Quellen-Einträge (Titel + Fundstelle/Seite). Gramps-Gegenstück:
+    /// Citation (Source-Titel + Page) pro Person; das alte Freitextfeld
+    /// `source` bleibt für bestehende Projekte erhalten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceEntry>,
     /// Gewählter Bildausschnitt für das Profilfoto (kein Verzerren —
     /// Cover-Beschnitt mit Zoom/Verschiebung, siehe `media::cover_uv`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,6 +225,25 @@ pub struct Person {
     /// Ereignisse (Geburt, Tod, Heirat, Beruf …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<Event>,
+}
+
+/// Dokument-Eintrag einer Person (Dateipfad im Medienordner plus
+/// Anzeigename, da gespeicherte Dateien Hash-Namen tragen).
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct DocumentEntry {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+/// Quelleneintrag einer Person (Gramps: Citation aus Source-Titel + Page).
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceEntry {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// Fundstelle/Seite (Gramps-`page` der Citation).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -260,6 +288,7 @@ impl Person {
 
     /// Kurzname für Baumkarten: höchstens die ersten beiden Vornamen plus
     /// Nachname, damit lange Namensfolgen die Karten nicht aufblähen.
+    #[allow(dead_code)]
     pub fn display_name_short(&self) -> String {
         let combined = format!("{} {}", self.given_short(), self.family_name);
         let combined = combined.trim();
@@ -278,6 +307,25 @@ impl Person {
             "Unbekannt".to_string()
         } else {
             normalized
+        }
+    }
+
+    /// Sterbedatum für die Baumkarten: normiert, leer wenn unbekannt (die
+    /// Zeile entfällt dann).
+    pub fn death_short(&self) -> String {
+        normalize_date(&self.death)
+    }
+
+    /// Lebensdaten für die Baumkarten: Geburts- und Sterbedatum normiert
+    /// („DD Mnt YYYY – DD Mnt YYYY"); ohne Sterbedatum nur die Geburt.
+    #[allow(dead_code)]
+    pub fn lifespan_short(&self) -> String {
+        let birth = self.birth_short();
+        let death = normalize_date(&self.death);
+        if death.is_empty() {
+            birth
+        } else {
+            format!("{birth} – {death}")
         }
     }
 
@@ -930,6 +978,267 @@ impl TreeData {
         self.cleanup_empty_families();
     }
 
+    /// Importierte Daten anhängen: Alle Personen-/Familien-IDs werden frisch
+    /// vergeben (`m…`/`mf…`), damit nichts Bestehendes kollidiert. Gibt die
+    /// neuen Personen-IDs zurück (Abgleich gegen den Bestand).
+    pub fn append_import(&mut self, mut imported: TreeData) -> Vec<String> {
+        let mut taken: HashSet<String> = self
+            .people
+            .iter()
+            .map(|person| person.id.clone())
+            .chain(self.families.iter().map(|family| family.id.clone()))
+            .collect();
+        let fresh = |prefix: &str, taken: &mut HashSet<String>| -> String {
+            let mut counter = 1usize;
+            loop {
+                let id = format!("{prefix}{counter}");
+                if taken.insert(id.clone()) {
+                    return id;
+                }
+                counter += 1;
+            }
+        };
+        let mut person_map: HashMap<String, String> = HashMap::new();
+        for person in &imported.people {
+            let new_id = fresh("m", &mut taken);
+            person_map.insert(person.id.clone(), new_id);
+        }
+        let mut family_map: HashMap<String, String> = HashMap::new();
+        for family in &imported.families {
+            let new_id = fresh("mf", &mut taken);
+            family_map.insert(family.id.clone(), new_id);
+        }
+        let remap_person = |id: &mut String, map: &HashMap<String, String>| {
+            if let Some(new_id) = map.get(id) {
+                *id = new_id.clone();
+            }
+        };
+        for person in &mut imported.people {
+            remap_person(&mut person.id, &person_map);
+        }
+        for family in &mut imported.families {
+            remap_person(&mut family.id, &family_map);
+            for parent in [&mut family.parent_a, &mut family.parent_b]
+                .into_iter()
+                .flatten()
+            {
+                remap_person(parent, &person_map);
+            }
+            for child in &mut family.children {
+                remap_person(child, &person_map);
+            }
+        }
+        let mut order_map: HashMap<String, Vec<String>> = HashMap::new();
+        for (owner, order) in &imported.partner_order {
+            if let Some(new_owner) = person_map.get(owner) {
+                order_map.insert(
+                    new_owner.clone(),
+                    order
+                        .iter()
+                        .map(|id| person_map.get(id).cloned().unwrap_or_else(|| id.clone()))
+                        .collect(),
+                );
+            }
+        }
+        imported.partner_order = order_map;
+        let mut child_map = HashMap::new();
+        for (key, relation) in &imported.child_relations {
+            let mut parts = key.splitn(2, '/');
+            let family = parts.next().unwrap_or("");
+            let child = parts.next().unwrap_or("");
+            let new_key = format!(
+                "{}/{}",
+                family_map.get(family).cloned().unwrap_or_else(|| family.into()),
+                person_map.get(child).cloned().unwrap_or_else(|| child.into())
+            );
+            child_map.insert(new_key, *relation);
+        }
+        imported.child_relations = child_map;
+        let mut partner_map = HashMap::new();
+        for (family, relation) in &imported.partner_relations {
+            partner_map.insert(
+                family_map.get(family).cloned().unwrap_or_else(|| family.clone()),
+                *relation,
+            );
+        }
+        imported.partner_relations = partner_map;
+        let new_ids: Vec<String> = imported
+            .people
+            .iter()
+            .map(|person| person.id.clone())
+            .collect();
+        self.people.extend(imported.people);
+        self.families.extend(imported.families);
+        self.child_relations.extend(imported.child_relations);
+        self.partner_relations.extend(imported.partner_relations);
+        self.partner_order.extend(imported.partner_order);
+        new_ids
+    }
+
+    /// Duplikat in ein bestehendes Profil einführen: leere Skalarfelder
+    /// auffüllen, Ereignisse/Galerie/Dokumente/Quellen vereinen, Familien
+    /// umhängen, Duplikat löschen.
+    pub fn merge_persons(&mut self, keep_id: &str, drop_id: &str) {
+        if keep_id == drop_id {
+            return;
+        }
+        let Some(drop) = self.find(drop_id).cloned() else {
+            return;
+        };
+        let Some(keep) = self
+            .people
+            .iter_mut()
+            .find(|person| person.id == keep_id)
+        else {
+            return;
+        };
+        for (target, source) in [
+            (&mut keep.given_name, &drop.given_name),
+            (&mut keep.family_name, &drop.family_name),
+            (&mut keep.birth, &drop.birth),
+            (&mut keep.birth_place, &drop.birth_place),
+            (&mut keep.death, &drop.death),
+            (&mut keep.death_place, &drop.death_place),
+            (&mut keep.notes, &drop.notes),
+            (&mut keep.source, &drop.source),
+            (&mut keep.title, &drop.title),
+            (&mut keep.nick_name, &drop.nick_name),
+            (&mut keep.call_name, &drop.call_name),
+            (&mut keep.name_prefix, &drop.name_prefix),
+            (&mut keep.surname_prefix, &drop.surname_prefix),
+            (&mut keep.suffix, &drop.suffix),
+            (&mut keep.name_type, &drop.name_type),
+            (&mut keep.name_origin, &drop.name_origin),
+        ] {
+            if target.is_empty() && !source.is_empty() {
+                *target = source.clone();
+            }
+        }
+        if keep.gender == Gender::Unknown {
+            keep.gender = drop.gender;
+        }
+        if keep.photo.is_none() {
+            keep.photo = drop.photo.clone();
+            keep.photo_crop = drop.photo_crop;
+        }
+        for event in drop.events {
+            if !keep.events.contains(&event) {
+                keep.events.push(event);
+            }
+        }
+        for path in drop.gallery {
+            if !keep.gallery.iter().any(|entry| entry == &path) {
+                keep.gallery.push(path);
+            }
+        }
+        for document in drop.documents {
+            if !keep.documents.iter().any(|entry| entry.path == document.path) {
+                keep.documents.push(document);
+            }
+        }
+        for source in drop.sources {
+            if !keep.sources.contains(&source) {
+                keep.sources.push(source);
+            }
+        }
+        for family in &mut self.families {
+            for parent in [&mut family.parent_a, &mut family.parent_b]
+                .into_iter()
+                .flatten()
+            {
+                if parent == drop_id {
+                    *parent = keep_id.to_string();
+                }
+            }
+            if family.parent_a == family.parent_b {
+                family.parent_b = None;
+            }
+            for child in &mut family.children {
+                if child == drop_id {
+                    *child = keep_id.to_string();
+                }
+            }
+            family.children.sort();
+            family.children.dedup();
+        }
+        for order in self.partner_order.values_mut() {
+            for id in order.iter_mut() {
+                if id == drop_id {
+                    *id = keep_id.to_string();
+                }
+            }
+            order.sort();
+            order.dedup();
+        }
+        if let Some(order) = self.partner_order.remove(drop_id) {
+            self.partner_order
+                .entry(keep_id.to_string())
+                .or_default()
+                .extend(order);
+        }
+        let mut child_map = HashMap::new();
+        for (key, relation) in std::mem::take(&mut self.child_relations) {
+            let mut parts = key.splitn(2, '/');
+            let family = parts.next().unwrap_or("");
+            let child = parts.next().unwrap_or("");
+            let child = if child == drop_id { keep_id } else { child };
+            child_map.insert(format!("{family}/{child}"), relation);
+        }
+        self.child_relations = child_map;
+        self.people.retain(|person| person.id != drop_id);
+        self.cleanup_empty_families();
+    }
+
+    /// Duplikat-Kandidat aus dem Abgleich (Bestand ↔ frisch Angehängtes).
+    /// Sortierung absteigend nach Gesamtähnlichkeit (Name + Verwandtschaft).
+    pub fn find_merge_candidates(
+        &self,
+        fresh_ids: &HashSet<String>,
+        threshold: f32,
+    ) -> Vec<MergeCandidate> {
+        let fresh: Vec<&Person> = self
+            .people
+            .iter()
+            .filter(|person| fresh_ids.contains(&person.id))
+            .collect();
+        let mut candidates = Vec::new();
+        for incoming in fresh {
+            for existing in &self.people {
+                if fresh_ids.contains(&existing.id) || existing.id == incoming.id {
+                    continue;
+                }
+                let name_score = name_similarity(&existing.given_name, &incoming.given_name);
+                if name_score < threshold {
+                    continue;
+                }
+                if !birth_compatible(&existing.birth, &incoming.birth) {
+                    continue;
+                }
+                let exact_given = normalize_token(&existing.given_name)
+                    == normalize_token(&incoming.given_name);
+                let kin_score = kin_similarity(self, existing, incoming, threshold);
+                if !exact_given && kin_score < threshold {
+                    continue;
+                }
+                candidates.push(MergeCandidate {
+                    keep_id: existing.id.clone(),
+                    drop_id: incoming.id.clone(),
+                    name_score,
+                    birth_match: !existing.birth.trim().is_empty()
+                        && !incoming.birth.trim().is_empty(),
+                    kin_score,
+                });
+            }
+        }
+        candidates.sort_by(|a, b| {
+            (b.name_score + b.kin_score)
+                .total_cmp(&(a.name_score + a.kin_score))
+                .then_with(|| a.keep_id.cmp(&b.keep_id))
+                .then_with(|| a.drop_id.cmp(&b.drop_id))
+        });
+        candidates
+    }
+
     /// Familien ohne Eltern UND ohne Kinder auflösen; verwaiste
     /// Beziehungsart-Einträge aufräumen.
     fn cleanup_empty_families(&mut self) {
@@ -945,6 +1254,98 @@ impl TreeData {
         self.partner_relations
             .retain(|key, _| ids.contains(key.as_str()));
     }
+}
+
+/// Kandidat für selektives Zusammenführen (Review-Dialog): bestehende
+/// Person behalten, angehängtes Duplikat einführen und löschen.
+#[derive(Clone, Debug)]
+pub struct MergeCandidate {
+    pub keep_id: String,
+    pub drop_id: String,
+    /// Vornamens-Deckung 0–1 (Dice über Tokens).
+    pub name_score: f32,
+    /// Beide Geburtsdaten vorhanden und gleich.
+    pub birth_match: bool,
+    /// Verwandtschafts-Deckung 0–1 (Anteil ähnlicher Verwandter).
+    pub kin_score: f32,
+}
+
+/// Vornamen normieren (klein, Umlaute gefaltet) für den Abgleich.
+fn normalize_token(text: &str) -> String {
+    text.to_lowercase()
+        .replace(['ä'], "a")
+        .replace(['ö'], "o")
+        .replace(['ü'], "u")
+        .replace("ß", "ss")
+}
+
+/// Token-Deckung 0–1 (Dice-Koeffizient) zweier Vornamensangaben.
+fn name_similarity(first: &str, second: &str) -> f32 {
+    let tokens = |text: &str| {
+        normalize_token(text)
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect::<HashSet<String>>()
+    };
+    let left = tokens(first);
+    let right = tokens(second);
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let common = left.intersection(&right).count() as f32;
+    2.0 * common / (left.len() + right.len()) as f32
+}
+
+/// Geburtsdaten verträglich: Nur wenn BEIDE eins haben, müssen sie gleich
+/// sein (vergleichbar geparst).
+fn birth_compatible(first: &str, second: &str) -> bool {
+    if first.trim().is_empty() || second.trim().is_empty() {
+        return true;
+    }
+    match (parse_birth_date(first), parse_birth_date(second)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// Verwandtschafts-Deckung 0–1: Anteil der Verwandten (Eltern, Kinder,
+/// Partner) von `first`, zu denen `second` einen ähnlichen Verwandten hat
+/// (Vornamens-Deckung ≥ Schwelle, Geburtsdaten verträglich). Ohne Verwandte
+/// auf beiden Seiten 0,0 (dann muss der Vorname exakt gleichen).
+fn kin_similarity(data: &TreeData, first: &Person, second: &Person, threshold: f32) -> f32 {
+    let relatives = |person: &Person| {
+        let mut ids: Vec<&str> = data
+            .parents_of(&person.id)
+            .into_iter()
+            .chain(data.children_of(&person.id))
+            .chain(data.partners_of(&person.id))
+            .map(|relative| relative.id.as_str())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let left = relatives(first);
+    let right = relatives(second);
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let similar = left
+        .iter()
+        .filter(|id| {
+            let Some(relative) = data.find(id) else {
+                return false;
+            };
+            right.iter().any(|other| {
+                data.find(other).is_some_and(|candidate| {
+                    name_similarity(&relative.given_name, &candidate.given_name) >= threshold
+                        && birth_compatible(&relative.birth, &candidate.birth)
+                })
+            })
+        })
+        .count() as f32;
+    2.0 * similar / (left.len() + right.len()) as f32
 }
 
 pub fn person(
@@ -968,6 +1369,8 @@ pub fn person(
         notes: String::new(),
         source: String::new(),
         gallery: Vec::new(),
+        documents: Vec::new(),
+        sources: Vec::new(),
         photo_crop: None,
         title: String::new(),
         nick_name: String::new(),
@@ -1187,6 +1590,17 @@ mod tests {
     }
 
     #[test]
+    fn lifespan_combines_full_birth_and_death_dates() {
+        let mut p = person("x", "Max", "Muster", "16 Jun 1998", Gender::Male);
+        assert_eq!(p.lifespan_short(), "16 Jun 1998");
+        p.death = "2 Sep 2022".into();
+        assert_eq!(p.lifespan_short(), "16 Jun 1998 – 02 Sep 2022");
+        assert_eq!(p.death_short(), "02 Sep 2022");
+        let q = person("y", "Anna", "Muster", "", Gender::Female);
+        assert_eq!(q.lifespan_short(), "Unbekannt");
+    }
+
+    #[test]
     fn standard_events_are_ensured_and_synced() {
         let mut p = person("x", "Max", "Muster", "1876", Gender::Male);
         p.death = "1940".into();
@@ -1244,6 +1658,129 @@ mod tests {
         assert_eq!(data.parents_of("c").len(), 2);
         assert_eq!(data.relation_of_child("a", "c"), ChildRelation::Adopted);
         assert_eq!(data.relation_of_child("b", "c"), ChildRelation::Adopted);
+    }
+
+    #[test]
+    fn merge_match_scores_partial_names() {
+        assert!((name_similarity("Johann Christoph", "Johann Christoph Friedrich") - 0.8).abs() < 1e-6);
+        assert_eq!(name_similarity("Hans", "Peter"), 0.0);
+        assert_eq!(name_similarity("", "Peter"), 0.0);
+        assert!(birth_compatible("1900", ""));
+        assert!(birth_compatible("10.04.1957", "10.04.1957"));
+        assert!(!birth_compatible("1900", "1901"));
+    }
+
+    fn merge_tree() -> TreeData {
+        let mut data = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("p1", "Johann", "Bauke", "1900", Gender::Male),
+                person("c1", "Johann Christoph", "Bauke", "1925", Gender::Male),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        data.link_child("p1", "c1");
+        data
+    }
+
+    #[test]
+    fn finds_merge_candidate_by_name_birth_and_kin() {
+        let mut data = merge_tree();
+        let mut imported = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("x1", "Johann", "Bauke", "", Gender::Male),
+                person("x2", "Johann Christoph Friedrich", "Bauke", "1925", Gender::Male),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        imported.link_child("x1", "x2");
+        let fresh = data.append_import(imported);
+        assert_eq!(fresh.len(), 2);
+        let fresh_set: HashSet<String> = fresh.into_iter().collect();
+        let candidates = data.find_merge_candidates(&fresh_set, 0.8);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|c| c.kin_score >= 0.8));
+        assert!(candidates.iter().any(|c| c.birth_match));
+    }
+
+    #[test]
+    fn rejects_mismatched_birth_and_keeps_unrelated() {
+        let mut data = merge_tree();
+        let mut imported = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("x1", "Johann", "Bauke", "1901", Gender::Male),
+                person("x9", "Peter", "Fremd", "1900", Gender::Male),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        imported.link_child("x1", "x9");
+        let fresh = data.append_import(imported);
+        let fresh_set: HashSet<String> = fresh.into_iter().collect();
+        // x1 scheitert am Geburtsdatum, x9 am Vornamen.
+        assert!(data.find_merge_candidates(&fresh_set, 0.8).is_empty());
+    }
+
+    #[test]
+    fn append_import_remaps_colliding_ids() {
+        let mut data = merge_tree();
+        let mut imported = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("p1", "Anna", "Bauke", "", Gender::Female),
+                person("c9", "Kind", "Bauke", "", Gender::Unknown),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        imported.link_child("p1", "c9");
+        let fresh = data.append_import(imported);
+        assert_eq!(fresh.len(), 2);
+        assert!(!fresh.contains(&"p1".to_string()));
+        let ids: HashSet<&str> = data.people.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids.len(), data.people.len());
+        // Familienverweise folgen der Umbenennung (Eltern + Kind frisch).
+        let (parent, child) = (&fresh[0], &fresh[1]);
+        assert!(data.families.iter().any(|f| f.children.contains(child)
+            && (f.parent_a.as_deref() == Some(parent.as_str())
+                || f.parent_b.as_deref() == Some(parent.as_str()))));
+    }
+
+    #[test]
+    fn merge_persons_rewires_families_and_fills_gaps() {
+        let mut data = merge_tree();
+        let mut extra = person("m9", "Johann", "", "", Gender::Unknown);
+        extra.death = "1970".into();
+        extra.notes = "Notiz".into();
+        data.people.push(extra);
+        data.people.push(person("k9", "Kind", "Neu", "", Gender::Unknown));
+        data.link_child("m9", "k9");
+        data.merge_persons("p1", "m9");
+        assert!(data.find("m9").is_none());
+        let kept = data.find("p1").unwrap();
+        assert_eq!(kept.death, "1970");
+        assert_eq!(kept.notes, "Notiz");
+        assert_eq!(kept.family_name, "Bauke");
+        // Kind hängt jetzt an der behaltenen Person, keine Selbst-Paare.
+        let parents: Vec<&str> = data
+            .parents_of("k9")
+            .iter()
+            .map(|parent| parent.id.as_str())
+            .collect();
+        assert_eq!(parents, vec!["p1"]);
+        assert!(data.families.iter().all(|f| f.parent_a != f.parent_b));
     }
 
     #[test]

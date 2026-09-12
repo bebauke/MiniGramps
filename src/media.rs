@@ -64,9 +64,254 @@ pub fn cover_uv_to(aspect: f32, target_aspect: f32, crop: Option<&PhotoCrop>) ->
     )
 }
 
+/// Profil-/Galeriebild um 90° im Uhrzeigersinn drehen. Die Datei wird dabei
+/// überschrieben (kein Undo auf Dateiebene); Aufrufer müssen danach die
+/// Foto-Caches leeren und den Ausschnitt zurücksetzen.
+pub fn rotate_image_file_90(media_base: &Path, relative: &str) -> bool {
+    let path = media_path(media_base, relative);
+    let Ok(image) = image::open(&path) else {
+        return false;
+    };
+    image.rotate90().save(&path).is_ok()
+}
+
+/// Alle zwischengespeicherten Vorschaubilder löschen (Anzahl zurück).
+/// Avatare und Galerie werden danach bei Bedarf neu aus den Originalen
+/// erzeugt (z. B. nach einem Logikwechsel wie Original statt Thumbnail).
+pub fn delete_all_thumbs(media_base: &Path) -> usize {
+    let dir = media_base.join("media").join(".thumbs");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().is_file() && fs::remove_file(entry.path()).is_ok()
+        })
+        .count()
+}
+
+/// Nur runde Profilbild-Thumbs löschen, damit sie neu aus den Originalen
+/// erzeugt werden (Galerie- und Vollbild-Thumbs bleiben erhalten).
+pub fn delete_avatar_thumbs(media_base: &Path) -> usize {
+    let dir = media_base.join("media").join(".thumbs");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_name().to_str().is_some_and(|name| {
+                name.starts_with("avatar2-") || name.starts_with("avatar-")
+            }) && entry.path().is_file()
+                && fs::remove_file(entry.path()).is_ok()
+        })
+        .count()
+}
+
+/// Alle zwischengespeicherten Vorschaubilder einer Person löschen (z. B.
+/// nach dem Drehen des Originals, dessen Pfad — und damit Thumb-Schlüssel —
+/// gleich bleibt).
+pub fn delete_person_thumbs(media_base: &Path, person: &Person) {
+    for (size, round, prefix) in [
+        (150u32, false, "gallery"),
+        (CARD_THUMB_SHORT_SIDE, false, "card-480"),
+        (100u32, true, "avatar"),
+        (100u32, true, "avatar2"),
+    ] {
+        let key = thumb_key(person, size, round);
+        let _ = fs::remove_file(thumb_path(media_base, &format!("{prefix}-{key}.png")));
+    }
+    let _ = fs::remove_file(thumb_path(media_base, &large_thumb_filename(person)));
+}
+
+/// Dateipfade aus der Zwischenablage lesen (Explorer: Strg+C auf Dateien).
+/// Nur Windows; anderswo immer leer.
+pub fn read_clipboard_files() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        clipboard_win::get_clipboard::<Vec<PathBuf>, _>(clipboard_win::formats::FileList)
+            .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Erste Bilddatei aus der Datei-Zwischenablage (kein Bitmap nötig).
+pub fn read_clipboard_image_file() -> Option<PathBuf> {
+    read_clipboard_files().into_iter().find(|path| is_image_file(path))
+}
+
+/// Metadaten eines Projektbilds für die Infozeile des Bildbetrachters.
+#[derive(Clone, Debug, Default)]
+pub struct PhotoMeta {
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
+    /// Aufnahmezeitpunkt aus EXIF (DateTimeOriginal), falls vorhanden.
+    pub date: Option<String>,
+    /// Kamera aus EXIF (Hersteller + Modell), falls vorhanden.
+    pub camera: Option<String>,
+}
+
+impl PhotoMeta {
+    /// Einzeilige Anzeige: „4000 × 3000 · 2,4 MB · 12.03.2024 14:22 · Canon EOS R6".
+    pub fn display_line(&self) -> String {
+        let mut parts = vec![format!("{} × {}", self.width, self.height)];
+        parts.push(format_bytes(self.bytes));
+        if let Some(date) = &self.date {
+            parts.push(date.clone());
+        }
+        if let Some(camera) = &self.camera {
+            if !camera.is_empty() {
+                parts.push(camera.clone());
+            }
+        }
+        parts.join(" · ")
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < 3 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} {}", value, UNITS[unit]).replace('.', ",")
+    }
+}
+
+/// Auflösung, Dateigröße und EXIF-Daten (Datum, Kamera) aus der Originaldatei
+/// lesen (nur Datei-Header, kein vollständiges Dekodieren).
+pub fn read_photo_meta(media_base: &Path, relative: &str) -> Option<PhotoMeta> {
+    let raw = Path::new(relative);
+    let full = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        media_base.join(raw)
+    };
+    let metadata = fs::metadata(&full).ok()?;
+    let reader = image::ImageReader::open(&full).ok()?;
+    let (width, height) = reader.into_dimensions().ok()?;
+    let file = fs::File::open(&full).ok()?;
+    let mut buffered = std::io::BufReader::new(file);
+    let exif = exif::Reader::new().read_from_container(&mut buffered).ok();
+    let field = |tag| {
+        exif.as_ref()?
+            .get_field(tag, exif::In::PRIMARY)
+            .map(|field| field.display_value().to_string())
+    };
+    let date = field(exif::Tag::DateTimeOriginal).map(|raw| {
+        // „2024-03-12 14:22:01" → „12.03.2024 14:22".
+        let mut parts = raw.splitn(2, ' ');
+        let date_part = parts.next().unwrap_or("").replace('-', ".");
+        let time_part = parts.next().unwrap_or_default();
+        let mut date_bits = date_part.split('.').collect::<Vec<_>>();
+        let reordered = if date_bits.len() == 3 {
+            date_bits.reverse();
+            date_bits.join(".")
+        } else {
+            date_part
+        };
+        let time_short = time_part
+            .split(':')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(":");
+        if time_short.is_empty() {
+            reordered
+        } else {
+            format!("{reordered} {time_short}")
+        }
+    });
+    let make = field(exif::Tag::Make).unwrap_or_default();
+    let model = field(exif::Tag::Model).unwrap_or_default();
+    let camera = format!("{make} {model}").trim().to_string();
+    Some(PhotoMeta {
+        width,
+        height,
+        bytes: metadata.len(),
+        date,
+        camera: (!camera.is_empty()).then_some(camera),
+    })
+}
+
+/// Bilddatei anhand der Endung erkennen (png, jpg, jpeg, webp).
+pub fn is_image_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp"))
+}
+
+/// Bereits hinterlegte Projektbilder auflisten (relativ, neueste zuerst),
+/// damit sie wiederverwendet statt erneut importiert werden können.
+pub fn list_media_images(media_base: &Path) -> Vec<String> {
+    let dir = media_base.join("media");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut images: Vec<(std::time::SystemTime, String)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            if name.starts_with('.') || !is_image_file(Path::new(&name)) {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .ok()?
+                .modified()
+                .unwrap_or(std::time::UNIX_EPOCH);
+            Some((modified, format!("media/{name}")))
+        })
+        .collect();
+    images.sort_by(|a, b| b.cmp(a));
+    images.into_iter().map(|(_, relative)| relative).collect()
+}
+
+/// Bild aus der Zwischenablage als PNG lesen (nur Desktop).
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+pub fn read_clipboard_png() -> Option<Vec<u8>> {
+    let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let mut buffer = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut buffer);
+    use image::ImageEncoder;
+    encoder
+        .write_image(
+            &image.bytes,
+            image.width as u32,
+            image.height as u32,
+            image::ExtendedColorType::Rgba8,
+        )
+        .ok()?;
+    Some(buffer)
+}
+
+/// PNG-Bytes anhand ihres Inhalts-Hashs im Medienordner ablegen (keine
+/// Duplikate) und relativen Pfad liefern.
+pub fn import_image_bytes(library: &Path, png_bytes: &[u8]) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png_bytes.hash(&mut hasher);
+    let relative = format!("media/{:016x}.png", hasher.finish());
+    let target = library.join(&relative);
+    if !target.exists() {
+        fs::create_dir_all(target.parent()?).ok()?;
+        fs::write(&target, png_bytes).ok()?;
+    }
+    Some(relative)
+}
+
 /// Foto in den Medien-Basisordner kopieren und relativen Pfad liefern.
 /// Der Dateiname ist ein Inhalts-Hash, doppelte Bilder werden so vermieden.
-#[cfg(test)]
 pub fn import_media_file(library: &Path, source: &Path) -> Option<String> {
     let (relative, target) = media_target(library, source)?;
     if !target.exists() {
@@ -179,8 +424,13 @@ fn media_path(media_base: &Path, photo: &str) -> PathBuf {
     }
 }
 
+/// Version der Thumb-Pipeline (Quelle, Filter). Bei Änderung werden alle
+/// Vorschaubilder einmalig neu erzeugt; alte Dateien räumt die Bereinigung ab.
+const THUMB_VERSION: u32 = 1;
+
 fn thumb_key(person: &Person, size: u32, round: bool) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    THUMB_VERSION.hash(&mut hasher);
     person.photo.hash(&mut hasher);
     size.hash(&mut hasher);
     round.hash(&mut hasher);
@@ -225,6 +475,25 @@ fn spawn_thumb_job(key: String, ctx: egui::Context, job: impl FnOnce() + Send + 
     });
 }
 
+/// Schonend verkleinern: schrittweise halbieren und erst den letzten Schritt
+/// mit Lanczos3 auf die exakte Zielgröße rechnen. Einstufiges Verkleinern
+/// großer Faktoren (z. B. 4000px → 100px) wird sonst sichtbar matschig.
+fn downscale(image: image::DynamicImage, target_w: u32, target_h: u32) -> RgbaImage {
+    let target_w = target_w.max(1);
+    let target_h = target_h.max(1);
+    let mut current = image;
+    while current.width() / 2 >= target_w && current.height() / 2 >= target_h {
+        let (w, h) = (current.width() / 2, current.height() / 2);
+        current = image::DynamicImage::ImageRgba8(image::imageops::resize(
+            &current,
+            w,
+            h,
+            FilterType::Triangle,
+        ));
+    }
+    image::imageops::resize(&current, target_w, target_h, FilterType::Lanczos3)
+}
+
 fn resize_short_side(image: image::DynamicImage, short_side: u32) -> RgbaImage {
     let (w, h) = image.dimensions();
     let shortest = w.min(h).max(1);
@@ -234,7 +503,7 @@ fn resize_short_side(image: image::DynamicImage, short_side: u32) -> RgbaImage {
     let scale = short_side as f32 / shortest as f32;
     let width = (w as f32 * scale).round().max(1.0) as u32;
     let height = (h as f32 * scale).round().max(1.0) as u32;
-    image::imageops::resize(&image, width, height, FilterType::Triangle)
+    downscale(image, width, height)
 }
 
 fn draw_avatar_placeholder(
@@ -242,15 +511,17 @@ fn draw_avatar_placeholder(
     person: &Person,
     size: f32,
     sense: Sense,
+    offset: Vec2,
 ) -> egui::Response {
-    let (response, painter) = ui.allocate_painter(Vec2::splat(size), sense);
+    let (response, rect) = allocate_avatar(ui, size, sense, offset);
+    let painter = ui.painter();
     painter.circle_filled(
-        response.rect.center(),
+        rect.center(),
         size / 2.0,
         Color32::from_rgb(55, 91, 101),
     );
     painter.text(
-        response.rect.center(),
+        rect.center(),
         Align2::CENTER_CENTER,
         initials(person),
         FontId::proportional(size * 0.32),
@@ -281,7 +552,7 @@ pub fn avatar_ui_live(
                 .sense(Sense::click_and_drag()),
         )
     } else {
-        draw_avatar_placeholder(ui, person, size, Sense::click_and_drag())
+        draw_avatar_placeholder(ui, person, size, Sense::click_and_drag(), Vec2::ZERO)
     }
 }
 
@@ -311,13 +582,20 @@ fn ensure_gallery_thumb(
 }
 
 /// Sichert eine 720p-Kopie (max. 1280px an der längeren Kante) als dauerhaftes Thumbnail auf der Festplatte.
+/// Längste Kante der Vollbild-Variante für die Großansicht.
+const LARGE_MAX_SIDE: u32 = 2560;
+
+/// Dateiname der Vollbild-Variante (eine Stelle für alle Nutzer).
+fn large_thumb_filename(person: &Person) -> String {
+    format!("large-2k-{}.png", thumb_key(person, LARGE_MAX_SIDE, false))
+}
+
 pub fn ensure_large_thumb(
     ctx: &egui::Context,
     media_base: &Path,
     person: &Person,
 ) -> Option<PathBuf> {
-    let size = 1280;
-    let key = format!("large-720p-{}.png", thumb_key(person, size, false));
+    let key = large_thumb_filename(person);
     let target = thumb_path(media_base, &key);
     if target.exists() {
         return Some(target);
@@ -332,13 +610,13 @@ pub fn ensure_large_thumb(
         if let Ok(image) = image::open(source) {
             let (w, h) = image.dimensions();
             let max_side = w.max(h);
-            let resized = if max_side > size {
-                let scale = size as f32 / max_side as f32;
-                let nw = (w as f32 * scale).round() as u32;
-                let nh = (h as f32 * scale).round() as u32;
-                image.resize(nw, nh, FilterType::Triangle)
+            let resized = if max_side > LARGE_MAX_SIDE {
+                let scale = LARGE_MAX_SIDE as f32 / max_side as f32;
+                let nw = (w as f32 * scale).round().max(1.0) as u32;
+                let nh = (h as f32 * scale).round().max(1.0) as u32;
+                downscale(image, nw, nh)
             } else {
-                image
+                image.to_rgba8()
             };
             let _ = resized.save(target_for_job);
         }
@@ -352,20 +630,14 @@ fn ensure_round_avatar(
     person: &Person,
     size: u32,
 ) -> Option<PathBuf> {
-    let key = format!("avatar-{}.png", thumb_key(person, size, true));
+    let key = format!("avatar2-{}.png", thumb_key(person, size, true));
     let target = thumb_path(media_base, &key);
     if target.exists() {
         return Some(target);
     }
-    let preview = thumb_path(
-        media_base,
-        &format!("gallery-{}.png", thumb_key(person, 150, false)),
-    );
-    let source = if preview.exists() {
-        preview
-    } else {
-        media_path(media_base, person.photo.as_deref()?)
-    };
+    // Immer vom Original zuschneiden und erst danach herunterrechnen —
+    // nie vom bereits verkleinerten Vorschaubild (Qualitätsverlust).
+    let source = media_path(media_base, person.photo.as_deref()?);
     let crop = person.photo_crop;
     let request_key = format!("job:{key}");
     let target_for_job = target.clone();
@@ -393,7 +665,7 @@ fn write_round_avatar_image(
     let crop_w = right.saturating_sub(left).max(1);
     let crop_h = bottom.saturating_sub(top).max(1);
     let cropped = image.crop_imm(left, top, crop_w, crop_h);
-    let mut avatar: RgbaImage = image::imageops::resize(&cropped, size, size, FilterType::Triangle);
+    let mut avatar: RgbaImage = downscale(cropped, size, size);
     let center = (size as f32 - 1.0) / 2.0;
     let radius = size as f32 / 2.0;
     for (x, y, pixel) in avatar.enumerate_pixels_mut() {
@@ -414,17 +686,10 @@ pub fn write_round_avatar_now(media_base: &Path, person: &Person) -> Option<()> 
     let avatar_size = 100;
     let target = thumb_path(
         media_base,
-        &format!("avatar-{}.png", thumb_key(person, avatar_size, true)),
+        &format!("avatar2-{}.png", thumb_key(person, avatar_size, true)),
     );
-    let preview = thumb_path(
-        media_base,
-        &format!("gallery-{}.png", thumb_key(person, 150, false)),
-    );
-    let source = if preview.exists() {
-        preview
-    } else {
-        media_path(media_base, person.photo.as_deref()?)
-    };
+    // Immer vom Original zuschneiden und erst danach herunterrechnen.
+    let source = media_path(media_base, person.photo.as_deref()?);
     write_round_avatar_image(
         image::open(source).ok()?,
         person.photo_crop,
@@ -467,17 +732,49 @@ pub fn photo_preview_texture<'a>(
     cache: &'a mut HashMap<String, TextureHandle>,
     media_base: &Path,
 ) -> Option<&'a TextureHandle> {
-    let thumb_size = 150;
-    let prefix = format!("preview:{}:", person.id);
+    preview_texture_sized(ctx, person, cache, media_base, 150, "preview")
+}
+
+/// Kürzeste Kante der Kartenvariante für die herausgezoomte Baumansicht
+/// (150px wirken dort auf Kartengröße hochskaliert matschig).
+const CARD_THUMB_SHORT_SIDE: u32 = 480;
+
+/// Dateiname der Kartenvariante (eine Stelle für alle Nutzer).
+fn card_thumb_filename(person: &Person) -> String {
+    format!(
+        "card-480-{}.png",
+        thumb_key(person, CARD_THUMB_SHORT_SIDE, false)
+    )
+}
+
+/// Bildfüllende Textur für herausgezoomte Baumkarten (480px statt 150px).
+pub fn photo_card_texture<'a>(
+    ctx: &egui::Context,
+    person: &Person,
+    cache: &'a mut HashMap<String, TextureHandle>,
+    media_base: &Path,
+) -> Option<&'a TextureHandle> {
+    preview_texture_sized(ctx, person, cache, media_base, CARD_THUMB_SHORT_SIDE, "card")
+}
+
+fn preview_texture_sized<'a>(
+    ctx: &egui::Context,
+    person: &Person,
+    cache: &'a mut HashMap<String, TextureHandle>,
+    media_base: &Path,
+    thumb_size: u32,
+    prefix: &str,
+) -> Option<&'a TextureHandle> {
+    let key_prefix = format!("{prefix}:{}:", person.id);
     let path = match ensure_gallery_thumb(ctx, media_base, person, thumb_size) {
         Some(path) => path,
-        None => return cached_texture_with_prefix(cache, &prefix),
+        None => return cached_texture_with_prefix(cache, &key_prefix),
     };
     texture_from_file(
         ctx,
         cache,
         format!(
-            "preview:{}:{}",
+            "{prefix}:{}:{}",
             person.id,
             thumb_key(person, thumb_size, false)
         ),
@@ -629,7 +926,7 @@ pub fn round_avatar_texture_cached<'a>(
     if cache.contains_key(&texture_key) {
         return cache.get(&texture_key);
     }
-    let path = thumb_path(media_base, &format!("avatar-{key}.png"));
+    let path = thumb_path(media_base, &format!("avatar2-{key}.png"));
     path.exists()
         .then_some(path)
         .and_then(|path| texture_from_file(ctx, cache, texture_key, path))
@@ -661,7 +958,12 @@ pub fn gallery_thumbnail_ui(
 }
 
 /// Initialen für den Platzhalter-Avatar (maximal 2 Buchstaben).
+/// Sonderzeichen werden nie als Initial genommen, sondern übersprungen
+/// (z. B. führende Klammer in „(Sophia)" → „S").
 pub fn initials(person: &Person) -> String {
+    fn first_letter(text: &str) -> Option<char> {
+        text.chars().find(|c| c.is_alphabetic())
+    }
     // Erster Buchstabe aus Rufname (falls vorhanden) sonst erstem Vornamen,
     // plus erster Buchstabe des Nachnamens.
     let first = {
@@ -674,52 +976,69 @@ pub fn initials(person: &Person) -> String {
     };
     let family = person.family_name.split_whitespace().next().unwrap_or("");
     let mut out = String::new();
-    if let Some(c) = first.chars().next() {
+    if let Some(c) = first_letter(first) {
         out.extend(c.to_uppercase());
     }
-    if let Some(c) = family.chars().next() {
+    if let Some(c) = first_letter(family) {
         out.extend(c.to_uppercase());
     }
     if out.is_empty() {
         out = person
             .display_name()
             .chars()
-            .next()
+            .find(|c| c.is_alphabetic())
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_default();
     }
     out
 }
 
-/// Avatar-Vorschau: runder Avatar aus Cache oder Live-Vorschau.
+/// Reserviert auch den Randabstand im Layout, damit der Avatar vollständig
+/// innerhalb seines Zeilen- und Clipbereichs liegt.
+fn allocate_avatar(
+    ui: &mut egui::Ui,
+    size: f32,
+    sense: Sense,
+    offset: Vec2,
+) -> (egui::Response, egui::Rect) {
+    let padding = offset.max(Vec2::ZERO);
+    let (allocated, response) = ui.allocate_exact_size(Vec2::splat(size) + padding, sense);
+    let rect = egui::Rect::from_min_size(allocated.min + padding, Vec2::splat(size));
+    (response, rect)
+}
+
+/// Avatar-Vorschau: runder Avatar aus Cache oder Platzhalter.
+/// `offset` reserviert zusätzlichen Platz links und oberhalb des Bildes.
 pub fn avatar_ui_preview(
     ui: &mut egui::Ui,
     person: &Person,
     cache: &mut HashMap<String, TextureHandle>,
     media_base: &Path,
     size: f32,
+    offset: Vec2,
 ) -> egui::Response {
     if let Some(texture) = round_avatar_texture(ui.ctx(), person, cache, media_base) {
-        let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click_and_drag());
+        let (response, rect) = allocate_avatar(ui, size, Sense::click_and_drag(), offset);
+        let painter = ui.painter();
         painter.circle_filled(
-            response.rect.center(),
+            rect.center(),
             size / 2.0,
             Color32::from_black_alpha(24),
         );
         painter.image(
             texture.id(),
-            response.rect,
+            rect,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );
         painter.circle_stroke(
-            response.rect.center(),
+            rect.center(),
             size / 2.0,
             egui::Stroke::new(1.0, Color32::from_white_alpha(40)),
         );
         response
     } else {
-        avatar_ui_live(ui, person, cache, media_base, size)
+        draw_avatar_placeholder(ui, person, size, Sense::click_and_drag(), offset)
     }
 }
 
@@ -728,6 +1047,7 @@ pub fn clear_person_photo_cache(cache: &mut HashMap<String, TextureHandle>, pers
     cache.retain(|key, _| {
         key != person_id
             && !key.starts_with(&format!("preview:{person_id}:"))
+            && !key.starts_with(&format!("card:{person_id}:"))
             && !key.starts_with(&format!("avatar:{person_id}:"))
             && !key.starts_with(&format!("gallery-{person_id}-"))
     });
@@ -776,10 +1096,15 @@ pub fn cleanup_unused_media(media_base: &Path, data: &TreeData) {
             }
             // Berechne valide Thumbnail-Dateinamen für das Profilbild
             valid_thumbs.insert(format!("gallery-{}.png", thumb_key(p, 150, false)));
-            valid_thumbs.insert(format!("avatar-{}.png", thumb_key(p, 100, true)));
-            valid_thumbs.insert(format!("large-720p-{}.png", thumb_key(p, 1280, false)));
+            valid_thumbs.insert(format!("avatar2-{}.png", thumb_key(p, 100, true)));
+            valid_thumbs.insert(card_thumb_filename(p));
+            valid_thumbs.insert(large_thumb_filename(p));
         }
-        for entry in &p.gallery {
+        for entry in p
+            .gallery
+            .iter()
+            .chain(p.documents.iter().map(|document| &document.path))
+        {
             if let Some(filename) = Path::new(entry).file_name().and_then(|n| n.to_str()) {
                 referenced.insert(filename.to_string());
             }
@@ -787,24 +1112,14 @@ pub fn cleanup_unused_media(media_base: &Path, data: &TreeData) {
             gp.photo = Some(entry.clone());
             // Berechne valide Thumbnail-Dateinamen für dieses Galeriebild
             valid_thumbs.insert(format!("gallery-{}.png", thumb_key(&gp, 150, false)));
-            valid_thumbs.insert(format!("large-720p-{}.png", thumb_key(&gp, 1280, false)));
+            valid_thumbs.insert(card_thumb_filename(&gp));
+            valid_thumbs.insert(large_thumb_filename(&gp));
         }
     }
 
     // 1. Verwaiste Originaldateien löschen
+    // Hinweis: Automatische Deletion von Originaldateien deaktiviert, um Datenverlust bei mehreren Projekten im selben Speicherort zu verhindern!
     let media_dir = media_base.join("media");
-    if let Ok(entries) = std::fs::read_dir(&media_dir) {
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    if !referenced.contains(filename) {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-            }
-        }
-    }
 
     // 2. Verwaiste Thumbnails und Cache-Bilder löschen
     let thumbs_dir = media_dir.join(".thumbs");
@@ -842,6 +1157,120 @@ mod tests {
     }
 
     #[test]
+    fn rotate_swaps_image_dimensions() {
+        use image::{GenericImageView, RgbaImage};
+        let temp = std::env::temp_dir().join("minigramps-rotate-test");
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("media")).unwrap();
+        RgbaImage::new(4, 2).save(temp.join("media").join("pic.png")).unwrap();
+        assert!(rotate_image_file_90(&temp, "media/pic.png"));
+        let rotated = image::open(temp.join("media").join("pic.png")).unwrap();
+        assert_eq!(rotated.dimensions(), (2, 4));
+        assert!(!rotate_image_file_90(&temp, "media/missing.png"));
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn detects_image_files_by_extension() {
+        assert!(is_image_file(Path::new("foto.JPG")));
+        assert!(is_image_file(Path::new("bild.webp")));
+        assert!(!is_image_file(Path::new("baum.ged")));
+        assert!(!is_image_file(Path::new("ohne_endung")));
+    }
+
+    #[test]
+    fn thumb_deletion_counts_and_recreates() {
+        let temp = std::env::temp_dir().join("minigramps-thumb-delete-test");
+        let _ = fs::remove_dir_all(&temp);
+        let thumbs = temp.join("media").join(".thumbs");
+        fs::create_dir_all(&thumbs).unwrap();
+        fs::write(thumbs.join("avatar2-abc.png"), b"a").unwrap();
+        fs::write(thumbs.join("gallery-def.png"), b"g").unwrap();
+        fs::write(thumbs.join("note.txt"), b"x").unwrap();
+        assert_eq!(delete_avatar_thumbs(&temp), 1);
+        assert!(!thumbs.join("avatar2-abc.png").exists());
+        assert!(thumbs.join("gallery-def.png").exists());
+        assert_eq!(delete_all_thumbs(&temp), 2);
+        assert!(!thumbs.join("gallery-def.png").exists());
+        assert_eq!(delete_all_thumbs(&temp.join("missing-dir")), 0);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn downscale_hits_exact_target_size() {
+        use image::RgbaImage;
+        let big = image::DynamicImage::ImageRgba8(RgbaImage::new(512, 300));
+        let small = downscale(big, 100, 100);
+        assert_eq!((small.width(), small.height()), (100, 100));
+        let odd = image::DynamicImage::ImageRgba8(RgbaImage::new(5, 5));
+        let tiny = downscale(odd, 2, 2);
+        assert_eq!((tiny.width(), tiny.height()), (2, 2));
+    }
+
+    #[test]
+    fn lists_only_stored_images_newest_first() {
+        let temp = std::env::temp_dir().join("minigramps-list-images-test");
+        let _ = fs::remove_dir_all(&temp);
+        let media = temp.join("media");
+        fs::create_dir_all(media.join(".thumbs")).unwrap();
+        fs::write(media.join("a.png"), b"a").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(media.join("b.jpg"), b"b").unwrap();
+        fs::write(media.join("notes.txt"), b"x").unwrap();
+        let listed = list_media_images(&temp);
+        assert_eq!(listed, vec!["media/b.jpg".to_string(), "media/a.png".to_string()]);
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn large_thumb_filename_is_shared_and_removable() {
+        let mut p = crate::model::person("x", "A", "B", "", crate::model::Gender::Female);
+        p.photo = Some("media/pic.png".into());
+        let name = large_thumb_filename(&p);
+        assert!(name.starts_with("large-2k-") && name.ends_with(".png"));
+        let temp = std::env::temp_dir().join("minigramps-large-thumb-test");
+        let _ = fs::remove_dir_all(&temp);
+        let thumbs = temp.join("media").join(".thumbs");
+        fs::create_dir_all(&thumbs).unwrap();
+        fs::write(thumbs.join(&name), b"x").unwrap();
+        delete_person_thumbs(&temp, &p);
+        assert!(!thumbs.join(&name).exists());
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn card_thumb_filename_is_shared_and_removable() {
+        let mut p = crate::model::person("x", "A", "B", "", crate::model::Gender::Female);
+        p.photo = Some("media/pic.png".into());
+        let name = card_thumb_filename(&p);
+        assert!(name.starts_with("card-480-") && name.ends_with(".png"));
+        let temp = std::env::temp_dir().join("minigramps-card-thumb-test");
+        let _ = fs::remove_dir_all(&temp);
+        let thumbs = temp.join("media").join(".thumbs");
+        fs::create_dir_all(&thumbs).unwrap();
+        fs::write(thumbs.join(&name), b"x").unwrap();
+        delete_person_thumbs(&temp, &p);
+        assert!(!thumbs.join(&name).exists());
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn photo_meta_reads_dimensions_without_exif() {
+        use image::RgbaImage;
+        let temp = std::env::temp_dir().join("minigramps-meta-test");
+        let _ = fs::remove_dir_all(&temp);
+        let media = temp.join("media");
+        fs::create_dir_all(&media).unwrap();
+        RgbaImage::new(40, 30).save(media.join("pic.png")).unwrap();
+        let meta = read_photo_meta(&temp, "media/pic.png").unwrap();
+        assert_eq!((meta.width, meta.height), (40, 30));
+        assert!(meta.date.is_none() && meta.camera.is_none());
+        assert!(meta.display_line().starts_with("40 × 30 · "));
+        assert!(read_photo_meta(&temp, "media/missing.png").is_none());
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn initials_prefer_call_name() {
         let mut p = crate::model::person(
             "x",
@@ -853,5 +1282,33 @@ mod tests {
         assert_eq!(initials(&p), "HB");
         p.call_name = "Jürgen".into();
         assert_eq!(initials(&p), "JB");
+    }
+
+    #[test]
+    fn initials_skip_non_letters() {
+        let p = crate::model::person(
+            "x",
+            "(Sophia)",
+            "Charlotte",
+            "",
+            crate::model::Gender::Female,
+        );
+        assert_eq!(initials(&p), "SC");
+    }
+
+    #[test]
+    fn avatar_padding_is_reserved_in_layout() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let (response, image) = allocate_avatar(
+                    ui, 64.0, Sense::hover(), Vec2::splat(3.0),
+                );
+                assert_eq!(response.rect.size(), Vec2::splat(67.0));
+                assert_eq!(image.size(), Vec2::splat(64.0));
+                assert!(response.rect.contains_rect(image));
+                assert_eq!(image.min - response.rect.min, Vec2::splat(3.0));
+            });
+        });
     }
 }

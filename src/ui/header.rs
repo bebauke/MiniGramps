@@ -9,11 +9,10 @@
 
 use eframe::egui::{self, Color32};
 
-use crate::import::discover_projects;
 use crate::ui::{
-    ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_CLOSE, ICON_MAXIMIZE, ICON_MINIMIZE, ICON_OPEN,
-    ICON_REDO, ICON_SAVE, ICON_SETTINGS, ICON_UNDO, MiniGramps, icon_button_big, icon_only_button,
-    icon_row_button, panels::palette, whitened_logo,
+    ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_CLOSE, ICON_DEBUG, ICON_MAXIMIZE, ICON_MINIMIZE,
+    ICON_OPEN, ICON_REDO, ICON_SAVE, ICON_SETTINGS, ICON_UNDO, MiniGramps, icon_button_big,
+    icon_only_button, icon_row_button, panels::palette, whitened_logo,
 };
 
 pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -40,7 +39,8 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                 columns[0].with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.add_space(6.0);
                     if icon_button_big(ui, ICON_OPEN, "open", "Projekt öffnen").clicked() {
-                        let found = discover_projects(&app.library).len();
+                        app.refresh_project_list();
+                        let found = app.project_list_cache.len();
                         app.log(format!("Projektsuche: {found} Treffer"));
                         app.show_open = true;
                     }
@@ -246,6 +246,47 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                     {
                         app.show_settings = !app.show_settings;
                     }
+                    let debug_button = icon_only_button(ui, ICON_DEBUG, "debug")
+                        .on_hover_text("Debug-Aktionen");
+                    egui::Popup::menu(&debug_button).show(|ui| {
+                        ui.label(egui::RichText::new("Debug").strong());
+                        ui.separator();
+                        if ui
+                            .button("Thumbnails löschen")
+                            .on_hover_text(
+                                "Alle zwischengespeicherten Vorschaubilder verwerfen \
+                                 (werden bei Bedarf neu erzeugt).",
+                            )
+                            .clicked()
+                        {
+                            app.debug_clear_thumbs();
+                            ui.close();
+                        }
+                        if ui
+                            .button("Profilbilder neu erzeugen")
+                            .on_hover_text(
+                                "Runde Profilbilder aus den Originalen neu erzeugen \
+                                 (neue Zuschnitt-Logik für alle Bilder übernehmen).",
+                            )
+                            .clicked()
+                        {
+                            app.debug_rebuild_avatars();
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Match-Schwelle");
+                            ui.add(
+                                egui::DragValue::new(&mut app.match_threshold)
+                                    .range(50.0..=100.0)
+                                    .suffix(" %"),
+                            )
+                            .on_hover_text(
+                                "Ab welcher Vornamens- und Verwandtschafts-Deckung ein \
+                                 Duplikat-Verdacht gemeldet wird (Import anhängen).",
+                            );
+                        });
+                    });
                     // Status ABSCHNEIDEN statt überlaufen: langer Pfad kollidiert
                     // sonst mit dem zentrierten Titel.
                     ui.add(
