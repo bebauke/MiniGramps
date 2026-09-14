@@ -98,10 +98,14 @@ pub fn collect_project_files(folder: &Path, projects: &mut Vec<PathBuf>, depth: 
     if let Ok(entries) = fs::read_dir(folder) {
         for entry in entries.flatten() {
             let path = entry.path();
+            let name_str = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            // Sicherungskopien (`backups/`) sind keine Projekte.
+            if name_str == "backups" {
+                continue;
+            }
             if path.is_dir() && depth > 0 {
                 collect_project_files(&path, projects, depth - 1);
             }
-            let name_str = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
             let is_metadata = name_str.ends_with(".layout.json")
                 || name_str.ends_with(".manifest.json")
                 || name_str == "letzte-sitzung.json"

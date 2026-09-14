@@ -541,6 +541,45 @@ impl TreeData {
     pub fn find(&self, id: &str) -> Option<&Person> {
         self.people.iter().find(|p| p.id == id)
     }
+
+    /// Vornamen-Statistik aus dem Bestand: Geschlecht mit klarer Mehrheit
+    /// (>50 %) für den Vornamen (erster Token der Anfrage, normiert) — z. B.
+    /// Johann mit 90 % Männlich-Anteil ergibt `Male`. Es zählen alle
+    /// Vornamen-Token der Bestandspersonen, auch Zweitnamen (Rufname an
+    /// zweiter Stelle wie „Johann Hartmut" stimmt für die Anfrage „Hartmut"
+    /// mit ab). `None` ohne Treffer, bei Gleichstand oder wenn nur
+    /// „unbekannt" belegt ist — unbelegte Namen können nichts vorschlagen.
+    /// Dient als initialer Geschlechts-Default neuer Personen (editierbar,
+    /// kein Zurückschreiben).
+    pub fn gender_for_given_name(&self, given: &str) -> Option<Gender> {
+        let key = normalize_token(given.split_whitespace().next().unwrap_or(""));
+        if key.is_empty() {
+            return None;
+        }
+        let mut male = 0u32;
+        let mut female = 0u32;
+        for person in &self.people {
+            let matches = person
+                .given_name
+                .split_whitespace()
+                .any(|token| normalize_token(token) == key);
+            if !matches {
+                continue;
+            }
+            match person.gender {
+                Gender::Male => male += 1,
+                Gender::Female => female += 1,
+                Gender::Unknown => {}
+            }
+        }
+        if male > female {
+            Some(Gender::Male)
+        } else if female > male {
+            Some(Gender::Female)
+        } else {
+            None
+        }
+    }
     pub fn children_of(&self, id: &str) -> Vec<&Person> {
         let mut children: Vec<&Person> = self.families
             .iter()
@@ -1189,12 +1228,105 @@ impl TreeData {
         self.cleanup_empty_families();
     }
 
+    /// Selektives Zusammenführen aus dem Review: Standard-Merge plus
+    /// seitenweise Wahl für Geburts-/Sterbedaten (inkl. Ereignis-Abgleich).
+    pub fn apply_merge_choice(
+        &mut self,
+        keep_id: &str,
+        drop_id: &str,
+        take_new_birth: bool,
+        take_new_death: bool,
+    ) {
+        let drop = self.find(drop_id).cloned();
+        self.merge_persons(keep_id, drop_id);
+        let Some(drop) = drop else {
+            return;
+        };
+        for (take_new, kind, date, place) in [
+            (
+                take_new_birth,
+                EventKind::Birth,
+                drop.birth.clone(),
+                drop.birth_place.clone(),
+            ),
+            (
+                take_new_death,
+                EventKind::Death,
+                drop.death.clone(),
+                drop.death_place.clone(),
+            ),
+        ] {
+            if !take_new || date.trim().is_empty() {
+                continue;
+            }
+            let Some(keep) = self.people.iter_mut().find(|person| person.id == keep_id) else {
+                continue;
+            };
+            if kind == EventKind::Birth {
+                keep.birth = date.clone();
+                keep.birth_place = place.clone();
+            } else {
+                keep.death = date.clone();
+                keep.death_place = place.clone();
+            }
+            match keep.events.iter_mut().find(|event| event.kind == kind) {
+                Some(event) => {
+                    event.date = date;
+                    event.place = place;
+                }
+                None => keep.events.push(Event {
+                    kind,
+                    date,
+                    place,
+                    description: String::new(),
+                }),
+            }
+        }
+    }
+
+    /// Häufige Vornamen-Token je normiertem Nachnamen: Token mit mindestens
+    /// `min_count` Trägern in derselben Nachnamengruppe (je Person einmal
+    /// gezählt). Einmalig pro Matcher-Lauf berechnen, pro Paar die Mengen
+    /// beider Nachnamen vereinigen.
+    fn common_given_tokens(&self, min_count: usize) -> HashMap<String, HashSet<String>> {
+        let mut counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        for person in &self.people {
+            let surname = normalize_token(&person.family_name);
+            if surname.is_empty() {
+                continue;
+            }
+            let entry = counts.entry(surname).or_default();
+            let mut seen = HashSet::new();
+            for token in name_tokens(&person.given_name) {
+                if seen.insert(token.clone()) {
+                    *entry.entry(token).or_insert(0) += 1;
+                }
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(surname, tokens)| {
+                (
+                    surname,
+                    tokens
+                        .into_iter()
+                        .filter(|(_, count)| *count >= min_count.max(2))
+                        .map(|(token, _)| token)
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     /// Duplikat-Kandidat aus dem Abgleich (Bestand ↔ frisch Angehängtes).
     /// Sortierung absteigend nach Gesamtähnlichkeit (Name + Verwandtschaft).
+    /// `common_min`: häufige Vornamen ab so vielen Gleichnamigen je
+    /// Nachnamengruppe ohne Exakt-Boost (einstellbar, Default 4).
     pub fn find_merge_candidates(
         &self,
         fresh_ids: &HashSet<String>,
         threshold: f32,
+        common_min: usize,
     ) -> Vec<MergeCandidate> {
         let fresh: Vec<&Person> = self
             .people
@@ -1202,12 +1334,30 @@ impl TreeData {
             .filter(|person| fresh_ids.contains(&person.id))
             .collect();
         let mut candidates = Vec::new();
+        // Häufige Vornamen je Nachnamengruppe (einmalig): leere Referenz für
+        // Paare ohne Befund, wiederverwendeter Puffer für die Vereinigung.
+        let common = self.common_given_tokens(common_min);
+        let no_ignore: HashSet<String> = HashSet::new();
+        let mut union_buf: HashSet<String> = HashSet::new();
         for incoming in fresh {
             for existing in &self.people {
                 if fresh_ids.contains(&existing.id) || existing.id == incoming.id {
                     continue;
                 }
-                let name_score = name_similarity(&existing.given_name, &incoming.given_name);
+                // Ignore-Menge des Paars (beide Nachnamengruppen).
+                union_buf.clear();
+                for surname in [&existing.family_name, &incoming.family_name] {
+                    if let Some(tokens) = common.get(&normalize_token(surname)) {
+                        union_buf.extend(tokens.iter().cloned());
+                    }
+                }
+                let ignore: &HashSet<String> =
+                    if union_buf.is_empty() { &no_ignore } else { &union_buf };
+                let name_score = name_similarity_common(
+                    &existing.given_name,
+                    &incoming.given_name,
+                    ignore,
+                );
                 if name_score < threshold {
                     continue;
                 }
@@ -1216,14 +1366,34 @@ impl TreeData {
                 }
                 let exact_given = normalize_token(&existing.given_name)
                     == normalize_token(&incoming.given_name);
-                let kin_score = kin_similarity(self, existing, incoming, threshold);
-                if !exact_given && kin_score < threshold {
+                // 1-von-2-exakt (oder voller Treffer) ersetzt die
+                // Verwandtschafts-Hürde; sonst muss die Verwandtschaft passen.
+                // Häufige Familiennamen (z. B. viele Marias) zählen hier nicht.
+                let token_hit = shares_exact_token_common(
+                    &existing.given_name,
+                    &incoming.given_name,
+                    ignore,
+                );
+                let kin_score = kin_similarity(self, existing, incoming, threshold, false);
+                if !exact_given && !token_hit && kin_score < threshold {
+                    continue;
+                }
+                let family_score = multi_token_score(
+                    &existing.family_name,
+                    &incoming.family_name,
+                );
+                // Nachname unter 50 %: kein automatischer Match (nur wenn
+                // überhaupt ein Name bekannt ist — Unwissen ≠ Widerspruch).
+                let surname_known = !name_tokens(&existing.family_name).is_empty()
+                    || !name_tokens(&incoming.family_name).is_empty();
+                if surname_known && family_score < 0.5 {
                     continue;
                 }
                 candidates.push(MergeCandidate {
                     keep_id: existing.id.clone(),
                     drop_id: incoming.id.clone(),
                     name_score,
+                    family_score,
                     birth_match: !existing.birth.trim().is_empty()
                         && !incoming.birth.trim().is_empty(),
                     kin_score,
@@ -1231,18 +1401,286 @@ impl TreeData {
             }
         }
         candidates.sort_by(|a, b| {
-            (b.name_score + b.kin_score)
-                .total_cmp(&(a.name_score + a.kin_score))
+            (b.name_score + b.kin_score + b.family_score)
+                .total_cmp(&(a.name_score + a.kin_score + a.family_score))
                 .then_with(|| a.keep_id.cmp(&b.keep_id))
                 .then_with(|| a.drop_id.cmp(&b.drop_id))
         });
         candidates
     }
 
+    /// Duplikate im eigenen Bestand suchen (Projekt-Button): gleiche
+    /// Vergleichsfunktion wie beim Import, aber MIT Verwandten-IDs (starkes
+    /// Signal im gleichen Baum). Eltern und eigene Kinder sind nie Duplikate
+    /// voneinander. Sortiert absteigend, begrenzt auf 200. `common_min` wie
+    /// beim Import-Abgleich (einstellbar, Default 4).
+    pub fn find_project_duplicates(&self, threshold: f32, common_min: usize) -> Vec<MergeCandidate> {
+        // Eltern-IDs je Person einmalig (Paar-Schleife ist quadratisch).
+        let mut parent_ids: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for person in &self.people {
+            parent_ids.insert(
+                person.id.as_str(),
+                self.parents_of(&person.id)
+                    .iter()
+                    .map(|parent| parent.id.as_str())
+                    .collect(),
+            );
+        }
+        let mut candidates = Vec::new();
+        // Häufige Vornamen je Nachnamengruppe (einmalig, vgl. Import-Matcher).
+        let common = self.common_given_tokens(common_min);
+        let no_ignore: HashSet<String> = HashSet::new();
+        let mut union_buf: HashSet<String> = HashSet::new();
+        for (index, first) in self.people.iter().enumerate() {
+            for second in &self.people[index + 1..] {
+                union_buf.clear();
+                for surname in [&first.family_name, &second.family_name] {
+                    if let Some(tokens) = common.get(&normalize_token(surname)) {
+                        union_buf.extend(tokens.iter().cloned());
+                    }
+                }
+                let ignore: &HashSet<String> =
+                    if union_buf.is_empty() { &no_ignore } else { &union_buf };
+                let name_score =
+                    name_similarity_common(&first.given_name, &second.given_name, ignore);
+                if name_score < threshold {
+                    continue;
+                }
+                if !birth_compatible(&first.birth, &second.birth) {
+                    continue;
+                }
+                // Eigenes Kind (beide Richtungen) kann kein Duplikat sein.
+                if parent_ids[first.id.as_str()].contains(second.id.as_str())
+                    || parent_ids[second.id.as_str()].contains(first.id.as_str())
+                {
+                    continue;
+                }
+                let exact_given =
+                    normalize_token(&first.given_name) == normalize_token(&second.given_name);
+                // Häufige Familiennamen (z. B. viele Marias) zählen hier nicht.
+                let token_hit =
+                    shares_exact_token_common(&first.given_name, &second.given_name, ignore);
+                let kin_score = kin_similarity(self, first, second, threshold, true);
+                if !exact_given && !token_hit && kin_score < threshold {
+                    continue;
+                }
+                let family_score = multi_token_score(&first.family_name, &second.family_name);
+                // Nachname unter 50 %: kein automatischer Match (nur wenn
+                // überhaupt ein Name bekannt ist — Unwissen ≠ Widerspruch).
+                let surname_known = !name_tokens(&first.family_name).is_empty()
+                    || !name_tokens(&second.family_name).is_empty();
+                if surname_known && family_score < 0.5 {
+                    continue;
+                }
+                candidates.push(MergeCandidate {
+                    keep_id: first.id.clone(),
+                    drop_id: second.id.clone(),
+                    name_score,
+                    family_score,
+                    birth_match: !first.birth.trim().is_empty()
+                        && !second.birth.trim().is_empty(),
+                    kin_score,
+                });
+            }
+        }
+        candidates.sort_by(|a, b| {
+            (b.name_score + b.kin_score + b.family_score)
+                .total_cmp(&(a.name_score + a.kin_score + a.family_score))
+                .then_with(|| a.keep_id.cmp(&b.keep_id))
+                .then_with(|| a.drop_id.cmp(&b.drop_id))
+        });
+        candidates.truncate(200);
+        candidates
+    }
+
+    /// Manueller Treffer (Review-Dialog): Bestand (`keep`) gegen frisch
+    /// Angehängtes (`drop`) — mit echten Ähnlichkeitswerten, aber OHNE
+    /// Schwellen (explizite Auswahl sticht die Automatik; die Vornamen-Scores
+    /// dämpfen häufige Familiennamen trotzdem für ehrliche Anzeige).
+    /// `None` bei unbekannten IDs, vertauschten Seiten oder identischer Person.
+    pub fn manual_match_candidate(
+        &self,
+        keep_id: &str,
+        drop_id: &str,
+        fresh_ids: &HashSet<String>,
+        common_min: usize,
+    ) -> Option<MergeCandidate> {
+        if keep_id == drop_id || fresh_ids.contains(keep_id) || !fresh_ids.contains(drop_id) {
+            return None;
+        }
+        let keep = self.find(keep_id)?;
+        let drop = self.find(drop_id)?;
+        // Eigenes Kind (beide Richtungen) kann kein Duplikat sein.
+        if self.parents_of(keep_id).iter().any(|parent| parent.id == drop_id)
+            || self.parents_of(drop_id).iter().any(|parent| parent.id == keep_id)
+        {
+            return None;
+        }
+        let common = self.common_given_tokens(common_min);
+        let mut ignore = HashSet::new();
+        for surname in [&keep.family_name, &drop.family_name] {
+            if let Some(tokens) = common.get(&normalize_token(surname)) {
+                ignore.extend(tokens.iter().cloned());
+            }
+        }
+        Some(MergeCandidate {
+            keep_id: keep.id.clone(),
+            drop_id: drop.id.clone(),
+            name_score: name_similarity_common(&keep.given_name, &drop.given_name, &ignore),
+            family_score: multi_token_score(&keep.family_name, &drop.family_name),
+            birth_match: !keep.birth.trim().is_empty() && !drop.birth.trim().is_empty(),
+            kin_score: kin_similarity(self, keep, drop, 0.0, false),
+        })
+    }
+
+    /// Nächste freie Personen-ID (Lücke-sicher, anders als reines Anzählen).
+    fn next_person_id(&self) -> String {
+        let mut number = self.people.len() + 1;
+        while self.find(&format!("p{number}")).is_some() {
+            number += 1;
+        }
+        format!("p{number}")
+    }
+
+    /// Schnell erfasste Person auflösen: gebundene Bestands-ID wiederverwenden
+    /// (falls vorhanden), sonst neu anlegen. `None` bei leerer Zeile — und
+    /// bei verwaister Bindung (gesetzte Person inzwischen weg): dann lieber
+    /// überspringen als unbemerkt ein Duplikat anzulegen.
+    fn resolve_quick_person(&mut self, quick: &QuickPerson) -> Option<String> {
+        if let Some(id) = quick.bind.as_deref() {
+            if self.find(id).is_some() {
+                return Some(id.to_string());
+            }
+            return None;
+        }
+        if quick.is_empty() {
+            return None;
+        }
+        let id = self.next_person_id();
+        let mut person = person(&id, &quick.given, &quick.family, "", quick.gender);
+        person.birth = quick.birth.clone();
+        person.death = quick.death.clone();
+        self.people.push(person);
+        Some(id)
+    }
+
+    /// Gestapelte Schnell-Blöcke wie beim Import verknüpfen: abwärts je Block
+    /// Partner × Referenz plus gemeinsame Kinder (ohne Partner dessen Kinder
+    /// allein), aufwärts je Block die Eltern — mit Kind, ersatzweise direkt
+    /// an der Referenzperson (Aufwärts-Erfassung ohne Kind-Zeile). Gibt neu
+    /// angelegte IDs zurück (verknüpfte Bestands-IDs nicht enthalten).
+    /// Abwärts-Blöcke ohne vorhandene Referenzperson werden übersprungen,
+    /// ebenso Aufwärts-Blöcke ohne Kind und ohne gültige Referenz. Neue
+    /// Personen entstehen in Kopf→Zeilen-Reihenfolge (Vertrag für die
+    /// Queue-Zuordnung in `persist_quick_form`).
+    pub fn commit_quick_blocks(
+        &mut self,
+        ref_id: Option<&str>,
+        blocks: Vec<(QuickDir, Option<QuickPerson>, Vec<QuickPerson>)>,
+    ) -> Vec<String> {
+        let mut created = Vec::new();
+        for (dir, partner, others) in blocks {
+            match dir {
+                QuickDir::Down => {
+                    let Some(ref_id) = ref_id.filter(|id| self.find(id).is_some()) else {
+                        continue;
+                    };
+                    let before = self.people.len();
+                    let partner_id = partner
+                        .as_ref()
+                        .and_then(|person| self.resolve_quick_person(person));
+                    if let Some(partner_id) = &partner_id {
+                        self.link_partner(ref_id, partner_id);
+                    }
+                    let children: Vec<QuickPerson> = others
+                        .iter()
+                        .filter(|person| {
+                            !person.is_empty()
+                                || person
+                                    .bind
+                                    .as_deref()
+                                    .is_some_and(|id| self.find(id).is_some())
+                        })
+                        .cloned()
+                        .collect();
+                    for other in &children {
+                        if let Some(child_id) = self.resolve_quick_person(other) {
+                            match &partner_id {
+                                Some(partner_id) => self.link_child_to(
+                                    Some(ref_id),
+                                    Some(partner_id.as_str()),
+                                    &child_id,
+                                    ChildRelation::Birth,
+                                ),
+                                None => self.link_child(ref_id, &child_id),
+                            }
+                        }
+                    }
+                    created.extend(
+                        self.people[before..].iter().map(|person| person.id.clone()),
+                    );
+                }
+                QuickDir::Up => {
+                    // Block = ([Kind,] [Eltern...]). Ohne Kind dient die
+                    // Referenzperson als Kind (Eltern direkt erfassen).
+                    let before = self.people.len();
+                    let child_id = partner
+                        .as_ref()
+                        .and_then(|person| self.resolve_quick_person(person))
+                        .or_else(|| {
+                            ref_id
+                                .filter(|id| self.find(id).is_some())
+                                .map(str::to_string)
+                        });
+                    let Some(child_id) = child_id else {
+                        continue;
+                    };
+                    let parents: Vec<QuickPerson> = others
+                        .iter()
+                        .filter(|person| {
+                            !person.is_empty()
+                                || person
+                                    .bind
+                                    .as_deref()
+                                    .is_some_and(|id| self.find(id).is_some())
+                        })
+                        .cloned()
+                        .collect();
+                    let mut parent_ids: Vec<String> = Vec::new();
+                    for other in &parents {
+                        if let Some(parent_id) = self.resolve_quick_person(other) {
+                            parent_ids.push(parent_id);
+                        }
+                    }
+                    match parent_ids.as_slice() {
+                        [first, second, rest @ ..] => {
+                            self.link_child_to(
+                                Some(first.as_str()),
+                                Some(second.as_str()),
+                                &child_id,
+                                ChildRelation::Birth,
+                            );
+                            for extra in rest {
+                                self.link_child(extra, &child_id);
+                            }
+                        }
+                        [single] => self.link_child(single, &child_id),
+                        [] => {}
+                    }
+                    if before < self.people.len() {
+                        created.extend(
+                            self.people[before..].iter().map(|person| person.id.clone()),
+                        );
+                    }
+                }
+            }
+        }
+        created
+    }
+
     /// Familien ohne Eltern UND ohne Kinder auflösen; verwaiste
     /// Beziehungsart-Einträge aufräumen.
-    fn cleanup_empty_families(&mut self) {
-        self.families
+    fn cleanup_empty_families(&mut self) {        self.families
             .retain(|family| family.parent_a.is_some() || family.parent_b.is_some());
         let ids: std::collections::HashSet<&str> = self
             .families
@@ -1256,14 +1694,73 @@ impl TreeData {
     }
 }
 
+/// Richtung der Schnellerfassung: abwärts (Partner + Kinder zur
+/// Referenzperson) oder aufwärts (Eltern direkt zur Referenzperson, ohne
+/// Kind-Zeile; ersatzweise mit explizitem Kind, dann ohne Referenz).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuickDir {
+    Down,
+    Up,
+}
+
+/// Eine schnell erfasste Person (Dialog-Zeile): Vorname, Nachname, Geburt,
+/// Tod, Geschlecht — plus optional gebundene Bestands-ID (Verknüpfen statt
+/// neu anlegen, Merge-Suche im Fenster).
+#[derive(Clone, Debug, Default)]
+pub struct QuickPerson {
+    pub given: String,
+    pub family: String,
+    pub birth: String,
+    pub death: String,
+    pub gender: Gender,
+    pub bind: Option<String>,
+}
+
+impl QuickPerson {
+    /// Leer = weder Vor- noch Nachname (wird beim Übernehmen ignoriert).
+    pub fn is_empty(&self) -> bool {
+        self.given.trim().is_empty() && self.family.trim().is_empty()
+    }
+}
+
+/// Geburtsjahr aus einem Datumsstring ziehen (letzte 4-stellige Zahl,
+/// z. B. „1901" aus „12.03.1901"); leer, wenn kein Jahr enthalten ist.
+pub fn birth_year(birth: &str) -> String {
+    let mut year = "";
+    let mut run_start: Option<usize> = None;
+    let bytes = birth.as_bytes();
+    // ASCII-Lauf über Ziffernblöcke (Jahre sind immer ASCII-Ziffern).
+    for (index, byte) in bytes.iter().enumerate() {
+        if byte.is_ascii_digit() {
+            if run_start.is_none() {
+                run_start = Some(index);
+            }
+        } else if let Some(start) = run_start.take() {
+            if index - start == 4 {
+                year = &birth[start..index];
+            }
+        }
+    }
+    if let Some(start) = run_start {
+        if bytes.len() - start == 4 {
+            year = &birth[start..];
+        }
+    }
+    year.to_string()
+}
+
 /// Kandidat für selektives Zusammenführen (Review-Dialog): bestehende
 /// Person behalten, angehängtes Duplikat einführen und löschen.
 #[derive(Clone, Debug)]
 pub struct MergeCandidate {
     pub keep_id: String,
     pub drop_id: String,
-    /// Vornamens-Deckung 0–1 (Dice über Tokens).
+    /// Vornamens-Deckung 0–1 (Token mit Tippfehler-Toleranz, 1-von-2-exakt).
     pub name_score: f32,
+    /// Familiennamens-Deckung 0–1 (Doppelnamen, Schreibfehler) — fließt in
+    /// Sortierung und Anzeige ein; in der Automatik blockiert < 50 % bei
+    /// bekanntem Namen (manuell weiter möglich, z. B. Ehenamen-Wechsel).
+    pub family_score: f32,
     /// Beide Geburtsdaten vorhanden und gleich.
     pub birth_match: bool,
     /// Verwandtschafts-Deckung 0–1 (Anteil ähnlicher Verwandter).
@@ -1279,22 +1776,154 @@ fn normalize_token(text: &str) -> String {
         .replace("ß", "ss")
 }
 
-/// Token-Deckung 0–1 (Dice-Koeffizient) zweier Vornamensangaben.
-fn name_similarity(first: &str, second: &str) -> f32 {
-    let tokens = |text: &str| {
-        normalize_token(text)
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|token| !token.is_empty())
-            .map(str::to_string)
-            .collect::<HashSet<String>>()
-    };
-    let left = tokens(first);
-    let right = tokens(second);
+/// Normierte Namenstoken (klein, Umlaute gefaltet, nur alphanumerisch).
+fn name_tokens(text: &str) -> Vec<String> {
+    normalize_token(text)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Mindestens ein exakt gleiches, nicht ignoriertes Token auf beiden Seiten
+/// (z. B. 1 von 2 Vornamen oder ein Teil eines Doppelnachnamens). Mit leerer
+/// Ignore-Menge das klassische Verhalten (häufige Familiennamen ausgenommen).
+fn shares_exact_token_common(first: &str, second: &str, ignore: &HashSet<String>) -> bool {
+    let right = name_tokens(second);
+    name_tokens(first).iter().any(|token| {
+        !ignore.contains(token) && right.iter().any(|other| token == other)
+    })
+}
+
+/// Zeichen-Ähnlichkeit 0–1 zweier normierter Token (Levenshtein normiert —
+/// Schreibfehler wie Hermine/Hermiene zählen mit).
+fn token_similarity(first: &str, second: &str) -> f32 {
+    if first == second {
+        return 1.0;
+    }
+    let left: Vec<char> = first.chars().collect();
+    let right: Vec<char> = second.chars().collect();
     if left.is_empty() || right.is_empty() {
         return 0.0;
     }
-    let common = left.intersection(&right).count() as f32;
-    2.0 * common / (left.len() + right.len()) as f32
+    let mut prev: Vec<usize> = (0..=right.len()).collect();
+    for (i, &a) in left.iter().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, &b) in right.iter().enumerate() {
+            current.push(
+                (prev[j] + usize::from(a != b))
+                    .min(prev[j + 1] + 1)
+                    .min(current[j] + 1),
+            );
+        }
+        prev = current;
+    }
+    1.0 - prev[right.len()] as f32 / left.len().max(right.len()) as f32
+}
+
+/// Namens-Deckung 0–1 zweier Namensangaben: je Token die beste
+/// Zeichen-Deckung der Gegenseite, symmetrisch gemittelt. Ein exakt gleiches
+/// Token (z. B. 1 von 2 Vornamen) hebt mindestens auf 0,85 — Doppelnamen und
+/// Schreibweisen zählen dadurch mit. Gilt für Vor- wie Nachnamen.
+fn multi_token_score(first: &str, second: &str) -> f32 {
+    let left = name_tokens(first);
+    let right = name_tokens(second);
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let mut exact = false;
+    let mut sum = 0.0f32;
+    for token in &left {
+        let mut best = 0.0f32;
+        for other in &right {
+            if token == other {
+                exact = true;
+                best = 1.0;
+                break;
+            }
+            best = best.max(token_similarity(token, other));
+        }
+        sum += best;
+    }
+    for token in &right {
+        let mut best = 0.0f32;
+        for other in &left {
+            if token == other {
+                exact = true;
+                best = 1.0;
+                break;
+            }
+            best = best.max(token_similarity(token, other));
+        }
+        sum += best;
+    }
+    let mean = sum / (left.len() + right.len()) as f32;
+    if exact {
+        mean.max(0.85)
+    } else {
+        mean
+    }
+}
+
+/// Wie `multi_token_score`, aber exakte Token aus der Ignore-Menge heben
+/// nicht auf 0,85 (Wert 1,0 für identische Token bleibt — nur der Boden
+/// entfällt, damit „Anna Maria" vs. „Maria Magdalena" über geteiltes
+/// „Maria" allein nicht bestehen).
+fn multi_token_score_common(first: &str, second: &str, ignore: &HashSet<String>) -> f32 {
+    let left = name_tokens(first);
+    let right = name_tokens(second);
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let mut exact = false;
+    let mut sum = 0.0f32;
+    for token in &left {
+        let mut best = 0.0f32;
+        for other in &right {
+            if token == other {
+                if !ignore.contains(token) {
+                    exact = true;
+                }
+                best = 1.0;
+                break;
+            }
+            best = best.max(token_similarity(token, other));
+        }
+        sum += best;
+    }
+    for token in &right {
+        let mut best = 0.0f32;
+        for other in &left {
+            if token == other {
+                if !ignore.contains(token) {
+                    exact = true;
+                }
+                best = 1.0;
+                break;
+            }
+            best = best.max(token_similarity(token, other));
+        }
+        sum += best;
+    }
+    let mean = sum / (left.len() + right.len()) as f32;
+    if exact {
+        mean.max(0.85)
+    } else {
+        mean
+    }
+}
+
+/// Vornamens-Deckung 0–1 (Toleranz für Tippfehler und Mehrfachnamen).
+fn name_similarity(first: &str, second: &str) -> f32 {
+    multi_token_score(first, second)
+}
+
+/// Vornamens-Deckung mit Ignore-Menge: darin enthaltene Token (häufige Namen
+/// der beteiligten Familien, siehe `common_given_tokens`) geben weder den
+/// Exakt-Boost noch einen 1-von-2-Treffer — die reine Zeichen-Deckung zählt
+/// weiter, damit identische Namen (Mittel 1,0) bestehen bleiben.
+fn name_similarity_common(first: &str, second: &str, ignore: &HashSet<String>) -> f32 {
+    multi_token_score_common(first, second, ignore)
 }
 
 /// Geburtsdaten verträglich: Nur wenn BEIDE eins haben, müssen sie gleich
@@ -1312,8 +1941,17 @@ fn birth_compatible(first: &str, second: &str) -> bool {
 /// Verwandtschafts-Deckung 0–1: Anteil der Verwandten (Eltern, Kinder,
 /// Partner) von `first`, zu denen `second` einen ähnlichen Verwandten hat
 /// (Vornamens-Deckung ≥ Schwelle, Geburtsdaten verträglich). Ohne Verwandte
-/// auf beiden Seiten 0,0 (dann muss der Vorname exakt gleichen).
-fn kin_similarity(data: &TreeData, first: &Person, second: &Person, threshold: f32) -> f32 {
+/// auf beiden Seiten 0,0 (dann muss der Vorname exakt gleichen). Mit
+/// `use_ids` (gleicher Datenbestand, z. B. Projekt-Duplikate) zählen
+/// identische Verwandten-IDs stark mit (70 %) neben der Namensdeckung (30 %);
+/// beim Import spielen IDs keine Rolle (getrennte Bestände).
+fn kin_similarity(
+    data: &TreeData,
+    first: &Person,
+    second: &Person,
+    threshold: f32,
+    use_ids: bool,
+) -> f32 {
     let relatives = |person: &Person| {
         let mut ids: Vec<&str> = data
             .parents_of(&person.id)
@@ -1345,7 +1983,13 @@ fn kin_similarity(data: &TreeData, first: &Person, second: &Person, threshold: f
             })
         })
         .count() as f32;
-    2.0 * similar / (left.len() + right.len()) as f32
+    let by_name = 2.0 * similar / (left.len() + right.len()) as f32;
+    if !use_ids {
+        return by_name;
+    }
+    let common = left.iter().filter(|id| right.contains(id)).count() as f32;
+    let by_id = 2.0 * common / (left.len() + right.len()) as f32;
+    0.7 * by_id + 0.3 * by_name
 }
 
 pub fn person(
@@ -1662,12 +2306,34 @@ mod tests {
 
     #[test]
     fn merge_match_scores_partial_names() {
-        assert!((name_similarity("Johann Christoph", "Johann Christoph Friedrich") - 0.8).abs() < 1e-6);
-        assert_eq!(name_similarity("Hans", "Peter"), 0.0);
+        // 2 von 3 Token exakt → hoch (exakt-Boost).
+        assert!(name_similarity("Johann Christoph", "Johann Christoph Friedrich") >= 0.85);
+        assert!(name_similarity("Hans", "Peter") < 0.5);
         assert_eq!(name_similarity("", "Peter"), 0.0);
         assert!(birth_compatible("1900", ""));
         assert!(birth_compatible("10.04.1957", "10.04.1957"));
         assert!(!birth_compatible("1900", "1901"));
+    }
+
+    #[test]
+    fn name_scores_tolerate_typos_and_partial_names() {
+        // Schreibfehler (Hermine/Hermiene, Distanz 1) zählt mit.
+        assert!(token_similarity("hermine", "hermiene") >= 0.8);
+        assert_eq!(token_similarity("hans", "hans"), 1.0);
+        assert_eq!(token_similarity("", "hans"), 0.0);
+        // 1 von 2 Vornamen exakt → mindestens 0,85.
+        assert!(name_similarity("Anna Maria", "Anna") >= 0.85);
+        assert!(name_similarity("Anna", "Anna Maria") >= 0.85);
+        // Doppelnachname teils gleich → mindestens 0,85.
+        assert!(multi_token_score("Meier Schulze", "Schulze") >= 0.85);
+        assert!(multi_token_score("Meier", "Mayer") > 0.5);
+        assert!(shares_exact_token_common("Anna Maria", "Maria", &HashSet::new()));
+        assert!(!shares_exact_token_common("Anna", "Peter", &HashSet::new()));
+        // Ignoriertes Token (häufiger Familienname) löst keinen Treffer aus.
+        let ignore: HashSet<String> = ["maria".to_string()].into_iter().collect();
+        assert!(!shares_exact_token_common("Anna Maria", "Maria Magdalena", &ignore));
+        assert!(multi_token_score_common("Anna Maria", "Maria Magdalena", &ignore) < 0.8);
+        assert!(multi_token_score("Anna Maria", "Maria Magdalena") >= 0.85);
     }
 
     fn merge_tree() -> TreeData {
@@ -1704,10 +2370,53 @@ mod tests {
         let fresh = data.append_import(imported);
         assert_eq!(fresh.len(), 2);
         let fresh_set: HashSet<String> = fresh.into_iter().collect();
-        let candidates = data.find_merge_candidates(&fresh_set, 0.8);
-        assert_eq!(candidates.len(), 2);
-        assert!(candidates.iter().all(|c| c.kin_score >= 0.8));
+        let candidates = data.find_merge_candidates(&fresh_set, 0.8, 2);
+        // p1↔x1 (exakt). c1↔x2 (Geburt + Verwandtschaft); c1↔x1 entfällt:
+        // „Johann" ist bei den Baukes doppelt belegt (p1, c1) und trägt allein
+        // keinen 1-von-2-Treffer mehr.
+        assert!(candidates.iter().any(|c| c.keep_id == "p1"));
+        assert_eq!(candidates.iter().filter(|c| c.keep_id == "c1").count(), 1);
+        assert!(candidates.iter().any(|c| c.keep_id == "c1" && c.kin_score >= 0.8));
         assert!(candidates.iter().any(|c| c.birth_match));
+    }
+
+    #[test]
+    fn common_given_names_skip_exact_boost_in_family() {
+        // Familie mit vielen Marias: geteiltes „Maria" allein trägt keinen
+        // Match — weder m1↔m2 noch m2↔m3; identische volle Vornamen schon.
+        let data = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("m1", "Anna Maria", "Richter", "", Gender::Female),
+                person("m2", "Maria Magdalena", "Richter", "", Gender::Female),
+                person("m3", "Maria Elisabeth", "Richter", "", Gender::Female),
+                person("h1", "Hans Georg", "Richter", "", Gender::Male),
+                person("h2", "Hans Georg", "Richter", "", Gender::Male),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        let dups = data.find_project_duplicates(0.8, 2);
+        let pair = |a: &str, b: &str| {
+            dups.iter().any(|c| {
+                (c.keep_id == a && c.drop_id == b) || (c.keep_id == b && c.drop_id == a)
+            })
+        };
+        assert!(!pair("m1", "m2"));
+        assert!(!pair("m2", "m3"));
+        assert!(!pair("m1", "m3"));
+        assert!(pair("h1", "h2"));
+        // Schwelle 4 bei nur 3 Marias: „Maria" zählt wieder → Paare da.
+        let dups4 = data.find_project_duplicates(0.8, 4);
+        let pair4 = |a: &str, b: &str| {
+            dups4.iter().any(|c| {
+                (c.keep_id == a && c.drop_id == b) || (c.keep_id == b && c.drop_id == a)
+            })
+        };
+        assert!(pair4("m1", "m2"));
+        assert!(pair4("h1", "h2"));
     }
 
     #[test]
@@ -1728,7 +2437,345 @@ mod tests {
         let fresh = data.append_import(imported);
         let fresh_set: HashSet<String> = fresh.into_iter().collect();
         // x1 scheitert am Geburtsdatum, x9 am Vornamen.
-        assert!(data.find_merge_candidates(&fresh_set, 0.8).is_empty());
+        assert!(data.find_merge_candidates(&fresh_set, 0.8, 2).is_empty());
+    }
+
+    #[test]
+    fn family_name_below_half_blocks_auto_match() {
+        let mut data = merge_tree();
+        let mut imported = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                // Gleicher Vorname + Geburt wie p1, aber fremder Nachname.
+                person("x1", "Johann", "Wendt", "1900", Gender::Male),
+                // Gleicher Vorname + Geburt wie c1, Nachname einseitig leer.
+                person("x2", "Johann", "", "1925", Gender::Male),
+                // Kontrolle: passender Nachname → Treffer auf p1.
+                person("x3", "Johann", "Bauke", "1900", Gender::Male),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        let fresh = data.append_import(imported);
+        let fresh_set: HashSet<String> = fresh.into_iter().collect();
+        let candidates = data.find_merge_candidates(&fresh_set, 0.8, 2);
+        // Frisch-IDs werden remappt (m…) — Treffer über die Drop-Daten erkennen.
+        let drop_of = |c: &MergeCandidate| data.find(&c.drop_id);
+        // Fremder Nachname (0 %) → kein Match.
+        assert!(candidates.iter().all(|c| {
+            drop_of(c).map(|p| p.family_name.as_str()) != Some("Wendt")
+        }));
+        // Einseitig fehlender Nachname + passender Rest → trotzdem keins.
+        assert!(candidates.iter().all(|c| {
+            let person = drop_of(c);
+            !(person.map(|p| p.given_name.as_str()) == Some("Johann")
+                && person.map(|p| p.birth.as_str()) == Some("1925")
+                && person.map(|p| p.family_name.as_str()) == Some(""))
+        }));
+        // Kontrolle: passender Nachname → Treffer auf p1.
+        assert!(candidates.iter().any(|c| c.keep_id == "p1"
+            && drop_of(c).map(|p| (
+                p.given_name.as_str(),
+                p.family_name.as_str(),
+                p.birth.as_str()
+            )) == Some(("Johann", "Bauke", "1900"))));
+    }
+
+    #[test]
+    fn manual_match_accepts_explicit_pair_and_rejects_sides() {
+        let mut data = merge_tree();
+        let imported = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![person("x1", "Johann", "Bauke", "1901", Gender::Male)],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        let fresh_set: HashSet<String> = data.append_import(imported).into_iter().collect();
+        assert_eq!(fresh_set.len(), 1);
+        let drop = fresh_set.iter().next().unwrap().clone();
+        // Gültig: Bestand (p1) gegen Neu — trotz abweichender Geburt, an der
+        // die Automatik scheitern würde.
+        let candidate = data.manual_match_candidate("p1", &drop, &fresh_set, 2).unwrap();
+        assert_eq!(candidate.keep_id, "p1");
+        assert_eq!(candidate.drop_id, drop);
+        // Seiten vertauscht, identisch, beidseitig Bestand oder unbekannt.
+        assert!(data.manual_match_candidate(&drop, "p1", &fresh_set, 2).is_none());
+        assert!(data.manual_match_candidate("p1", "p1", &fresh_set, 2).is_none());
+        assert!(data.manual_match_candidate("p1", "c1", &fresh_set, 2).is_none());
+        assert!(data.manual_match_candidate("nobody", &drop, &fresh_set, 2).is_none());
+        assert!(data.manual_match_candidate("p1", "nobody", &fresh_set, 2).is_none());
+    }
+
+    fn quick(
+        given: &str,
+        family: &str,
+        birth: &str,
+        death: &str,
+        gender: Gender,
+    ) -> QuickPerson {
+        QuickPerson {
+            given: given.into(),
+            family: family.into(),
+            birth: birth.into(),
+            death: death.into(),
+            gender,
+            bind: None,
+        }
+    }
+
+    #[test]
+    fn quick_commit_links_partner_and_children_down() {
+        let mut data = merge_tree();
+        data.people.push(person("r", "Ref", "Er", "", Gender::Female));
+        let blocks = vec![(
+            QuickDir::Down,
+            Some(quick("Pam", "Er", "1970", "", Gender::Male)),
+            vec![
+                quick("Kid", "Er", "2000", "", Gender::Unknown),
+                quick("", "", "", "", Gender::Unknown),
+            ],
+        )];
+        let created = data.commit_quick_blocks(Some("r"), blocks);
+        assert_eq!(created.len(), 2);
+        let partner = &created[0];
+        let child = &created[1];
+        assert!(data.partners_of("r").iter().any(|p| &p.id == partner));
+        let parents: Vec<String> = data
+            .parents_of(child)
+            .iter()
+            .map(|parent| parent.id.clone())
+            .collect();
+        assert!(parents.contains(&"r".to_string()));
+        assert!(parents.contains(partner));
+        assert_eq!(data.find(child).unwrap().birth, "2000");
+    }
+
+    #[test]
+    fn quick_commit_up_links_parents_to_reference_without_child() {
+        let mut data = merge_tree();
+        data.people.push(person("r", "Ref", "Er", "", Gender::Female));
+        // Mit Kind: klassisch (Kind zuerst angelegt, dann die Eltern).
+        let blocks = vec![(
+            QuickDir::Up,
+            Some(quick("Kid", "Er", "2000", "", Gender::Unknown)),
+            vec![
+                quick("Vater", "Er", "", "", Gender::Male),
+                quick("Mutter", "Er", "", "", Gender::Female),
+                quick("", "", "", "", Gender::Unknown),
+            ],
+        )];
+        let created = data.commit_quick_blocks(None, blocks);
+        assert_eq!(created.len(), 3);
+        let child = data
+            .find(&created[0])
+            .expect("Kind zuerst angelegt");
+        assert_eq!(child.given_name, "Kid");
+        let parents: Vec<String> = data
+            .parents_of(&child.id)
+            .iter()
+            .map(|parent| parent.id.clone())
+            .collect();
+        assert_eq!(parents.len(), 2);
+        assert_eq!(parents, created[1..].to_vec());
+        // Ohne Kind: Eltern direkt an die Referenz (Aufwärts-Erfassung ohne
+        // Kind-Zeile — die Referenz ist das Kind).
+        let linked = data.commit_quick_blocks(
+            Some("r"),
+            vec![(
+                QuickDir::Up,
+                None,
+                vec![
+                    quick("Vater", "Er", "", "", Gender::Male),
+                    quick("Mutter", "Er", "", "", Gender::Female),
+                ],
+            )],
+        );
+        assert_eq!(linked.len(), 2);
+        let ref_parents: Vec<String> = data
+            .parents_of("r")
+            .iter()
+            .map(|parent| parent.id.clone())
+            .collect();
+        assert_eq!(ref_parents, linked);
+        // Ohne Kind und ohne Referenz: Block übersprungen.
+        let skipped = data.commit_quick_blocks(
+            None,
+            vec![(
+                QuickDir::Up,
+                Some(quick("", "", "", "", Gender::Unknown)),
+                vec![quick("Vater", "Er", "", "", Gender::Male)],
+            )],
+        );
+        assert!(skipped.is_empty());
+        // Ohne Referenzperson passiert bei Abwärts nichts.
+        assert!(data.commit_quick_blocks(None, vec![]).is_empty());
+        assert!(data
+            .commit_quick_blocks(
+                Some("weg"),
+                vec![(QuickDir::Down, Some(quick("X", "Y", "", "", Gender::Male)), vec![])]
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn quick_commit_skips_fully_empty_blocks() {
+        let mut data = merge_tree();
+        data.people.push(person("r", "Ref", "Er", "", Gender::Female));
+        let before = data.people.len();
+        // Komplett leere Blöcke (abwärts wie aufwärts) erzeugen keine Person.
+        let created = data.commit_quick_blocks(
+            Some("r"),
+            vec![
+                (
+                    QuickDir::Down,
+                    Some(quick("", "", "", "", Gender::Unknown)),
+                    vec![quick("", "", "", "", Gender::Unknown)],
+                ),
+                (
+                    QuickDir::Up,
+                    None,
+                    vec![quick("", "", "", "", Gender::Unknown)],
+                ),
+            ],
+        );
+        assert!(created.is_empty());
+        assert_eq!(data.people.len(), before);
+        // Auch nur-Datum ohne Namen bleibt ohne Person (namenlos sinnlos).
+        let dated = data.commit_quick_blocks(
+            Some("r"),
+            vec![(
+                QuickDir::Down,
+                None,
+                vec![quick("", "", "1900", "", Gender::Male)],
+            )],
+        );
+        assert!(dated.is_empty());
+        assert_eq!(data.people.len(), before);
+    }
+
+    #[test]
+    fn quick_commit_skips_stale_bind_without_duplicate() {
+        let mut data = merge_tree();
+        data.people.push(person("r", "Ref", "Er", "", Gender::Female));
+        let before = data.people.len();
+        // Gesetzte, aber inzwischen verschwundene Person: überspringen statt
+        // unbemerkt ein Duplikat anzulegen (das käme sonst auf die Queue).
+        let mut ghost = quick("Ghost", "Er", "1900", "", Gender::Male);
+        ghost.bind = Some("weg".into());
+        let created = data.commit_quick_blocks(
+            Some("r"),
+            vec![(QuickDir::Down, Some(ghost), vec![])],
+        );
+        assert!(created.is_empty());
+        assert_eq!(data.people.len(), before);
+        assert!(data.partners_of("r").is_empty());
+    }
+
+    #[test]
+    fn gender_for_given_name_uses_clear_majority() {
+        let mut data = merge_tree();
+        // Johann: 2× M aus der Fixture + 1× M + 1× F dazu = 3:1 → Male.
+        data.people.push(person("m1", "Johann", "X", "", Gender::Male));
+        data.people.push(person("f1", "Johann", "X", "", Gender::Female));
+        assert_eq!(data.gender_for_given_name("Johann"), Some(Gender::Male));
+        assert_eq!(data.gender_for_given_name("JOHANN"), Some(Gender::Male));
+        // Wilma: 2× F → Female.
+        data.people.push(person("w1", "Wilma", "X", "", Gender::Female));
+        data.people.push(person("w2", "Wilma Wagner", "X", "", Gender::Female));
+        assert_eq!(data.gender_for_given_name("Wilma"), Some(Gender::Female));
+        // Alex: 1:1 → Gleichstand → None.
+        data.people.push(person("a1", "Alex", "X", "", Gender::Male));
+        data.people.push(person("a2", "Alex", "X", "", Gender::Female));
+        assert_eq!(data.gender_for_given_name("Alex"), None);
+        // Nur Unbekannt belegt → None; Unbekannt leer → None.
+        data.people.push(person("u1", "Kaspar", "X", "", Gender::Unknown));
+        assert_eq!(data.gender_for_given_name("Kaspar"), None);
+        assert_eq!(data.gender_for_given_name("Niemand"), None);
+        assert_eq!(data.gender_for_given_name(""), None);
+        assert_eq!(data.gender_for_given_name("   "), None);
+        // Zweitnamen zählen mit: „Johann Hartmut" (M) stimmt für „Hartmut".
+        data.people.push(person("h1", "Johann Hartmut", "X", "", Gender::Male));
+        data.people.push(person("h2", "Hartmut", "X", "", Gender::Male));
+        assert_eq!(data.gender_for_given_name("Hartmut"), Some(Gender::Male));
+        assert_eq!(data.gender_for_given_name("Hartmut Hans"), Some(Gender::Male));
+    }
+
+    #[test]
+    fn birth_year_extracts_last_four_digit_group() {
+        assert_eq!(birth_year("12.03.1901"), "1901");
+        assert_eq!(birth_year("1901"), "1901");
+        assert_eq!(birth_year("um 1870"), "1870");
+        assert_eq!(birth_year("1901-1905"), "1905");
+        assert_eq!(birth_year("03.1901"), "1901");
+        assert_eq!(birth_year(""), "");
+        assert_eq!(birth_year("unbekannt"), "");
+        assert_eq!(birth_year("12.03.99"), "");
+    }
+
+    #[test]
+    fn quick_commit_reuses_bound_person() {
+        let mut data = merge_tree();
+        data.people.push(person("r", "Ref", "Er", "", Gender::Female));
+        let before = data.people.len();
+        let mut partner = quick("Pam", "Er", "1970", "", Gender::Male);
+        partner.bind = Some("p1".into());
+        let blocks = vec![(
+            QuickDir::Down,
+            Some(partner),
+            vec![quick("Kid", "Er", "2000", "", Gender::Unknown)],
+        )];
+        let created = data.commit_quick_blocks(Some("r"), blocks);
+        // Nur das Kind neu, der Partner (p1) wiederverwendet + verknüpft.
+        assert_eq!(created.len(), 1);
+        assert_eq!(data.people.len(), before + 1);
+        assert!(data.partners_of("r").iter().any(|p| p.id == "p1"));
+        assert!(data
+            .parents_of(&created[0])
+            .iter()
+            .any(|parent| parent.id == "p1"));
+    }
+
+    #[test]
+    fn project_duplicates_use_relative_ids() {
+        let mut data = TreeData {
+            project: ProjectMetadata::default(),
+            people: vec![
+                person("p1", "Johann", "Bauke", "1900", Gender::Male),
+                person("p2", "Johann", "Bauke", "1900", Gender::Male),
+                person("f", "Vater", "Bauke", "1870", Gender::Male),
+                person("s", "Johann", "Bauke", "1925", Gender::Male),
+                person("s2", "Johann", "Bauke", "1900", Gender::Male),
+                person("x", "Peter", "Fremd", "1900", Gender::Male),
+            ],
+            families: Vec::new(),
+            child_relations: HashMap::new(),
+            partner_relations: HashMap::new(),
+            partner_order: HashMap::new(),
+        };
+        // p1 und p2 teilen sich Vater f (gleiche IDs) → Treffer.
+        data.link_child("f", "p1");
+        data.link_child("f", "p2");
+        data.link_child("p1", "s");
+        data.link_child("p1", "s2");
+        let hits = data.find_project_duplicates(0.8, 2);
+        let pair = |a: &str, b: &str| {
+            hits.iter().any(|hit| {
+                (hit.keep_id == a && hit.drop_id == b) || (hit.keep_id == b && hit.drop_id == a)
+            })
+        };
+        // Echte Dublette drin, eigenes Kind (p1/s2) trotz gleichen Jahrs draußen.
+        // Onkel/Neffe (p2/s2, gleicher Name + Jahr) bleibt Prüf-Treffer.
+        assert!(pair("p1", "p2"));
+        assert!(!pair("p1", "s2"));
+        assert!(pair("p2", "s2"));
+        assert_eq!(hits[0].family_score, 1.0);
+        // Namensvetter mit anderer Geburt (Vater/Sohn-Falle) und Fremde fallen raus.
+        assert!(hits.iter().all(|hit| hit.drop_id != "s" && hit.keep_id != "s"));
+        assert!(hits.iter().all(|hit| hit.drop_id != "x" && hit.keep_id != "x"));
     }
 
     #[test]
@@ -1781,6 +2828,24 @@ mod tests {
             .collect();
         assert_eq!(parents, vec!["p1"]);
         assert!(data.families.iter().all(|f| f.parent_a != f.parent_b));
+    }
+
+    #[test]
+    fn merge_choice_respects_birth_and_death_side() {
+        let mut data = merge_tree();
+        let mut extra = person("m9", "Johann", "", "", Gender::Unknown);
+        extra.birth = "1901".into();
+        extra.birth_place = "Neuort".into();
+        extra.death = "1970".into();
+        data.people.push(extra);
+        // Neues Todesdatum übernehmen, altes Geburtsdatum behalten
+        // (der leere Geburtsort wird als Lücke aus der neuen Person gefüllt).
+        data.apply_merge_choice("p1", "m9", false, true);
+        let kept = data.find("p1").unwrap();
+        assert_eq!(kept.birth, "1900");
+        assert_eq!(kept.birth_place, "Neuort");
+        assert_eq!(kept.death, "1970");
+        assert!(data.find("m9").is_none());
     }
 
     #[test]

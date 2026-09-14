@@ -20,8 +20,23 @@ pub struct AppSettings {
     pub tree_load_step: usize,
     /// Treffer-Schwelle für den Duplikat-Abgleich beim Anhängen (0–100 %).
     pub match_threshold: f32,
+    /// Zoom-Faktor fürs Umschalten auf die Ganzfoto-Ansicht bei Personen
+    /// MIT Foto (darunter Ganzfoto, darüber Avatar+Text).
+    #[serde(default = "default_full_zoom")]
+    pub photo_full_zoom: f32,
+    /// Dasselbe für Personen OHNE Foto (Initialen-Großansicht).
+    #[serde(default = "default_full_zoom")]
+    pub initials_full_zoom: f32,
+    /// Häufige Vornamen ab so vielen Gleichnamigen je Nachnamengruppe geben
+    /// keinen Exakt-Boost (einstellbar im Prüfdialog, 2–10, Default 4).
+    #[serde(default = "default_common_given_threshold")]
+    pub common_given_threshold: usize,
     pub group_by_count: bool,
     pub layout_gap: f32,
+    /// Extra-Abstand zwischen Nachbarkarten ohne Partner-Verbindung im
+    /// Vorfahrenbaum (0 = kein Extra, nur Baum-Abstand).
+    #[serde(default = "default_non_partner_gap")]
+    pub non_partner_gap: f32,
     pub card_layout: CardLayout,
     pub compact_card_width: f32,
     pub portrait_card_width: f32,
@@ -40,6 +55,18 @@ pub struct AppSettings {
     pub window_maximized: Option<bool>,
 }
 
+fn default_common_given_threshold() -> usize {
+    4
+}
+
+fn default_full_zoom() -> f32 {
+    0.8
+}
+
+fn default_non_partner_gap() -> f32 {
+    crate::ui::tree::UNMARRIED_GAP_EXTRA
+}
+
 fn default_birth_symbol() -> String {
     "ᛉ".into()
 }
@@ -56,8 +83,12 @@ impl Default for AppSettings {
             tree_initial_person_limit: 60,
             tree_load_step: 60,
             match_threshold: 80.0,
+            photo_full_zoom: default_full_zoom(),
+            initials_full_zoom: default_full_zoom(),
+            common_given_threshold: default_common_given_threshold(),
             group_by_count: true,
             layout_gap: 48.0,
+            non_partner_gap: crate::ui::tree::UNMARRIED_GAP_EXTRA,
             card_layout: CardLayout::Compact,
             compact_card_width: 215.0,
             portrait_card_width: 160.0,

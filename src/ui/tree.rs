@@ -30,17 +30,22 @@ use crate::media::{cover_uv_to, initials, photo_card_texture, round_avatar_textu
 use crate::model::{Person, TreeData};
 use crate::ui::CardLayout;
 
-const CARD_DETAIL_MIN_ZOOM: f32 = 0.8;
-
 /// Fester Mindestabstand zwischen Karten. Der einstellbare Baum-Abstand ist
 /// der Default (Zielabstand) der automatischen Platzierung; darunter dürfen
 /// Karten nie rücken, damit sie sich nicht berühren.
 const MIN_CARD_GAP: f32 = 16.0;
 
+/// Standardwert für den Extra-Abstand zwischen Nachbarkarten ohne
+/// Partner-Verbindung (keine gemeinsame Familie als Eltern — Paare mit
+/// gemeinsamen Kindern bleiben kompakt). Einstellbar: `non_partner_gap`,
+/// 0 = kein Extra.
+pub(crate) const UNMARRIED_GAP_EXTRA: f32 = 30.0;
+
 /// Für einen Layoutdurchlauf vorbereitete Beziehungen. Das vermeidet, dass
 /// `children_of`/`parents_of`/`partners_of` in jedem Kollisionspass erneut
-/// alle Familien und Personen linear durchsuchen.
-struct TreeRelations<'a> {
+/// alle Familien und Personen linear durchsuchen. Auch für Detailansichten
+/// (z. B. Schnellerfassung) wiederverwendet.
+pub(crate) struct TreeRelations<'a> {
     people: HashMap<&'a str, &'a Person>,
     children: HashMap<&'a str, Vec<&'a Person>>,
     parents: HashMap<&'a str, Vec<&'a Person>>,
@@ -49,7 +54,7 @@ struct TreeRelations<'a> {
 }
 
 impl<'a> TreeRelations<'a> {
-    fn new(data: &'a TreeData) -> Self {
+    pub(crate) fn new(data: &'a TreeData) -> Self {
         let people: HashMap<&str, &Person> = data
             .people
             .iter()
@@ -133,15 +138,15 @@ impl<'a> TreeRelations<'a> {
         self.people.get(id).copied()
     }
 
-    fn children_of(&self, id: &str) -> &[&'a Person] {
+    pub(crate) fn children_of(&self, id: &str) -> &[&'a Person] {
         self.children.get(id).map(Vec::as_slice).unwrap_or_default()
     }
 
-    fn parents_of(&self, id: &str) -> &[&'a Person] {
+    pub(crate) fn parents_of(&self, id: &str) -> &[&'a Person] {
         self.parents.get(id).map(Vec::as_slice).unwrap_or_default()
     }
 
-    fn partners_of(&self, id: &str) -> &[&'a Person] {
+    pub(crate) fn partners_of(&self, id: &str) -> &[&'a Person] {
         self.partners.get(id).map(Vec::as_slice).unwrap_or_default()
     }
 
@@ -257,10 +262,13 @@ pub enum RelationKind {
 
 /// Klick-Aktion einer Baumkarte; Auswertung in `ui::MiniGramps::update`.
 pub enum TreeAction {
-    /// Person zur Ansicht/Bearbeitung öffnen (normaler Klick).
+    /// Person zur Ansicht/Bearbeitung öffnen (normaler Klick, löst Mehrfachauswahl auf).
     View(String),
     /// Als Referenzperson setzen (Shift+Klick, Doppelklick, langer Touch).
     Reference(String),
+    /// Mehrfachauswahl umschalten (Strg+Klick): zuletzt Hinzugefügte bleibt
+    /// aktive Auswahl (grün gefüllt, links angezeigt), Rest grün umrandet.
+    ToggleMulti(String),
     /// Weitere Generationen an diesem Knoten aus-/einklappen.
     ToggleExpand(String),
     /// Partner-Pseudokarten per Shift+Ziehen tauschen (nur freie Partner;
@@ -338,49 +346,6 @@ fn fit_descendant_block_starts(blocks: &[DescendantBlock<'_>], gap: f32) -> Vec<
     starts
 }
 
-fn complete_missing_spread_positions<'a>(
-    spread: &mut HashMap<&'a str, f32>,
-    rows: &[Vec<&'a str>],
-    widths: &HashMap<&'a str, f32>,
-    gap: f32,
-) -> Vec<&'a str> {
-    let mut completed = Vec::new();
-    for ids in rows {
-        let missing: Vec<&str> = ids
-            .iter()
-            .copied()
-            .filter(|id| !spread.contains_key(id))
-            .collect();
-        if missing.is_empty() {
-            continue;
-        }
-
-        let existing_right = ids
-            .iter()
-            .filter_map(|id| {
-                spread
-                    .get(id)
-                    .map(|center| center + widths.get(id).copied().unwrap_or(215.0) / 2.0)
-            })
-            .reduce(f32::max);
-        let mut cursor = existing_right.map(|right| right + gap).unwrap_or_else(|| {
-            let total = missing
-                .iter()
-                .map(|id| widths.get(id).copied().unwrap_or(215.0))
-                .sum::<f32>()
-                + gap * missing.len().saturating_sub(1) as f32;
-            -total / 2.0
-        });
-        for id in missing {
-            let width = widths.get(id).copied().unwrap_or(215.0);
-            spread.insert(id, cursor + width / 2.0);
-            cursor += width + gap;
-            completed.push(id);
-        }
-    }
-    completed
-}
-
 #[cfg(test)]
 mod descendant_layout_tests {
     use std::collections::{HashMap, HashSet};
@@ -388,8 +353,7 @@ mod descendant_layout_tests {
     use crate::model::{Family, Gender, TreeData, person};
 
     use super::{
-        DescendantBlock, TreeRelations, collect_visible_levels,
-        complete_missing_spread_positions, fit_descendant_block_starts,
+        DescendantBlock, TreeRelations, collect_visible_levels, fit_descendant_block_starts,
         tidy_descendant_spread_vertical,
     };
 
@@ -461,19 +425,6 @@ mod descendant_layout_tests {
         let starts = fit_descendant_block_starts(&blocks, 16.0);
 
         assert_eq!(starts[1] - (starts[0] + 100.0), 40.0);
-    }
-
-    #[test]
-    fn completes_every_visible_row_position() {
-        let rows = vec![vec!["root"], vec!["left", "extra"]];
-        let widths = HashMap::from([("root", 100.0), ("left", 80.0), ("extra", 120.0)]);
-        let mut spread = HashMap::from([("root", 0.0), ("left", -20.0)]);
-
-        let completed = complete_missing_spread_positions(&mut spread, &rows, &widths, 16.0);
-
-        assert_eq!(completed, vec!["extra"]);
-        assert_eq!(spread["extra"], 96.0);
-        assert!(rows.iter().flatten().all(|id| spread.contains_key(id)));
     }
 
     #[test]
@@ -670,6 +621,495 @@ mod descendant_layout_tests {
         );
         let repeat = tidy_positions(&data, &rows, &levels, &widths, &group_of);
         assert_eq!(spread, repeat);
+    }
+}
+
+#[cfg(test)]
+mod ancestor_layout_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use crate::model::{Family, Gender, TreeData, person};
+
+    use super::{
+        TreeRelations, ancestor_drag_offsets, block_ancestor_occ_drag, collect_ancestor_occs,
+        layout_ancestor_occs, occ_neighbor_gap, persons_are_partners, UNMARRIED_GAP_EXTRA,
+    };
+
+    fn ancestor_tree() -> TreeData {
+        let mut data = TreeData::default();
+        data.people.push(person("r", "R", "Root", "", Gender::Unknown));
+        data.people.push(person("f", "F", "Vater", "", Gender::Male));
+        data.people.push(person("m", "M", "Mutter", "", Gender::Female));
+        data.people.push(person("gf", "G", "Grossvater", "", Gender::Male));
+        data.people.push(person("gm", "G", "Grossmutter", "", Gender::Female));
+        data.families.push(Family {
+            id: "f0".into(),
+            parent_a: Some("f".into()),
+            parent_b: Some("m".into()),
+            children: vec!["r".into()],
+        });
+        data.families.push(Family {
+            id: "f1".into(),
+            parent_a: Some("gf".into()),
+            parent_b: Some("gm".into()),
+            children: vec!["f".into()],
+        });
+        data
+    }
+
+    fn ancestor_layout(data: &TreeData) -> (Vec<(String, String)>, HashMap<String, f32>) {
+        let relations = TreeRelations::new(data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        let occ_index: HashMap<&str, usize> = occs
+            .iter()
+            .enumerate()
+            .map(|(index, occ)| (occ.occ_id.as_str(), index))
+            .collect();
+        let widths: HashMap<&str, f32> = [
+            ("r", 215.0),
+            ("f", 215.0),
+            ("m", 215.0),
+            ("gf", 215.0),
+            ("gm", 215.0),
+        ]
+        .into_iter()
+        .collect();
+        let root_occ = occs[0].occ_id.clone();
+        let spread =
+            layout_ancestor_occs(&root_occ, &occs, &occ_index, &relations, data, &widths, 48.0, UNMARRIED_GAP_EXTRA);
+        let pairs: Vec<(String, String)> = occs
+            .iter()
+            .map(|occ| (occ.person.id.clone(), occ.occ_id.clone()))
+            .collect();
+        (pairs, spread)
+    }
+
+    fn occ_center(
+        pairs: &[(String, String)],
+        spread: &HashMap<String, f32>,
+        person: &str,
+    ) -> f32 {
+        let (_, occ_id) = pairs.iter().find(|(id, _)| id == person).unwrap();
+        spread[occ_id]
+    }
+
+    #[test]
+    fn children_stay_centered_between_ancestors() {
+        let data = ancestor_tree();
+        let (pairs, spread) = ancestor_layout(&data);
+        // Wurzel in der Mitte, Eltern symmetrisch darum.
+        let (_, root_occ) = &pairs[0];
+        assert_eq!(spread[root_occ], 0.0);
+        let father = occ_center(&pairs, &spread, "f");
+        let mother = occ_center(&pairs, &spread, "m");
+        assert!((father + mother).abs() < 1e-3);
+        assert!(father < 0.0 && mother > 0.0);
+        // Großeltern symmetrisch um den Vater.
+        let gf = occ_center(&pairs, &spread, "gf");
+        let gm = occ_center(&pairs, &spread, "gm");
+        assert!(((gf + gm) / 2.0 - father).abs() < 1.0);
+    }
+
+    fn drag_offsets(data: &TreeData, manual: &[(&str, f32)]) -> HashMap<String, f32> {
+        let relations = TreeRelations::new(data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        let manual_offsets: HashMap<String, f32> = manual
+            .iter()
+            .map(|(id, val)| ((*id).to_string(), *val))
+            .collect();
+        let eff = ancestor_drag_offsets(&occs, &manual_offsets);
+        occs.iter()
+            .map(|occ| (occ.person.id.clone(), eff.get(&occ.occ_id).copied().unwrap_or(0.0)))
+            .collect()
+    }
+
+    #[test]
+    fn dragged_father_halves_to_child_and_keeps_partner() {
+        let data = ancestor_tree();
+        let eff = drag_offsets(&data, &[("f", 100.0)]);
+        // Gezogener Vater voll, Mutter (Partnerin) bleibt stehen, Kind mittig.
+        assert_eq!(eff["f"], 100.0);
+        assert_eq!(eff["m"], 0.0);
+        assert_eq!(eff["r"], 50.0);
+        // Vorfahren des gezogenen Vaters folgen starr.
+        assert_eq!(eff["gf"], 100.0);
+        assert_eq!(eff["gm"], 100.0);
+    }
+
+    #[test]
+    fn dragged_root_moves_ancestors_along() {
+        let data = ancestor_tree();
+        let eff = drag_offsets(&data, &[("r", 80.0)]);
+        for person in ["r", "f", "m", "gf", "gm"] {
+            assert_eq!(eff[person], 80.0);
+        }
+    }
+
+    #[test]
+    fn neighbor_gap_follows_common_family() {
+        // f und m je eigene Familie (kein Paar) → Extra-Abstand.
+        let mut data = TreeData::default();
+        data.people.push(person("r", "R", "Root", "", Gender::Unknown));
+        data.people.push(person("f", "F", "Vater", "", Gender::Male));
+        data.people.push(person("m", "M", "Mutter", "", Gender::Female));
+        data.link_child("f", "r");
+        data.link_child("m", "r");
+        assert!(!persons_are_partners("f", "m", &data));
+        let gap_of = |data: &TreeData| -> f32 {
+            let relations = TreeRelations::new(data);
+            let expanded = HashSet::new();
+            let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+            let occ_index: HashMap<&str, usize> = occs
+                .iter()
+                .enumerate()
+                .map(|(index, occ)| (occ.occ_id.as_str(), index))
+                .collect();
+            let occ_of = |person: &str| {
+                occs.iter()
+                    .find(|occ| occ.person.id == person)
+                    .unwrap()
+                    .occ_id
+                    .clone()
+            };
+            let (father, mother) = (occ_of("f"), occ_of("m"));
+            occ_neighbor_gap(
+                &father,
+                &mother,
+                &occs,
+                &occ_index,
+                data,
+                48.0,
+                UNMARRIED_GAP_EXTRA,
+            )
+        };
+        assert_eq!(gap_of(&data), 78.0);
+        // Per link_partner zur gemeinsamen Familie → enges Paar.
+        data.link_partner("f", "m");
+        assert!(persons_are_partners("f", "m", &data));
+        assert_eq!(gap_of(&data), 48.0);
+    }
+
+    /// Kleinster Kantenabstand (Mitte-zu-Mitte minus halbe Breiten) über alle Ebenen.
+    fn min_edge_gap(
+        spread: &HashMap<String, f32>,
+        rows: &[Vec<String>],
+        occs: &[super::AncestorOcc<'_>],
+        occ_index: &HashMap<&str, usize>,
+        widths: &HashMap<&str, f32>,
+    ) -> f32 {
+        let mut min = f32::INFINITY;
+        for ids in rows {
+            let mut centers: Vec<(f32, f32)> = ids
+                .iter()
+                .map(|id| {
+                    let width = occ_index
+                        .get(id.as_str())
+                        .map(|&idx| {
+                            widths
+                                .get(occs[idx].person.id.as_str())
+                                .copied()
+                                .unwrap_or(215.0)
+                        })
+                        .unwrap_or(215.0);
+                    (spread.get(id).copied().unwrap_or(0.0), width)
+                })
+                .collect();
+            centers.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for pair in centers.windows(2) {
+                min = min.min(pair[1].0 - pair[0].0 - (pair[0].1 + pair[1].1) / 2.0);
+            }
+        }
+        min
+    }
+
+    #[test]
+    fn unlinked_parents_keep_extra_gap_in_layout() {
+        // Eltern ohne gemeinsame Familie (je eigene Familie) → kein Paar.
+        let mut data = TreeData::default();
+        data.people.push(person("r", "R", "Root", "", Gender::Unknown));
+        data.people.push(person("f", "F", "Vater", "", Gender::Male));
+        data.people.push(person("m", "M", "Mutter", "", Gender::Female));
+        data.link_child("f", "r");
+        data.link_child("m", "r");
+        assert!(!persons_are_partners("f", "m", &data));
+        let relations = TreeRelations::new(&data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        let occ_index: HashMap<&str, usize> = occs
+            .iter()
+            .enumerate()
+            .map(|(index, occ)| (occ.occ_id.as_str(), index))
+            .collect();
+        let widths: HashMap<&str, f32> =
+            [("r", 215.0), ("f", 215.0), ("m", 215.0)].into_iter().collect();
+        let root = occs[0].occ_id.clone();
+        let spread = layout_ancestor_occs(
+            &root,
+            &occs,
+            &occ_index,
+            &relations,
+            &data,
+            &widths,
+            48.0,
+            UNMARRIED_GAP_EXTRA,
+        );
+        let center = |person: &str| {
+            let occ = occs.iter().find(|occ| occ.person.id == person).unwrap();
+            spread[&occ.occ_id]
+        };
+        // Mittenabstand = Breite + Baum-Abstand (48) + Extra (30).
+        assert!((center("m") - center("f") - (215.0 + 48.0 + 30.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn subtree_boundaries_keep_extra_gap_for_non_partners() {
+        let mut data = ancestor_tree();
+        data.people.push(person("mf", "M", "Muttervater", "", Gender::Male));
+        data.people.push(person("mm", "M", "Muttermutter", "", Gender::Female));
+        data.families.push(Family {
+            id: "f2".into(),
+            parent_a: Some("mf".into()),
+            parent_b: Some("mm".into()),
+            children: vec!["m".into()],
+        });
+        let relations = TreeRelations::new(&data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        let occ_index: HashMap<&str, usize> = occs
+            .iter()
+            .enumerate()
+            .map(|(index, occ)| (occ.occ_id.as_str(), index))
+            .collect();
+        let widths: HashMap<&str, f32> = [
+            ("r", 215.0),
+            ("f", 215.0),
+            ("m", 215.0),
+            ("gf", 215.0),
+            ("gm", 215.0),
+            ("mf", 215.0),
+            ("mm", 215.0),
+        ]
+        .into_iter()
+        .collect();
+        let root = occs[0].occ_id.clone();
+        let max_level = occs.iter().map(|occ| occ.level).max().unwrap_or(0);
+        let mut rows: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
+        for occ in &occs {
+            rows[occ.level].push(occ.occ_id.clone());
+        }
+        let spread_of = |extra: f32| {
+            layout_ancestor_occs(
+                &root,
+                &occs,
+                &occ_index,
+                &relations,
+                &data,
+                &widths,
+                48.0,
+                extra,
+            )
+        };
+        let boundary_gap = |spread: &HashMap<String, f32>| {
+            let center = |person: &str| {
+                let occ = occs.iter().find(|occ| occ.person.id == person).unwrap();
+                spread[&occ.occ_id]
+            };
+            (center("mf") - 107.5) - (center("gm") + 107.5)
+        };
+        // Grenze zwischen den Zweigen (gm | mf, keine gemeinsame Familie):
+        // Baum-Abstand (48) + Extra (30) — und mit Extra 0 der reine
+        // Baum-Abstand. Paare bleiben kompakt (Minimum 48).
+        let spread = spread_of(UNMARRIED_GAP_EXTRA);
+        assert!((boundary_gap(&spread) - 78.0).abs() < 1e-3);
+        assert!((min_edge_gap(&spread, &rows, &occs, &occ_index, &widths) - 48.0).abs() < 1e-3);
+        let spread = spread_of(0.0);
+        assert!((boundary_gap(&spread) - 48.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn implex_duplicate_next_to_spouse_stays_compact() {
+        // Ahnenverlust: gf ist Vater von f (mit gm) und von m (mit mm2).
+        let mut data = ancestor_tree();
+        data.people.push(person("mm2", "M", "Muttermutter2", "", Gender::Female));
+        data.families.push(Family {
+            id: "f2".into(),
+            parent_a: Some("gf".into()),
+            parent_b: Some("mm2".into()),
+            children: vec!["m".into()],
+        });
+        let relations = TreeRelations::new(&data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        // gf kommt doppelt vor (kanonisch + Duplikat im m-Zweig).
+        assert_eq!(occs.iter().filter(|occ| occ.person.id == "gf").count(), 2);
+        let occ_index: HashMap<&str, usize> = occs
+            .iter()
+            .enumerate()
+            .map(|(index, occ)| (occ.occ_id.as_str(), index))
+            .collect();
+        let widths: HashMap<&str, f32> = [
+            ("r", 215.0),
+            ("f", 215.0),
+            ("m", 215.0),
+            ("gf", 215.0),
+            ("gm", 215.0),
+            ("mm2", 215.0),
+        ]
+        .into_iter()
+        .collect();
+        let root = occs[0].occ_id.clone();
+        let spread =
+            layout_ancestor_occs(&root, &occs, &occ_index, &relations, &data, &widths, 48.0, UNMARRIED_GAP_EXTRA);
+        // Jedes Vorkommen liegt im kanonischen Spread (kein Fallback nötig).
+        for occ in &occs {
+            assert!(spread.contains_key(&occ.occ_id), "{}", occ.occ_id);
+        }
+        let max_level = occs.iter().map(|occ| occ.level).max().unwrap_or(0);
+        let mut rows: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
+        for occ in &occs {
+            rows[occ.level].push(occ.occ_id.clone());
+        }
+        // Das Duplikat steht neben seiner Partnerin (gemeinsame Familie f1):
+        // eng, trotz Extra-Einstellung.
+        assert!((min_edge_gap(&spread, &rows, &occs, &occ_index, &widths) - 48.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn slider_leaves_pairs_compact() {
+        // Paar mit gemeinsamer Familie (f0) bleibt kompakt — egal, wie groß
+        // das Nicht-Partner-Extra eingestellt ist (der gemeldete Fehler).
+        let data = ancestor_tree();
+        assert!(persons_are_partners("f", "m", &data));
+        let relations = TreeRelations::new(&data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        let occ_index: HashMap<&str, usize> = occs
+            .iter()
+            .enumerate()
+            .map(|(index, occ)| (occ.occ_id.as_str(), index))
+            .collect();
+        let widths: HashMap<&str, f32> = [
+            ("r", 215.0),
+            ("f", 215.0),
+            ("m", 215.0),
+            ("gf", 215.0),
+            ("gm", 215.0),
+        ]
+        .into_iter()
+        .collect();
+        let root = occs[0].occ_id.clone();
+        let distance = |extra: f32| {
+            let spread = layout_ancestor_occs(
+                &root,
+                &occs,
+                &occ_index,
+                &relations,
+                &data,
+                &widths,
+                48.0,
+                extra,
+            );
+            let father = occs.iter().find(|occ| occ.person.id == "f").unwrap();
+            let mother = occs.iter().find(|occ| occ.person.id == "m").unwrap();
+            spread[&mother.occ_id] - spread[&father.occ_id]
+        };
+        // Mittenabstand = Breite + Baum-Abstand — das Extra fasst Paare
+        // grundsätzlich nicht an.
+        assert!((distance(0.0) - 263.0).abs() < 1e-3);
+        assert!((distance(60.0) - 263.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn dragged_card_stops_before_collision() {
+        let data = ancestor_tree();
+        let relations = TreeRelations::new(&data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        let occ_index: HashMap<&str, usize> = occs
+            .iter()
+            .enumerate()
+            .map(|(index, occ)| (occ.occ_id.as_str(), index))
+            .collect();
+        let widths: HashMap<&str, f32> = [
+            ("r", 215.0),
+            ("f", 215.0),
+            ("m", 215.0),
+            ("gf", 215.0),
+            ("gm", 215.0),
+        ]
+        .into_iter()
+        .collect();
+        let max_level = occs.iter().map(|occ| occ.level).max().unwrap_or(0);
+        let mut rows: Vec<Vec<String>> = vec![Vec::new(); max_level + 1];
+        for occ in &occs {
+            rows[occ.level].push(occ.occ_id.clone());
+        }
+        let root = occs[0].occ_id.clone();
+        let base =
+            layout_ancestor_occs(&root, &occs, &occ_index, &relations, &data, &widths, 48.0, UNMARRIED_GAP_EXTRA);
+        // Ruhig gestellt: kein Überlapp im Basislayout.
+        assert!(min_edge_gap(&base, &rows, &occs, &occ_index, &widths) >= 48.0 - 1e-3);
+        // Kräftiger Ruck am Vater nach rechts: ohne Blockade führe er in die
+        // stehende Mutter (Kind käme mittig mit).
+        let mut manual: HashMap<String, f32> =
+            [("f".to_string(), 200.0)].into_iter().collect();
+        let eff = ancestor_drag_offsets(&occs, &manual);
+        let mut spread = base.clone();
+        for (id, val) in &eff {
+            *spread.get_mut(id).unwrap() += *val;
+        }
+        assert!(min_edge_gap(&spread, &rows, &occs, &occ_index, &widths) < 16.0);
+        block_ancestor_occ_drag(&mut spread, &rows, &occs, &occ_index, &widths, &mut manual, "f");
+        // Geklemmt: Versatz deutlich kleiner, überall MIN_CARD_GAP Luft.
+        assert!(manual["f"] < 200.0);
+        assert!(manual["f"] > 0.0);
+        assert!(min_edge_gap(&spread, &rows, &occs, &occ_index, &widths) >= 16.0 - 1e-3);
+        // Kleiner legaler Ruck bleibt unverändert.
+        let mut manual: HashMap<String, f32> =
+            [("f".to_string(), 10.0)].into_iter().collect();
+        let eff = ancestor_drag_offsets(&occs, &manual);
+        let mut spread = base.clone();
+        for (id, val) in &eff {
+            *spread.get_mut(id).unwrap() += *val;
+        }
+        block_ancestor_occ_drag(&mut spread, &rows, &occs, &occ_index, &widths, &mut manual, "f");
+        assert_eq!(manual["f"], 10.0);
+    }
+
+    #[test]
+    fn same_gender_parents_keep_both_slots() {
+        let mut data = TreeData::default();
+        data.people.push(person("r", "R", "Root", "", Gender::Unknown));
+        data.people.push(person("a", "A", "Vater", "", Gender::Male));
+        data.people.push(person("b", "B", "Vater", "", Gender::Male));
+        data.families.push(Family {
+            id: "f0".into(),
+            parent_a: Some("a".into()),
+            parent_b: Some("b".into()),
+            children: vec!["r".into()],
+        });
+        let relations = TreeRelations::new(&data);
+        let expanded = HashSet::new();
+        let (occs, _) = collect_ancestor_occs("r", &relations, 0, &expanded, None);
+        let child = occs.iter().find(|occ| occ.person.id == "r").unwrap();
+        // Beide Väter verlinkt (kein Überschreiben), kein Zusammenbruch.
+        let father = child.father_occ.clone().unwrap();
+        let mother = child.mother_occ.clone().unwrap();
+        assert_ne!(father, mother);
+        let widths: HashMap<&str, f32> =
+            [("r", 215.0), ("a", 215.0), ("b", 215.0)].into_iter().collect();
+        let occ_index: HashMap<&str, usize> = occs
+            .iter()
+            .enumerate()
+            .map(|(index, occ)| (occ.occ_id.as_str(), index))
+            .collect();
+        let spread =
+            layout_ancestor_occs(&occs[0].occ_id.clone(), &occs, &occ_index, &relations, &data, &widths, 48.0, UNMARRIED_GAP_EXTRA);
+        assert!(spread.contains_key(&father));
+        assert!(spread.contains_key(&mother));
+        assert!(spread[&father] < spread[&mother]);
     }
 }
 
@@ -1067,14 +1507,25 @@ fn collect_ancestor_occs<'a>(
             if let Some(ref c_id) = child_occ {
                 if let Some(&child_idx) = occ_pos.get(c_id) {
                     let child_node = &mut occs[child_idx];
-                    if person.gender == crate::model::Gender::Male {
-                        child_node.father_occ = Some(occ_id.clone());
-                    } else if person.gender == crate::model::Gender::Female {
-                        child_node.mother_occ = Some(occ_id.clone());
-                    } else if child_node.father_occ.is_none() {
-                        child_node.father_occ = Some(occ_id.clone());
-                    } else {
-                        child_node.mother_occ = Some(occ_id.clone());
+                    // Slot nach Geschlecht bevorzugen, bei belegtem Slot auf
+                    // den anderen ausweichen (Fallback für fehlendes oder
+                    // gleiches Geschlecht — sonst ginge ein Elternteil
+                    // verloren und die Zeichenlogik fiele zusammen).
+                    let (primary, fallback) = match person.gender {
+                        crate::model::Gender::Male => {
+                            (&mut child_node.father_occ, &mut child_node.mother_occ)
+                        }
+                        crate::model::Gender::Female => {
+                            (&mut child_node.mother_occ, &mut child_node.father_occ)
+                        }
+                        crate::model::Gender::Unknown => {
+                            (&mut child_node.father_occ, &mut child_node.mother_occ)
+                        }
+                    };
+                    if primary.is_none() {
+                        *primary = Some(occ_id.clone());
+                    } else if fallback.is_none() {
+                        *fallback = Some(occ_id.clone());
                     }
                 }
             }
@@ -1100,6 +1551,7 @@ fn layout_ancestor_occs<'a>(
     data: &TreeData,
     widths: &HashMap<&str, f32>,
     gap: f32,
+    unmarried_extra: f32,
 ) -> HashMap<String, f32> {
     let mut layout = HashMap::new();
     layout.insert(occ_id.to_string(), 0.0);
@@ -1112,10 +1564,26 @@ fn layout_ancestor_occs<'a>(
     }
     match (&node.father_occ, &node.mother_occ) {
         (Some(f), Some(m)) => {
-            let f_layout =
-                layout_ancestor_occs(f, occs, occ_index, relations, data, widths, gap);
-            let m_layout =
-                layout_ancestor_occs(m, occs, occ_index, relations, data, widths, gap);
+            let f_layout = layout_ancestor_occs(
+                f,
+                occs,
+                occ_index,
+                relations,
+                data,
+                widths,
+                gap,
+                unmarried_extra,
+            );
+            let m_layout = layout_ancestor_occs(
+                m,
+                occs,
+                occ_index,
+                relations,
+                data,
+                widths,
+                gap,
+                unmarried_extra,
+            );
             let mut min_distance = 0.0f32;
             let mut levels_in_subtrees = HashSet::new();
             for fid in f_layout.keys() {
@@ -1128,35 +1596,49 @@ fn layout_ancestor_occs<'a>(
                     levels_in_subtrees.insert(occs[idx].level);
                 }
             }
+            let parent_level = node.level + 1;
             for lvl in levels_in_subtrees {
-                let mut max_f_right = None;
+                let mut max_f_right: Option<(f32, &str)> = None;
                 for (fid, &f_offset) in &f_layout {
                     if let Some(&idx) = occ_index.get(fid.as_str()) {
                         let f_node = &occs[idx];
                         if f_node.level == lvl {
                             let w = widths.get(f_node.person.id.as_str()).copied().unwrap_or(215.0);
                             let right = f_offset + w / 2.0;
-                            if max_f_right.is_none() || right > max_f_right.unwrap() {
-                                max_f_right = Some(right);
+                            if max_f_right.is_none_or(|(best, _)| right > best) {
+                                max_f_right = Some((right, fid.as_str()));
                             }
                         }
                     }
                 }
-                let mut min_m_left = None;
+                let mut min_m_left: Option<(f32, &str)> = None;
                 for (mid, &m_offset) in &m_layout {
                     if let Some(&idx) = occ_index.get(mid.as_str()) {
                         let m_node = &occs[idx];
                         if m_node.level == lvl {
                             let w = widths.get(m_node.person.id.as_str()).copied().unwrap_or(215.0);
                             let left = m_offset - w / 2.0;
-                            if min_m_left.is_none() || left < min_m_left.unwrap() {
-                                min_m_left = Some(left);
+                            if min_m_left.is_none_or(|(best, _)| left < best) {
+                                min_m_left = Some((left, mid.as_str()));
                             }
                         }
                     }
                 }
-                if let (Some(f_right), Some(m_left)) = (max_f_right, min_m_left) {
-                    let needed_sep = f_right - m_left + gap;
+                if let (Some((f_right, f_occ)), Some((m_left, m_occ))) =
+                    (max_f_right, min_m_left)
+                {
+                    let mut needed_sep = f_right - m_left + gap;
+                    // Auch an Teilbaum-Grenzen: mehr Platz, wenn zwischen den
+                    // Grenzkarten keine Partner-Verbindung besteht. Die
+                    // Elternebene selbst ist ausgenommen — dort bilden Vater
+                    // und Mutter konstruktionsbedingt immer die Grenze und
+                    // ihr Extra steckt bereits in `sep` (kein doppeltes
+                    // Zählen; Duplikate liegen stets eine Ebene tiefer).
+                    if lvl != parent_level
+                        && !occs_are_partners(f_occ, m_occ, occs, occ_index, data)
+                    {
+                        needed_sep += unmarried_extra;
+                    }
                     if needed_sep > min_distance {
                         min_distance = needed_sep;
                     }
@@ -1167,12 +1649,16 @@ fn layout_ancestor_occs<'a>(
             let wf = widths.get(father_node.person.id.as_str()).copied().unwrap_or(215.0);
             let wm = widths.get(mother_node.person.id.as_str()).copied().unwrap_or(215.0);
             let default_sep = (wf + wm) / 2.0 + gap;
-            let extra = if data.partner_relation_of(father_node.person.id.as_str(), mother_node.person.id.as_str()) == crate::model::PartnerRelation::Married {
+            let extra = if persons_are_partners(
+                father_node.person.id.as_str(),
+                mother_node.person.id.as_str(),
+                data,
+            ) {
                 0.0
             } else {
-                30.0
+                unmarried_extra
             };
-            let sep = min_distance.max(default_sep) + extra;
+            let sep = min_distance.max(default_sep + extra);
             let shift_f = -sep / 2.0 + (wm - wf) / 4.0;
             let shift_m = sep / 2.0 + (wm - wf) / 4.0;
             for (fid, f_offset) in f_layout {
@@ -1183,8 +1669,16 @@ fn layout_ancestor_occs<'a>(
             }
         }
         (Some(p_occ), None) | (None, Some(p_occ)) => {
-            let p_layout =
-                layout_ancestor_occs(p_occ, occs, occ_index, relations, data, widths, gap);
+            let p_layout = layout_ancestor_occs(
+                p_occ,
+                occs,
+                occ_index,
+                relations,
+                data,
+                widths,
+                gap,
+                unmarried_extra,
+            );
             for (id, offset) in p_layout {
                 layout.insert(id, offset);
             }
@@ -1192,6 +1686,213 @@ fn layout_ancestor_occs<'a>(
         (None, None) => {}
     }
     layout
+}
+
+/// Partner-Verbindung zweier Personen für den Kartenabstand: dieselbe Person
+/// oder gemeinsame Elternschaft (Familie mit beiden als Eltern — unabhängig
+/// vom Traueintrag, der im Import leer ist). Solche Karten rücken eng
+/// zusammen; alle anderen Nachbarn bekommen das Nicht-Partner-Extra.
+fn persons_are_partners(left: &str, right: &str, data: &TreeData) -> bool {
+    if left == right {
+        return true;
+    }
+    data.families.iter().any(|family| {
+        let (first, second) = (family.parent_a.as_deref(), family.parent_b.as_deref());
+        (first == Some(left) && second == Some(right))
+            || (first == Some(right) && second == Some(left))
+    })
+}
+
+/// Partner-Verbindung zweier Vorkommen (über ihre Personen).
+fn occs_are_partners<'a>(
+    left: &str,
+    right: &str,
+    occs: &[AncestorOcc<'a>],
+    occ_index: &HashMap<&str, usize>,
+    data: &TreeData,
+) -> bool {
+    match (occ_index.get(left), occ_index.get(right)) {
+        (Some(&li), Some(&ri)) => persons_are_partners(
+            occs[li].person.id.as_str(),
+            occs[ri].person.id.as_str(),
+            data,
+        ),
+        _ => false,
+    }
+}
+
+/// Kantenabstand zweier Nachbar-Vorkommen: mit Partner-Verbindung
+/// (`persons_are_partners`) eng (`gap`), alle anderen Nachbarn mit
+/// Extra-Abstand für Nicht-Partner.
+fn occ_neighbor_gap<'a>(
+    left: &str,
+    right: &str,
+    occs: &[AncestorOcc<'a>],
+    occ_index: &HashMap<&str, usize>,
+    data: &TreeData,
+    gap: f32,
+    unmarried_extra: f32,
+) -> f32 {
+    if occs_are_partners(left, right, occs, occ_index, data) {
+        return gap;
+    }
+    gap + unmarried_extra
+}
+/// Effektive Ziehversätze je Vorkommen im Vorfahrenbaum:
+/// 1. Basis = manueller Versatz der Person (gilt für alle ihre Vorkommen),
+/// 2. Aufwärtspass = Vorfahren folgen dem gezogenen Kind starr 1:1,
+/// 3. Abwärtspass = Nachfahren gleichen aus und bleiben mittig — jedes Kind
+///    übernimmt den Mittelwert der fertigen Elternversätze (Vater gezogen,
+///    Mutter fest → Kind halb). Der Partner bleibt stehen (eigener Versatz 0
+///    und keine Ausgleichsvererbung seitlich).
+fn ancestor_drag_offsets<'a>(
+    occs: &[AncestorOcc<'a>],
+    manual_offsets: &HashMap<String, f32>,
+) -> HashMap<String, f32> {
+    let mut eff: HashMap<String, f32> = HashMap::new();
+    for occ in occs {
+        let manual = manual_offsets
+            .get(occ.person.id.as_str())
+            .copied()
+            .unwrap_or(0.0);
+        if manual != 0.0 {
+            *eff.entry(occ.occ_id.clone()).or_insert(0.0) += manual;
+        }
+    }
+    // Aufwärtspass in BFS-Reihenfolge (Kinder stehen vor ihren Eltern).
+    for occ in occs {
+        let val = eff.get(&occ.occ_id).copied().unwrap_or(0.0);
+        if val != 0.0 {
+            if let Some(ref father) = occ.father_occ {
+                *eff.entry(father.clone()).or_insert(0.0) += val;
+            }
+            if let Some(ref mother) = occ.mother_occ {
+                *eff.entry(mother.clone()).or_insert(0.0) += val;
+            }
+        }
+    }
+    // Abwärtspass in umgekehrter Reihenfolge (Eltern vor ihren Kindern):
+    // Vorkommen ohne Elternslots (Wurzel, Duplikate ohne Eltern) behalten
+    // ihren Aufwärtswert, alle anderen zentrieren sich neu.
+    for occ in occs.iter().rev() {
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        for parent in occ.father_occ.iter().chain(occ.mother_occ.iter()) {
+            sum += eff.get(parent).copied().unwrap_or(0.0);
+            count += 1;
+        }
+        if count > 0 {
+            eff.insert(occ.occ_id.clone(), sum / count as f32);
+        }
+    }
+    eff
+}
+
+/// Kollisions-Blockade für den Vorfahrenbaum (Occurrence-Pfad): Nach allen
+/// Ziehversätzen wird je Ebene geprüft, ob mitbewegte Vorkommen (gezogene
+/// Person + starr folgende Vorfahren + mittig ausgleichende Nachfahren) in
+/// fest stehende Nachbarkarten ragen würden. Statt die Nachbarn zu
+/// verschieben, wird der manuelle Versatz der Ziehperson auf die erlaubte
+/// Spanne geklemmt — die Karte bleibt stehen, sobald sie selbst, eines ihrer
+/// Kinder oder ein Elternteil anstoßen würde. Mindestmaß ist `MIN_CARD_GAP`.
+/// Sortiert wird nach der Basislage (ohne Versatz), damit die Nachbarschaft
+/// auch bei großen Sprüngen stabil bleibt.
+fn block_ancestor_occ_drag<'a>(
+    spread: &mut HashMap<String, f32>,
+    rows: &[Vec<String>],
+    occs: &[AncestorOcc<'a>],
+    occ_index: &HashMap<&str, usize>,
+    widths: &HashMap<&str, f32>,
+    manual_offsets: &mut HashMap<String, f32>,
+    drag_person: &str,
+) {
+    let current = manual_offsets.get(drag_person).copied().unwrap_or(0.0);
+    if current == 0.0 {
+        return;
+    }
+    // Bewegungs-Steigung je Vorkommen: effektive Versätze aktuell und mit
+    // simuliertem +1.0-Offset an der Ziehperson (`ancestor_drag_offsets` ist
+    // linear, die Differenz ist exakt).
+    let base_eff = ancestor_drag_offsets(occs, manual_offsets);
+    let mut bumped = manual_offsets.clone();
+    bumped.insert(drag_person.to_string(), current + 1.0);
+    let bumped_eff = ancestor_drag_offsets(occs, &bumped);
+    let mut scale: HashMap<&str, f32> = HashMap::new();
+    for occ in occs {
+        let shift = bumped_eff.get(&occ.occ_id).copied().unwrap_or(0.0)
+            - base_eff.get(&occ.occ_id).copied().unwrap_or(0.0);
+        if shift.abs() > 1e-4 {
+            scale.insert(occ.occ_id.as_str(), shift);
+        }
+    }
+    if scale.is_empty() {
+        return;
+    }
+    let width_of = |occ_id: &str| -> f32 {
+        occ_index
+            .get(occ_id)
+            .map(|&idx| {
+                widths
+                    .get(occs[idx].person.id.as_str())
+                    .copied()
+                    .unwrap_or(215.0)
+            })
+            .unwrap_or(215.0)
+    };
+    let mut lo = f32::NEG_INFINITY;
+    let mut hi = f32::INFINITY;
+    for ids in rows {
+        // (Vorkommen, Mitte aktuell, Mitte Basis, Breite).
+        let mut cards: Vec<(&str, f32, f32, f32)> = Vec::new();
+        for id in ids {
+            if let Some(&x) = spread.get(id) {
+                let base = x - base_eff.get(id).copied().unwrap_or(0.0);
+                cards.push((id.as_str(), x, base, width_of(id)));
+            }
+        }
+        cards.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.3.total_cmp(&b.3)));
+        for (index, &(id, x, _, w)) in cards.iter().enumerate() {
+            let Some(&s) = scale.get(id) else {
+                continue;
+            };
+            if s <= 0.0 {
+                continue;
+            }
+            // Linker Nachbar fest? Dann gilt: x - w/2 >= nbx + nbw/2 + MIN_CARD_GAP.
+            if index > 0 {
+                let (nb, nbx, _, nbw) = cards[index - 1];
+                if !scale.contains_key(nb) {
+                    let cand = (nbx + nbw / 2.0 + MIN_CARD_GAP + w / 2.0 - x) / s + current;
+                    lo = lo.max(cand);
+                }
+            }
+            // Rechter Nachbar fest? Dann gilt: x + w/2 <= nbx - nbw/2 - MIN_CARD_GAP.
+            if index + 1 < cards.len() {
+                let (nb, nbx, _, nbw) = cards[index + 1];
+                if !scale.contains_key(nb) {
+                    let cand = (nbx - nbw / 2.0 - MIN_CARD_GAP - w / 2.0 - x) / s + current;
+                    hi = hi.min(cand);
+                }
+            }
+        }
+    }
+    // Offset in die erlaubte Spanne klemmen (stabil: klebt an der Grenze).
+    let target = if current < lo {
+        lo
+    } else if current > hi {
+        hi
+    } else {
+        return;
+    };
+    let delta = target - current;
+    for (id, s) in &scale {
+        if let Some(value) = spread.get_mut(*id) {
+            *value += delta * s;
+        }
+    }
+    if let Some(offset) = manual_offsets.get_mut(drag_person) {
+        *offset = target;
+    }
 }
 
 pub fn draw_tree(
@@ -1211,6 +1912,7 @@ pub fn draw_tree(
     person_limit: usize,
     more_people_available: &mut bool,
     layout_gap: f32,
+    non_partner_gap: f32,
     compact_width: f32,
     portrait_width: f32,
     manual_offsets: &mut HashMap<String, f32>,
@@ -1226,6 +1928,16 @@ pub fn draw_tree(
     drag_started: bool,
     drag_ended: bool,
     log_layout: bool,
+    // true bei offenem Modal: Alle Pointer-Aktionen auf dem Baum sind
+    // dann gesperrt (roher Pointer-State umgeht egui-Layer).
+    input_blocked: bool,
+    // Mehrfachauswahl (Strg+Klick, in Auswahlreihenfolge): nur Anzeige —
+    // Aktionen laufen über TreeAction::ToggleMulti.
+    multi: &[String],
+    // Zoom-Faktoren fürs Umschalten auf die Ganzfoto-Ansicht (Einstellungen):
+    // mit Foto / ohne Foto (Initialen).
+    photo_full_zoom: f32,
+    initials_full_zoom: f32,
 ) -> Rect {
     // Treffer-Rechtecke für Datei-Drops auf Personenkarten (siehe mod.rs).
     card_rects.clear();
@@ -1328,61 +2040,81 @@ pub fn draw_tree(
             data,
             &widths,
             gap,
+            non_partner_gap,
         );
         
+        // Verheiratete Elternpaare (Vorkommen mit gemeinsamem Kind) rücken
+        // eng zusammen; alle anderen Nachbarn — auch Duplikate neben
+        // fremden Karten — bekommen den Extra-Abstand für Nicht-Partner.
+        // Dasselbe Personen-Vorkommen neben sich selbst bleibt eng.
+        let pair_gap = |left: &str, right: &str| -> f32 {
+            occ_neighbor_gap(left, right, &occs, &occ_index, data, gap, non_partner_gap)
+        };
+
         for ids in &rows {
             let missing: Vec<&String> = ids.iter().filter(|id| !spread.contains_key(*id)).collect();
             if !missing.is_empty() {
-                let existing_right = ids
+                // Anker: rechtseste bereits platzierte Karte derselben Ebene.
+                let anchor: Option<&String> = ids
                     .iter()
-                    .filter_map(|id| {
-                        spread.get(id).map(|center| {
+                    .filter(|id| spread.contains_key(*id))
+                    .max_by(|a, b| {
+                        let left = spread.get(*a).copied().unwrap_or(0.0);
+                        let right = spread.get(*b).copied().unwrap_or(0.0);
+                        left.total_cmp(&right)
+                    });
+                let mut cursor = match anchor {
+                    Some(anchor_id) => {
+                        let occ = &occs[occ_index[anchor_id.as_str()]];
+                        let right = spread.get(anchor_id).copied().unwrap_or(0.0)
+                            + widths.get(occ.person.id.as_str()).copied().unwrap_or(215.0) / 2.0;
+                        right + pair_gap(anchor_id, missing[0])
+                    }
+                    None => {
+                        let mut total = 0.0f32;
+                        for (index, id) in missing.iter().enumerate() {
                             let occ = &occs[occ_index[id.as_str()]];
-                            center + widths.get(occ.person.id.as_str()).copied().unwrap_or(215.0) / 2.0
-                        })
-                    })
-                    .reduce(f32::max);
-                let mut cursor = existing_right.map(|right| right + gap).unwrap_or_else(|| {
-                    let total = missing
-                        .iter()
-                        .map(|id| {
-                            let occ = &occs[occ_index[id.as_str()]];
-                            widths.get(occ.person.id.as_str()).copied().unwrap_or(215.0)
-                        })
-                        .sum::<f32>()
-                        + gap * missing.len().saturating_sub(1) as f32;
-                    -total / 2.0
-                });
-                for id in missing {
+                            total += widths.get(occ.person.id.as_str()).copied().unwrap_or(215.0);
+                            if let Some(next) = missing.get(index + 1) {
+                                total += pair_gap(id, next);
+                            }
+                        }
+                        -total / 2.0
+                    }
+                };
+                for (index, id) in missing.iter().enumerate() {
                     let occ = &occs[occ_index[id.as_str()]];
                     let w = widths.get(occ.person.id.as_str()).copied().unwrap_or(215.0);
-                    spread.insert(id.clone(), cursor + w / 2.0);
-                    cursor += w + gap;
+                    spread.insert((*id).clone(), cursor + w / 2.0);
+                    cursor += w;
+                    if let Some(next) = missing.get(index + 1) {
+                        cursor += pair_gap(id, next);
+                    }
                 }
             }
         }
         
-        let mut eff_occs: HashMap<String, f32> = HashMap::new();
-        for i in 0..occs.len() {
-            let occ_id = occs[i].occ_id.clone();
-            let current_eff = eff_occs.get(&occ_id).copied().unwrap_or(0.0);
-            let manual = manual_offsets.get(occs[i].person.id.as_str()).copied().unwrap_or(0.0);
-            let val = current_eff + manual;
-            if val != 0.0 {
-                eff_occs.insert(occ_id.clone(), val);
-                if let Some(ref f) = occs[i].father_occ {
-                    *eff_occs.entry(f.clone()).or_insert(0.0) += val;
-                }
-                if let Some(ref m) = occs[i].mother_occ {
-                    *eff_occs.entry(m.clone()).or_insert(0.0) += val;
-                }
-            }
-        }
+        let eff_occs = ancestor_drag_offsets(&occs, manual_offsets);
         
         for (occ_id, &val) in &eff_occs {
             if let Some(spread_val) = spread.get_mut(occ_id) {
                 *spread_val += val;
             }
+        }
+
+        // Kollisions-Blockade: Mitbewegtes (Person, Kinder, Eltern) darf nicht
+        // in fest stehende Nachbarkarten ragen — sonst bleibt die Ziehperson
+        // an der Grenze stehen.
+        if let Some((drag_person, _)) = card_drag.as_ref() {
+            block_ancestor_occ_drag(
+                &mut spread,
+                &rows,
+                &occs,
+                &occ_index,
+                &widths,
+                manual_offsets,
+                drag_person,
+            );
         }
         
         let mut positions: HashMap<String, (f32, f32)> = HashMap::new();
@@ -1474,6 +2206,10 @@ pub fn draw_tree(
                 media_base,
                 photo_cache,
                 card_rects,
+                input_blocked,
+                multi,
+                photo_full_zoom,
+                initials_full_zoom,
             );
             
             let empty_occs: Vec<usize> = Vec::new();
@@ -1515,14 +2251,16 @@ pub fn draw_tree(
                     Stroke::new(1.5, Color32::from_rgb(158, 213, 199))
                 );
                 
-                let left_clicked = painter.ctx().input(|i| {
-                    i.pointer.any_click()
-                        && i.pointer.interact_pos().is_some_and(|q| arrow_left_rect.contains(q) && painter.clip_rect().contains(q))
-                });
-                let right_clicked = painter.ctx().input(|i| {
-                    i.pointer.any_click()
-                        && i.pointer.interact_pos().is_some_and(|q| arrow_right_rect.contains(q) && painter.clip_rect().contains(q))
-                });
+                let left_clicked = !input_blocked
+                    && painter.ctx().input(|i| {
+                        i.pointer.any_click()
+                            && i.pointer.interact_pos().is_some_and(|q| arrow_left_rect.contains(q) && painter.clip_rect().contains(q))
+                    });
+                let right_clicked = !input_blocked
+                    && painter.ctx().input(|i| {
+                        i.pointer.any_click()
+                            && i.pointer.interact_pos().is_some_and(|q| arrow_right_rect.contains(q) && painter.clip_rect().contains(q))
+                    });
                 
                 if left_clicked {
                     arrow_clicked = true;
@@ -1557,7 +2295,11 @@ pub fn draw_tree(
                 };
                 let badge_r = 9.0 * zoom;
                 let badge_rect = Rect::from_center_size(badge_at, Vec2::splat(badge_r * 2.0));
-                let pointer_pos = painter.ctx().input(|i| i.pointer.interact_pos());
+                let pointer_pos = if input_blocked {
+                    None
+                } else {
+                    painter.ctx().input(|i| i.pointer.interact_pos())
+                };
                 let canvas = painter.clip_rect();
                 let card_hovered = pointer_pos
                     .is_some_and(|q| (card.contains(q) || badge_rect.contains(q)) && canvas.contains(q));
@@ -1583,10 +2325,11 @@ pub fn draw_tree(
                             Stroke::new(1.5, Color32::from_rgb(158, 213, 199)),
                         );
                     }
-                    badge_clicked = painter.ctx().input(|i| {
-                        i.pointer.any_click()
-                            && i.pointer.interact_pos().is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
-                    });
+                    badge_clicked = !input_blocked
+                        && painter.ctx().input(|i| {
+                            i.pointer.any_click()
+                                && i.pointer.interact_pos().is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
+                        });
                     if badge_clicked {
                         *action = Some(TreeAction::ToggleExpand(occ.person.id.clone()));
                     }
@@ -1595,7 +2338,10 @@ pub fn draw_tree(
             
             if !badge_clicked && !arrow_clicked && card_clicked {
                 let shift = painter.ctx().input(|i| i.modifiers.shift);
-                *action = Some(if shift {
+                let ctrl = painter.ctx().input(|i| i.modifiers.ctrl);
+                *action = Some(if ctrl {
+                    TreeAction::ToggleMulti(occ.person.id.clone())
+                } else if shift {
                     TreeAction::Reference(occ.person.id.clone())
                 } else {
                     TreeAction::View(occ.person.id.clone())
@@ -1603,7 +2349,8 @@ pub fn draw_tree(
             }
             
             if !badge_clicked && !arrow_clicked {
-                let long_pressed = card_on_screen
+                let long_pressed = !input_blocked
+                    && card_on_screen
                     && painter.ctx().input(|i| {
                         i.any_touches()
                         && i.pointer.press_origin().is_some_and(|q| {
@@ -1619,23 +2366,60 @@ pub fn draw_tree(
             
             if card_on_screen && !badge_clicked && !arrow_clicked && !*long_press_used {
                 let outer = card.expand(4.0 * zoom);
-                let frame_hit = painter.ctx().input(|i| {
-                    i.pointer.primary_down()
-                        && i.modifiers.shift
-                        && i.pointer.press_origin().is_some_and(|q| outer.contains(q) && painter.clip_rect().contains(q))
-                });
-                if frame_hit && card_drag.is_none() {
-                    let mut move_set = HashSet::new();
-                    let mut parent_frontier = vec![occ.person.id.as_str()];
-                    while let Some(curr_id) = parent_frontier.pop() {
-                        if move_set.insert(curr_id.to_string()) {
-                            for parent in relations.parents_of(curr_id) {
-                                parent_frontier.push(parent.id.as_str());
-                            }
-                        }
+                // Nur das erste Vorkommen einer Person wendet den Versatz an —
+                // alle Duplikate teilen sich dieselbe Personen-ID und würden
+                // sonst mehrfach ziehen.
+                let is_first_occ = occs
+                    .iter()
+                    .filter(|other| other.person.id == occ.person.id)
+                    .next()
+                    .is_some_and(|first| first.occ_id == occ.occ_id);
+                let (occ_delta, occ_start) = painter.ctx().input(|i| {
+                    if input_blocked {
+                        return (0.0, false);
                     }
-                    let move_set_vec: Vec<String> = move_set.into_iter().collect();
-                    *card_drag = Some((occ.person.id.clone(), move_set_vec));
+                    let is_active = card_drag
+                        .as_ref()
+                        .is_some_and(|(id, _)| id == occ.person.id.as_str());
+                    if !card_on_screen && !is_active {
+                        return (0.0, false);
+                    }
+                    if !(i.pointer.primary_down() && i.modifiers.shift) {
+                        return (0.0, false);
+                    }
+                    let pressed_here = i.pointer.press_origin().is_some_and(|q| {
+                        outer.contains(q) && painter.clip_rect().contains(q)
+                    });
+                    if !(pressed_here || (is_active && is_first_occ)) {
+                        return (0.0, false);
+                    }
+                    let delta = i.pointer.delta();
+                    (
+                        if orientation == TreeOrientation::Vertical {
+                            delta.x
+                        } else {
+                            delta.y
+                        },
+                        pressed_here,
+                    )
+                });
+                if occ_delta != 0.0 || (occ_start && card_drag.is_none()) {
+                    let layout_delta = occ_delta / zoom;
+                    if let Some((_, members)) = card_drag {
+                        for id in members.clone() {
+                            *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
+                        }
+                    } else {
+                        // Nur die gezogene Person trägt den Versatz; die Vererbung
+                        // (Vorfahren starr, Nachfahren mittig) rechnet
+                        // `ancestor_drag_offsets` weiter oben aus.
+                        let move_set_vec = vec![occ.person.id.clone()];
+                        for id in &move_set_vec {
+                            *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
+                        }
+                        *card_drag = Some((occ.person.id.clone(), move_set_vec));
+                    }
+                    *frame_drag = true;
                 }
             }
         }
@@ -1889,200 +2673,158 @@ pub fn draw_tree(
             );
         }
     };
-    if view == TreeView::Ancestors {
-        // Berechne das perfekte, überschneidungsfreie Vorfahren-Layout rekursiv!
-        spread = layout_ancestors(root, &relations, data, &levels, &widths, gap);
-        let completed = complete_missing_spread_positions(&mut spread, &rows, &widths, gap);
-        if !completed.is_empty() {
-            log::warn!(
-                "Vorfahrenlayout ergänzt {} fehlende Position(en): {}",
-                completed.len(),
-                completed.join(", ")
-            );
+    // Vorfahren kehren im Occurrence-Zweig weiter oben per Return zurück;
+    // hier folgen nur Nachfahren und Fächer.
+    // Standard-Paketierung für andere Ansichten
+    for (row, ids) in rows.iter().enumerate() {
+        if view == TreeView::Fan {
+            continue;
         }
-
-        // Partner-Pseudokarten einmalig an ihre Person koppeln.
-        for (row, ids) in rows.iter().enumerate() {
-            for id in ids {
-                if orientation == TreeOrientation::Vertical {
-                    if let Some(&sx) = spread.get(id) {
-                        let mut px = sx + card_w(row, id) / 2.0 + couple_gap;
-                        for partner in relations.partners_of(id) {
-                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
-                            {
-                                continue;
-                            }
-                            spread.insert(partner.id.as_str(), px + card_w(row, &partner.id) / 2.0);
-                            px += card_w(row, &partner.id) + couple_gap;
-                        }
-                    }
-                } else {
-                    if let Some(&sy) = spread.get(id) {
-                        let mut py = sy + card_h / 2.0 + couple_gap;
-                        for partner in relations.partners_of(id) {
-                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
-                            {
-                                continue;
-                            }
-                            spread.insert(partner.id.as_str(), py + card_h / 2.0);
-                            py += card_h + couple_gap;
-                        }
-                    }
+        let mut footprints: Vec<(&str, f32)> = Vec::new();
+        let mut total = 0.0f32;
+        for id in ids {
+            let mut footprint = own_extent(row, id);
+            for partner in relations.partners_of(id) {
+                if !visible(&partner.id) && shown_partners.contains(partner.id.as_str()) {
+                    footprint += partner_extent(row, &partner.id) + couple_gap;
                 }
             }
+            footprints.push((*id, footprint));
+            total += footprint;
         }
-    } else {
-        // Standard-Paketierung für andere Ansichten
+        total += gap * footprints.len().saturating_sub(1) as f32;
+        let mut cursor = -total / 2.0;
+        for (id, footprint) in footprints {
+            spread.insert(id, cursor + own_extent(row, id) / 2.0);
+            cursor += footprint + gap;
+        }
+    }
+    dump_stage("PACK", &spread);
+    let negotiation_rounds = if tidy_vertical_descendants { 0 } else { 12 };
+    for _ in 0..negotiation_rounds {
+        // 1) Partner-Pseudokarten an ihre Person koppeln.
+        let prev_partner = spread.clone();
         for (row, ids) in rows.iter().enumerate() {
             if view == TreeView::Fan {
                 continue;
             }
-            let mut footprints: Vec<(&str, f32)> = Vec::new();
-            let mut total = 0.0f32;
             for id in ids {
-                let mut footprint = own_extent(row, id);
-                for partner in relations.partners_of(id) {
-                    if !visible(&partner.id) && shown_partners.contains(partner.id.as_str()) {
-                        footprint += partner_extent(row, &partner.id) + couple_gap;
-                    }
-                }
-                footprints.push((*id, footprint));
-                total += footprint;
-            }
-            total += gap * footprints.len().saturating_sub(1) as f32;
-            let mut cursor = -total / 2.0;
-            for (id, footprint) in footprints {
-                spread.insert(id, cursor + own_extent(row, id) / 2.0);
-                cursor += footprint + gap;
-            }
-        }
-        dump_stage("PACK", &spread);
-        let negotiation_rounds = if tidy_vertical_descendants { 0 } else { 12 };
-        for _ in 0..negotiation_rounds {
-            // 1) Partner-Pseudokarten an ihre Person koppeln.
-            let prev_partner = spread.clone();
-            for (row, ids) in rows.iter().enumerate() {
-                if view == TreeView::Fan {
-                    continue;
-                }
-                for id in ids {
-                    if orientation == TreeOrientation::Vertical {
-                        let mut px = spread[*id] + card_w(row, id) / 2.0 + couple_gap;
-                        for partner in relations.partners_of(id) {
-                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
-                            {
-                                continue;
-                            }
-                            spread.insert(partner.id.as_str(), px + card_w(row, &partner.id) / 2.0);
-                            px += card_w(row, &partner.id) + couple_gap;
+                if orientation == TreeOrientation::Vertical {
+                    let mut px = spread[*id] + card_w(row, id) / 2.0 + couple_gap;
+                    for partner in relations.partners_of(id) {
+                        if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
+                        {
+                            continue;
                         }
-                    } else {
-                        let mut py = spread[*id] + card_h / 2.0 + couple_gap;
-                        for partner in relations.partners_of(id) {
-                            if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
-                            {
-                                continue;
-                            }
-                            spread.insert(partner.id.as_str(), py + card_h / 2.0);
-                            py += card_h + couple_gap;
-                        }
-                    }
-                }
-            }
-            log_big_moves(&prev_partner, &spread, "partner");
-            let prev_attr = spread.clone();
-            // 2) Attraktion: Kinder → Eltern-Junction, Eltern → Kinder-Mittelwert.
-            for family in &data.families {
-                let children: Vec<&str> = family
-                    .children
-                    .iter()
-                    .filter(|child| spread.contains_key(child.as_str()))
-                    .map(|child| child.as_str())
-                    .collect();
-                if children.is_empty() {
-                    continue;
-                }
-                let parents: Vec<&str> = [&family.parent_a, &family.parent_b]
-                    .into_iter()
-                    .flatten()
-                    .filter(|parent| spread.contains_key(parent.as_str()))
-                    .map(|parent| parent.as_str())
-                    .collect();
-                if parents.is_empty() {
-                    continue;
-                }
-                let junction =
-                    parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
-                if view == TreeView::Descendants {
-                    // Geschwister bewegen sich als starre Gruppe (Container).
-                    let mean =
-                        children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
-                    let delta = 0.5 * (junction - mean);
-                    if log_layout && delta.abs() > 500.0 {
-                        log::debug!(
-                            "NEG_ATTR_CHILD family={} delta={:.0} junction={:.0} mean={:.0} n={}",
-                            family.id,
-                            delta,
-                            junction,
-                            mean,
-                            children.len()
-                        );
-                    }
-                    for child in &children {
-                        if let Some(value) = spread.get_mut(child) {
-                            *value += delta;
-                        }
+                        spread.insert(partner.id.as_str(), px + card_w(row, &partner.id) / 2.0);
+                        px += card_w(row, &partner.id) + couple_gap;
                     }
                 } else {
-                    for child in &children {
-                        if let Some(value) = spread.get_mut(child) {
-                            *value += 0.5 * (junction - *value);
+                    let mut py = spread[*id] + card_h / 2.0 + couple_gap;
+                    for partner in relations.partners_of(id) {
+                        if visible(&partner.id) || !shown_partners.contains(partner.id.as_str())
+                        {
+                            continue;
                         }
+                        spread.insert(partner.id.as_str(), py + card_h / 2.0);
+                        py += card_h + couple_gap;
                     }
                 }
-                let target =
+            }
+        }
+        log_big_moves(&prev_partner, &spread, "partner");
+        let prev_attr = spread.clone();
+        // 2) Attraktion: Kinder → Eltern-Junction, Eltern → Kinder-Mittelwert.
+        for family in &data.families {
+            let children: Vec<&str> = family
+                .children
+                .iter()
+                .filter(|child| spread.contains_key(child.as_str()))
+                .map(|child| child.as_str())
+                .collect();
+            if children.is_empty() {
+                continue;
+            }
+            let parents: Vec<&str> = [&family.parent_a, &family.parent_b]
+                .into_iter()
+                .flatten()
+                .filter(|parent| spread.contains_key(parent.as_str()))
+                .map(|parent| parent.as_str())
+                .collect();
+            if parents.is_empty() {
+                continue;
+            }
+            let junction =
+                parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
+            if view == TreeView::Descendants {
+                // Geschwister bewegen sich als starre Gruppe (Container).
+                let mean =
                     children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
-                let parent_mean =
-                    parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
-                let delta = 0.4 * (target - parent_mean);
+                let delta = 0.5 * (junction - mean);
                 if log_layout && delta.abs() > 500.0 {
                     log::debug!(
-                        "NEG_ATTR_PARENT family={} delta={:.0} target={:.0} parent_mean={:.0}",
+                        "NEG_ATTR_CHILD family={} delta={:.0} junction={:.0} mean={:.0} n={}",
                         family.id,
                         delta,
-                        target,
-                        parent_mean
+                        junction,
+                        mean,
+                        children.len()
                     );
                 }
-                for parent in &parents {
-                    if let Some(value) = spread.get_mut(parent) {
+                for child in &children {
+                    if let Some(value) = spread.get_mut(child) {
                         *value += delta;
                     }
                 }
+            } else {
+                for child in &children {
+                    if let Some(value) = spread.get_mut(child) {
+                        *value += 0.5 * (junction - *value);
+                    }
+                }
             }
-            log_big_moves(&prev_attr, &spread, "attr");
-            let prev_repel = spread.clone();
-            // 3) Abstoßung: innerhalb der Gruppen (Karten) und zwischen den
-            //    Gruppen (Container) als starre Blöcke (siehe `repel` oben).
-            repel_pass(
-                &mut spread,
-                &rows,
-                &row_order,
-                data,
-                &relations,
-                &levels,
-                view,
-                orientation,
-                card_h,
-                &widths,
-                gap,
-                sibling_container_padding,
-                couple_gap,
-                &group_of,
-                &shown_partners,
-            );
-            log_big_moves(&prev_repel, &spread, "repel");
+            let target =
+                children.iter().map(|c| spread[*c]).sum::<f32>() / children.len() as f32;
+            let parent_mean =
+                parents.iter().map(|p| spread[*p]).sum::<f32>() / parents.len() as f32;
+            let delta = 0.4 * (target - parent_mean);
+            if log_layout && delta.abs() > 500.0 {
+                log::debug!(
+                    "NEG_ATTR_PARENT family={} delta={:.0} target={:.0} parent_mean={:.0}",
+                    family.id,
+                    delta,
+                    target,
+                    parent_mean
+                );
+            }
+            for parent in &parents {
+                if let Some(value) = spread.get_mut(parent) {
+                    *value += delta;
+                }
+            }
         }
+        log_big_moves(&prev_attr, &spread, "attr");
+        let prev_repel = spread.clone();
+        // 3) Abstoßung: innerhalb der Gruppen (Karten) und zwischen den
+        //    Gruppen (Container) als starre Blöcke (siehe `repel` oben).
+        repel_pass(
+            &mut spread,
+            &rows,
+            &row_order,
+            data,
+            &relations,
+            &levels,
+            view,
+            orientation,
+            card_h,
+            &widths,
+            gap,
+            sibling_container_padding,
+            couple_gap,
+            &group_of,
+            &shown_partners,
+        );
+        log_big_moves(&prev_repel, &spread, "repel");
     }
 
     dump_stage("NEG", &spread);
@@ -2550,13 +3292,14 @@ pub fn draw_tree(
                 // Rahmen ziehen (Klick+Drag, ohne Shift): der ganze Zweig
                 // folgt — Person + sichtbare Partner erhalten den Versatz,
                 // die Kinder erben ihn über die Junction-Vererbung.
-                let frame_hit = painter.ctx().input(|i| {
-                    i.pointer.primary_down()
-                        && i.modifiers.shift
-                        && i.pointer.press_origin().is_some_and(|q| {
-                            outer.contains(q) && painter.clip_rect().contains(q)
-                        })
-                });
+                let frame_hit = !input_blocked
+                    && painter.ctx().input(|i| {
+                        i.pointer.primary_down()
+                            && i.modifiers.shift
+                            && i.pointer.press_origin().is_some_and(|q| {
+                                outer.contains(q) && painter.clip_rect().contains(q)
+                            })
+                    });
                 if frame_hit
                     && card_drag
                         .as_ref()
@@ -2718,6 +3461,9 @@ pub fn draw_tree(
                 let is_active = card_drag.as_ref().is_some_and(|(id, _)| *id == marker);
                 if viewport.intersects(container_rect) {
                     let (container_delta, container_start) = painter.ctx().input(|i| {
+                        if input_blocked {
+                            return (0.0, false);
+                        }
                         if !(i.pointer.primary_down() && i.modifiers.shift) {
                             return (0.0, false);
                         }
@@ -2921,6 +3667,10 @@ pub fn draw_tree(
             media_base,
             photo_cache,
             card_rects,
+            input_blocked,
+            multi,
+            photo_full_zoom,
+            initials_full_zoom,
         );
         // Ausklapp-Abzeichen: Grenzknoten mit nicht sichtbaren Verwandten.
         let has_more = {
@@ -2947,7 +3697,11 @@ pub fn draw_tree(
         };
         let badge_r = 9.0 * zoom;
         let badge_rect = Rect::from_center_size(badge_at, Vec2::splat(badge_r * 2.0));
-        let pointer_pos = painter.ctx().input(|i| i.pointer.interact_pos());
+        let pointer_pos = if input_blocked {
+            None
+        } else {
+            painter.ctx().input(|i| i.pointer.interact_pos())
+        };
         let canvas = painter.clip_rect();
         let card_hovered = pointer_pos
             .is_some_and(|q| (card.contains(q) || badge_rect.contains(q)) && canvas.contains(q));
@@ -2986,12 +3740,13 @@ pub fn draw_tree(
                     Stroke::new(1.5, Color32::from_rgb(158, 213, 199)),
                 );
             }
-            badge_clicked = painter.ctx().input(|i| {
-                i.pointer.any_click()
-                    && i.pointer
-                        .interact_pos()
-                        .is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
-            });
+            badge_clicked = !input_blocked
+                && painter.ctx().input(|i| {
+                    i.pointer.any_click()
+                        && i.pointer
+                            .interact_pos()
+                            .is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
+                });
             if badge_clicked {
                 *action = Some(TreeAction::ToggleExpand(person.id.clone()));
             }
@@ -3005,12 +3760,15 @@ pub fn draw_tree(
                 .find(|parent| parent.gender == crate::model::Gender::Male)
                 .or_else(|| parents.first());
             if let Some(parent) = target {
-                draw_up_badge(painter, card, zoom, orientation, action, &parent.id);
+                draw_up_badge(painter, card, zoom, orientation, action, &parent.id, input_blocked);
             }
         }
         if !badge_clicked && card_clicked {
             let shift = painter.ctx().input(|i| i.modifiers.shift);
-            *action = Some(if shift {
+            let ctrl = painter.ctx().input(|i| i.modifiers.ctrl);
+            *action = Some(if ctrl {
+                TreeAction::ToggleMulti(person.id.clone())
+            } else if shift {
                 TreeAction::Reference(person.id.clone())
             } else {
                 TreeAction::View(person.id.clone())
@@ -3020,7 +3778,8 @@ pub fn draw_tree(
             // Langer Touch (≥ 0,6 s) setzt die Referenzperson – NUR bei
             // echtem Touch (`any_touches`), nicht bei gedrückter Maustaste;
             // pro Drücken nur einmal (`long_press_used`, Reset in `ui`).
-            let long_pressed = card_on_screen
+            let long_pressed = !input_blocked
+                && card_on_screen
                 && painter.ctx().input(|i| {
                     i.any_touches()
                     && i.pointer.press_origin().is_some_and(|q| {
@@ -3041,6 +3800,9 @@ pub fn draw_tree(
         // Einmal gestartet, läuft er bis zum Loslassen – auch wenn die Karte
         // den ursprünglichen Press-Punkt längst verlassen hat.
         let (manual_delta, drag_start) = painter.ctx().input(|i| {
+            if input_blocked {
+                return (0.0, false);
+            }
             let is_active = card_drag
                 .as_ref()
                 .is_some_and(|(id, _)| id == person.id.as_str());
@@ -3170,6 +3932,10 @@ pub fn draw_tree(
                 media_base,
                 photo_cache,
                 card_rects,
+                input_blocked,
+                multi,
+                photo_full_zoom,
+                initials_full_zoom,
             );
             let partner_active = card_drag
                 .as_ref()
@@ -3177,18 +3943,22 @@ pub fn draw_tree(
             if !partner_on_screen && !partner_active {
                 continue;
             }
-            let partner_long = painter.ctx().input(|i| {
-                i.any_touches()
-                    && i.pointer
-                        .press_origin()
-                        .is_some_and(|q| partner_card.contains(q) && painter.clip_rect().contains(q))
-                    && i.pointer
-                        .press_start_time()
-                        .is_some_and(|t0| i.time - t0 >= 0.6)
-            });
+            let partner_long = !input_blocked
+                && painter.ctx().input(|i| {
+                    i.any_touches()
+                        && i.pointer
+                            .press_origin()
+                            .is_some_and(|q| partner_card.contains(q) && painter.clip_rect().contains(q))
+                        && i.pointer
+                            .press_start_time()
+                            .is_some_and(|t0| i.time - t0 >= 0.6)
+                });
             if partner_clicked {
                 let shift = painter.ctx().input(|i| i.modifiers.shift);
-                *action = Some(if shift {
+                let ctrl = painter.ctx().input(|i| i.modifiers.ctrl);
+                *action = Some(if ctrl {
+                    TreeAction::ToggleMulti(partner.id.clone())
+                } else if shift {
                     TreeAction::Reference(partner.id.clone())
                 } else {
                     TreeAction::View(partner.id.clone())
@@ -3203,7 +3973,7 @@ pub fn draw_tree(
                     .find(|parent| parent.gender == crate::model::Gender::Male)
                     .or_else(|| parents.first());
                 if let Some(parent) = target {
-                    draw_up_badge(painter, partner_card, zoom, orientation, action, &parent.id);
+                    draw_up_badge(painter, partner_card, zoom, orientation, action, &parent.id, input_blocked);
                 }
             }
             if partner_long && !*long_press_used {
@@ -3220,7 +3990,8 @@ pub fn draw_tree(
             };
             let swap_axis: f32 = painter.ctx().input(|i| {
                 if !i.pointer.primary_down() {
-                    // Losgelassen: Gestus-Latches räumen.
+                    // Losgelassen: Gestus-Latches räumen (läuft auch bei
+                    // offenem Modal, damit kein Zustand hängen bleibt).
                     *swap_latch = false;
                     if card_drag
                         .as_ref()
@@ -3228,6 +3999,10 @@ pub fn draw_tree(
                     {
                         *card_drag = None;
                     }
+                    return 0.0;
+                }
+                // Offenes Modal: kein Tausch-Drag starten/fortsetzen.
+                if input_blocked {
                     return 0.0;
                 }
                 // Nach einem Tausch sperren, bis die Maustaste losgelassen
@@ -4168,6 +4943,8 @@ fn draw_up_badge(
     orientation: TreeOrientation,
     action: &mut Option<TreeAction>,
     target_id: &str,
+    // true bei offenem Modal: Hover und Klick sind gesperrt.
+    input_blocked: bool,
 ) {
     let (badge_at, _arrow_vec) = if orientation == TreeOrientation::Vertical {
         (
@@ -4183,11 +4960,12 @@ fn draw_up_badge(
     let badge_r = 9.0 * zoom;
     let badge_rect = Rect::from_center_size(badge_at, Vec2::splat(badge_r * 2.0));
     // Hover-Zone: Karte ∪ Badge (Badge liegt teils außerhalb der Karte).
-    let hovered = painter.ctx().input(|i| {
-        i.pointer.interact_pos().is_some_and(|q| {
-            (card.contains(q) || badge_rect.contains(q)) && painter.clip_rect().contains(q)
-        })
-    });
+    let hovered = !input_blocked
+        && painter.ctx().input(|i| {
+            i.pointer.interact_pos().is_some_and(|q| {
+                (card.contains(q) || badge_rect.contains(q)) && painter.clip_rect().contains(q)
+            })
+        });
     if !hovered {
         return;
     }
@@ -4203,12 +4981,13 @@ fn draw_up_badge(
         Vec2::new(0.0, -9.0 * zoom),
         Stroke::new(1.5, Color32::from_rgb(158, 213, 199)),
     );
-    let clicked = painter.ctx().input(|i| {
-        i.pointer.any_click()
-            && i.pointer
-                .interact_pos()
-                .is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
-    });
+    let clicked = !input_blocked
+        && painter.ctx().input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|q| badge_rect.contains(q) && painter.clip_rect().contains(q))
+        });
     if clicked {
         *action = Some(TreeAction::Reference(target_id.to_string()));
     }
@@ -4281,6 +5060,15 @@ fn draw_person_card(
     media_base: &std::path::Path,
     photo_cache: &mut HashMap<String, TextureHandle>,
     hit_rects: &mut Vec<(String, Rect)>,
+    // true bei offenem Modal: Klicks auf die Karte sind gesperrt.
+    input_blocked: bool,
+    // Mehrfachauswahl (Auswahlreihenfolge): aktive Auswahl (`selected_now`)
+    // bleibt grün gefüllt, weitere Ausgewählte nur dick grün umrandet.
+    multi: &[String],
+    // Zoom-Faktoren fürs Umschalten auf die Ganzfoto-Ansicht (Einstellungen):
+    // mit Foto / ohne Foto (Initialen).
+    photo_full_zoom: f32,
+    initials_full_zoom: f32,
 ) -> bool {
     let size = Vec2::new(width, card_layout.height()) * zoom;
     let card = Rect::from_center_size(at, size);
@@ -4288,6 +5076,15 @@ fn draw_person_card(
         return false;
     }
     hit_rects.push((person.id.clone(), card));
+    let multi_now = !selected_now && multi.iter().any(|id| id == &person.id);
+    // Ganzfoto-Schwelle je Fotostatus (Einstellungen): Foto einmal holen,
+    // Schwelle wählen, dann rendern.
+    let photo = photo_card_texture(painter.ctx(), person, photo_cache, media_base);
+    let full_zoom = if photo.is_some() {
+        photo_full_zoom
+    } else {
+        initials_full_zoom
+    };
     let fill = match (person.gender, selected_now) {
         (_, true) => Color32::from_rgb(43, 121, 113),
         (crate::model::Gender::Female, _) => Color32::from_rgb(112, 66, 72),
@@ -4304,7 +5101,7 @@ fn draw_person_card(
         10. * zoom,
         fill,
         Stroke::new(
-            if selected_now {
+            if selected_now || multi_now {
                 2.5
             } else if muted {
                 0.8
@@ -4315,14 +5112,12 @@ fn draw_person_card(
         ),
         egui::StrokeKind::Outside,
     );
-    if zoom < CARD_DETAIL_MIN_ZOOM {
+    if zoom < full_zoom {
         // Statt leerer Farbfläche füllt das Profilbild die Karte, ohne sie zu
         // verzerren: Cover-Beschnitt mit dem KARTEN-Seitenverhältnis, sodass
         // die Box vollständig und ungestreckt gefüllt ist. Ohne Foto stehen
         // dezente Initialen in der Kartenmitte.
-        if let Some(texture) =
-            photo_card_texture(painter.ctx(), person, photo_cache, media_base)
-        {
+        if let Some(texture) = photo {
             let tv = texture.size_vec2();
             let card_aspect = card.width() / card.height().max(1.0);
             let uv = cover_uv_to(
@@ -4333,12 +5128,22 @@ fn draw_person_card(
             painter
                 .with_clip_rect(card)
                 .image(texture.id(), card, uv, Color32::WHITE);
+            // Foto-Ecken stehen über den Border-Radius über (eckiger Clip vs.
+            // runder Rahmen): Ecken mit Kartenfüllung abdecken — außerhalb der
+            // Rundung, auf die Karte geclippt (Diagonale ≈ 0,41 × Radius).
+            painter.with_clip_rect(card).rect(
+                card,
+                10. * zoom,
+                Color32::TRANSPARENT,
+                Stroke::new((4.5 * zoom).max(1.0), fill),
+                egui::StrokeKind::Outside,
+            );
             painter.rect(
                 card,
                 10. * zoom,
                 Color32::TRANSPARENT,
                 Stroke::new(
-                    if selected_now {
+                    if selected_now || multi_now {
                         2.5
                     } else if muted {
                         0.8
@@ -4359,6 +5164,9 @@ fn draw_person_card(
             );
         }
         let canvas = painter.clip_rect();
+        if input_blocked {
+            return false;
+        }
         return painter.ctx().input(|i| {
             i.pointer.any_click()
                 && i.pointer
@@ -4484,148 +5292,15 @@ fn draw_person_card(
         );
     }
     let canvas = painter.clip_rect();
-    painter.ctx().input(|i| {
-        i.pointer.any_click()
-            && i.pointer
-                .interact_pos()
-                .is_some_and(|q| card.contains(q) && canvas.contains(q))
-    })
+    !input_blocked
+        && painter.ctx().input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|q| card.contains(q) && canvas.contains(q))
+        })
 }
 
-/// Berechnet rekursiv ein absolut überschneidungsfreies, mathematisch perfektes Vorfahren-Layout (Binärbaum).
-/// - Väter stehen immer links, Mütter immer rechts.
-/// - Das Kind steht genau zentriert im Abstand zwischen Vater und Mutter.
-/// - Subtree-Abstände werden ebenenweise verhandelt, damit sich auch entfernte Zweige niemals überlagern.
-fn layout_ancestors<'a>(
-    id: &'a str,
-    relations: &TreeRelations<'a>,
-    data: &TreeData,
-    levels: &HashMap<&str, usize>,
-    widths: &HashMap<&str, f32>,
-    gap: f32,
-) -> HashMap<&'a str, f32> {
-    let mut layout = HashMap::new();
-    layout.insert(id, 0.0);
-
-    // Wenn der Knoten nicht sichtbar ist (Limit erreicht), sind wir fertig.
-    if !levels.contains_key(id) {
-        return layout;
-    }
-
-    // Finde Väter (männlich/links) und Mütter (weiblich/rechts) im sichtbaren Baum
-    let parents = relations.parents_of(id);
-    let mut father = None;
-    let mut mother = None;
-    for p in parents {
-        if levels.contains_key(p.id.as_str()) {
-            if p.gender == crate::model::Gender::Male {
-                father = Some(p.id.as_str());
-            } else if p.gender == crate::model::Gender::Female {
-                mother = Some(p.id.as_str());
-            } else if father.is_none() {
-                father = Some(p.id.as_str());
-            } else {
-                mother = Some(p.id.as_str());
-            }
-        }
-    }
-
-    match (father, mother) {
-        (Some(f), Some(m)) => {
-            // Rekursiv die Layouts für Vater- und Mutter-Teilbäume berechnen (jeweils mit 0.0 als lokales Zentrum)
-            let f_layout = layout_ancestors(f, relations, data, levels, widths, gap);
-            let m_layout = layout_ancestors(m, relations, data, levels, widths, gap);
-
-            // Bestimme den minimalen Abstand, den wir zwischen dem Vater-Teilbaum und dem Mutter-Teilbaum brauchen,
-            // damit sich auf KEINER Ebene (Generation) die Karten überlappen.
-            let mut min_distance = 0.0f32;
-
-            // Sammle alle Generationenebenen (Level), die in beiden Teilbäumen vorkommen
-            let mut levels_in_subtrees: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
-            for &fid in f_layout.keys() {
-                if let Some(&lvl) = levels.get(fid) {
-                    levels_in_subtrees.insert(lvl);
-                }
-            }
-            for &mid in m_layout.keys() {
-                if let Some(&lvl) = levels.get(mid) {
-                    levels_in_subtrees.insert(lvl);
-                }
-            }
-
-            for lvl in levels_in_subtrees {
-                // Maximale rechte Position im Vater-Teilbaum auf dieser Ebene finden
-                let mut max_f_right = None;
-                for (&fid, &f_offset) in &f_layout {
-                    if levels.get(fid) == Some(&lvl) {
-                        let w = widths.get(fid).copied().unwrap_or(215.0);
-                        let right = f_offset + w / 2.0;
-                        if max_f_right.is_none() || right > max_f_right.unwrap() {
-                            max_f_right = Some(right);
-                        }
-                    }
-                }
-
-                // Minimale linke Position im Mutter-Teilbaum auf dieser Ebene finden
-                let mut min_m_left = None;
-                for (&mid, &m_offset) in &m_layout {
-                    if levels.get(mid) == Some(&lvl) {
-                        let w = widths.get(mid).copied().unwrap_or(215.0);
-                        let left = m_offset - w / 2.0;
-                        if min_m_left.is_none() || left < min_m_left.unwrap() {
-                            min_m_left = Some(left);
-                        }
-                    }
-                }
-
-                if let (Some(f_right), Some(m_left)) = (max_f_right, min_m_left) {
-                    // Benötigter Abstand: rechter Rand Vater - linker Rand
-                    // Mutter + Baum-Abstand. Im Vorfahren-Automatiklayout
-                    // liegt damit der konfigurierte `gap` zwischen den
-                    // Kartengruppen (Default-Abstand); nur der finale Pass
-                    // nach manuellen Versätzen kappt auf `MIN_CARD_GAP`.
-                    let needed_sep = f_right - m_left + gap;
-                    if needed_sep > min_distance {
-                        min_distance = needed_sep;
-                    }
-                }
-            }
-
-            // Standardabstand aus Kartenbreiten, falls keine gemeinsamen Ebenen vorliegen
-            let wf = widths.get(f).copied().unwrap_or(215.0);
-            let wm = widths.get(m).copied().unwrap_or(215.0);
-            let default_sep = (wf + wm) / 2.0 + gap;
-            // Zwischen NICHT verheirateten Personen gilt ein um 30px erhöhter
-            // Mindestabstand (verheiratete Paare bleiben kompakt).
-            let extra = if data.partner_relation_of(f, m) == crate::model::PartnerRelation::Married {
-                0.0
-            } else {
-                30.0
-            };
-            let sep = min_distance.max(default_sep) + extra;
-
-            // Zentrierung relativ zur Lücke (Zwischenraum) zwischen den beiden Eltern:
-            // (c1.r + c2.l)/2 = d1.c -> shift_f + shift_m = (wm - wf) / 2
-            let shift_f = -sep / 2.0 + (wm - wf) / 4.0;
-            let shift_m = sep / 2.0 + (wm - wf) / 4.0;
-
-            for (fid, f_offset) in f_layout {
-                layout.insert(fid, f_offset + shift_f);
-            }
-            for (mid, m_offset) in m_layout {
-                layout.insert(mid, m_offset + shift_m);
-            }
-        }
-        (Some(p_id), None) | (None, Some(p_id)) => {
-            // Nur ein Elternteil vorhanden -> Direkt zentriert darüber platzieren
-            let p_layout = layout_ancestors(p_id, relations, data, levels, widths, gap);
-            for (id, offset) in p_layout {
-                layout.insert(id, offset);
-            }
-        }
-        (None, None) => {}
-    }
-
-    layout
-}
+// Vorfahren laufen über `layout_ancestor_occs` (Occurrence-Modell mit
+// kanonischer Expansion, manuellen Versätzen und Extra-Abstand für nicht
+// verheiratete Paare) — dort liegt die gepflegte Implementierung.

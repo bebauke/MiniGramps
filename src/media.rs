@@ -75,6 +75,64 @@ pub fn rotate_image_file_90(media_base: &Path, relative: &str) -> bool {
     image.rotate90().save(&path).is_ok()
 }
 
+/// Profil-/Galeriebild um 90° gegen den Uhrzeigersinn drehen (siehe
+/// `rotate_image_file_90` — eigener Pfad statt dreimaligem Speichern,
+/// damit JPEGs nicht mehrfach neu kodiert werden).
+pub fn rotate_image_file_ccw(media_base: &Path, relative: &str) -> bool {
+    let path = media_path(media_base, relative);
+    let Ok(image) = image::open(&path) else {
+        return false;
+    };
+    image.rotate270().save(&path).is_ok()
+}
+
+/// Scanlinien/Druckraster glätten (3×3-Median je Kanal): dünne Linien und
+/// Halbtonpunkte verschwinden, Flächen und Kanten bleiben weitgehend
+/// erhalten. Einmaliger expliziter Eingriff auf der Basisdatei (Viewer
+/// „Bearbeiten") — nichts Automatischem in der Thumb-Pipeline.
+pub fn median_3x3(image: &image::RgbaImage) -> image::RgbaImage {
+    let (width, height) = image.dimensions();
+    let mut out = image.clone();
+    if width < 3 || height < 3 {
+        return out;
+    }
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let mut window = [[0u8; 9]; 4];
+            let mut index = 0;
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let pixel = image.get_pixel(
+                        (x as i32 + dx) as u32,
+                        (y as i32 + dy) as u32,
+                    );
+                    for channel in 0..4 {
+                        window[channel][index] = pixel[channel];
+                    }
+                    index += 1;
+                }
+            }
+            let mut mixed = image::Rgba([0, 0, 0, 0]);
+            for channel in 0..4 {
+                window[channel].sort_unstable();
+                mixed[channel] = window[channel][4];
+            }
+            out.put_pixel(x, y, mixed);
+        }
+    }
+    out
+}
+
+/// Scanlinien aus der Basisdatei herausrechnen (3×3-Median, Datei wird
+/// überschrieben); Aufrufer frischen danach die Thumbs auf.
+pub fn descreen_image_file(media_base: &Path, relative: &str) -> bool {
+    let path = media_path(media_base, relative);
+    let Ok(image) = image::open(&path) else {
+        return false;
+    };
+    median_3x3(&image.to_rgba8()).save(&path).is_ok()
+}
+
 /// Alle zwischengespeicherten Vorschaubilder löschen (Anzahl zurück).
 /// Avatare und Galerie werden danach bei Bedarf neu aus den Originalen
 /// erzeugt (z. B. nach einem Logikwechsel wie Original statt Thumbnail).
@@ -1168,6 +1226,46 @@ mod tests {
         assert_eq!(rotated.dimensions(), (2, 4));
         assert!(!rotate_image_file_90(&temp, "media/missing.png"));
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn rotate_ccw_swaps_image_dimensions() {
+        use image::{GenericImageView, RgbaImage};
+        let temp = std::env::temp_dir().join("minigramps-rotate-ccw-test");
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("media")).unwrap();
+        RgbaImage::new(4, 2).save(temp.join("media").join("pic.png")).unwrap();
+        assert!(rotate_image_file_ccw(&temp, "media/pic.png"));
+        let rotated = image::open(temp.join("media").join("pic.png")).unwrap();
+        assert_eq!(rotated.dimensions(), (2, 4));
+        assert!(!rotate_image_file_ccw(&temp, "media/missing.png"));
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn median_removes_scanline_and_keeps_flat_areas() {
+        use image::{GenericImageView, RgbaImage};
+        // Graue Fläche mit einer weißen Scanlinie in der Mitte.
+        let striped = RgbaImage::from_fn(7, 7, |_x, y| {
+            if y == 3 {
+                image::Rgba([255, 255, 255, 255])
+            } else {
+                image::Rgba([100, 100, 100, 255])
+            }
+        });
+        let cleaned = median_3x3(&striped);
+        assert_eq!(cleaned.dimensions(), (7, 7));
+        // Linie getilgt (3 weiße gegen 6 graue Nachbarn verlieren).
+        assert_eq!(cleaned.get_pixel(3, 3), &image::Rgba([100, 100, 100, 255]));
+        // Fläche unverändert.
+        assert_eq!(cleaned.get_pixel(0, 0), &image::Rgba([100, 100, 100, 255]));
+        assert_eq!(cleaned.get_pixel(6, 6), &image::Rgba([100, 100, 100, 255]));
+        // Reine Fläche bleibt exakt gleich.
+        let flat = RgbaImage::from_pixel(5, 5, image::Rgba([42, 42, 42, 255]));
+        assert_eq!(median_3x3(&flat), flat);
+        // Zu kleine Bilder kommen unverändert zurück.
+        let tiny = RgbaImage::new(2, 2);
+        assert_eq!(median_3x3(&tiny), tiny);
     }
 
     #[test]
