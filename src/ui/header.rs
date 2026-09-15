@@ -273,6 +273,17 @@ pub fn show(app: &mut MiniGramps, ctx: &egui::Context) {
                             app.debug_rebuild_avatars();
                             ui.close();
                         }
+                        if ui
+                            .button("Doppelte Beziehungen entfernen")
+                            .on_hover_text(
+                                "Dieselbe Beziehung (Partner/Kind) gibt es genau einmal: \
+                                 doppelte Kinder- und Familieneinträge vereinen.",
+                            )
+                            .clicked()
+                        {
+                            app.debug_dedupe_relationships();
+                            ui.close();
+                        }
                         ui.separator();
                         ui.horizontal(|ui| {
                             ui.label("Match-Schwelle");

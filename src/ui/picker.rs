@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use eframe::egui::{self, TextureHandle};
 
 use crate::media::avatar_ui_preview;
-use crate::model::{ChildRelation, Event, EventKind, Gender, Person, person};
+use crate::model::{Certainty, ChildRelation, Event, EventKind, Gender, Person, SourceEntry, person};
 use crate::ui::tree::RelationKind;
 use crate::ui::{ICON_CLOSE, MiniGramps, icon, icon_only_button};
 
@@ -61,6 +61,10 @@ pub(crate) fn ellipsize(text: &str, max_chars: usize) -> String {
 /// Platz für einen nachfolgenden Icon-Knopf (z. B. Entfernen), den die
 /// Namensbox freihalten muss, damit die Zeile nicht übersteht.
 pub(crate) const TRAILING_ICON_RESERVE: f32 = 36.0;
+
+/// Platz für zwei nachfolgende Icon-Knöpfe (z. B. Menü + Entfernen), den die
+/// Namensbox freihalten muss, damit die Zeile nicht übersteht.
+pub(crate) const TRAILING_TWO_ICON_RESERVE: f32 = 64.0;
 
 /// Klickbare, linksbündige Namenszeile mit FESTEM Rechteck (Flattersatz,
 /// kein Blocksatz): Sie belegt exakt `verfügbare Breite minus reserve` und
@@ -368,12 +372,22 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
 
     let needle = app.relation_query.to_lowercase();
     if !needle.is_empty() {
+        // Token-Suche über Vor- + Nachname (+ Legacy): jedes Token muss
+        // vorkommen (Reihenfolge egal — Nachname zählt mit).
+        let tokens: Vec<&str> = needle.split_whitespace().collect();
         let suggestions: Vec<_> = app
             .data
             .people
             .iter()
             .filter(|person| {
-                person.id != selected_id && person.display_name().to_lowercase().contains(&needle)
+                person.id != selected_id && {
+                    let hay = format!(
+                        "{} {} {}",
+                        person.given_name, person.family_name, person.name
+                    )
+                    .to_lowercase();
+                    tokens.iter().all(|token| hay.contains(token))
+                }
             })
             .take(5)
             .cloned()
@@ -382,47 +396,23 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
             ui.horizontal_wrapped(|ui| {
             ui.label("Verknüpfen:");
             for candidate in suggestions {
-                let name = candidate.display_name();
+                let year = crate::model::birth_year(&candidate.birth);
+                let name = if year.is_empty() {
+                    candidate.display_name()
+                } else {
+                    format!("{} ({year})", candidate.display_name())
+                };
                 if ui
                     .small_button(ellipsize(&name, 30))
-                    .on_hover_text(&name)
+                    .on_hover_text(format!(
+                        "{} — Klick für Übersicht mit Verknüpfen",
+                        candidate.display_name()
+                    ))
                     .clicked()
                 {
-                    let relation = match kind {
-                        RelationKind::Partner => "Partner",
-                        RelationKind::Parent => "Elternteil",
-                        RelationKind::Child => "Kind",
-                        RelationKind::Sibling => "Geschwister",
-                    };
-                    app.snapshot(format!(
-                        "{relation} verknüpfen: {}",
-                        candidate.display_name()
-                    ));
-                    match kind {
-                        RelationKind::Partner => app.data.link_partner(selected_id, &candidate.id),
-                        RelationKind::Parent => app.data.link_child(&candidate.id, selected_id),
-                        RelationKind::Child => {
-                            app.data.link_child_to(
-                                Some(selected_id),
-                                app.pending_child_partner.as_deref(),
-                                &candidate.id,
-                                app.pending_child_relation,
-                            );
-                        }
-                        RelationKind::Sibling => {
-                            let parent_id = app
-                                .data
-                                .parents_of(selected_id)
-                                .first()
-                                .map(|parent| parent.id.clone());
-                            if let Some(parent_id) = parent_id {
-                                app.data.link_child(&parent_id, &candidate.id);
-                            }
-                        }
-                    }
-                    app.relation_picker = None;
-                    app.relation_query.clear();
-                    app.relation_family_name.clear();
+                    // Klick öffnet die Personenübersicht (Verknüpfen dort).
+                    app.link_detail =
+                        Some((selected_id.to_string(), candidate.id.clone(), kind));
                 }
             }
             });
@@ -430,7 +420,150 @@ pub fn suggestions(app: &mut MiniGramps, ui: &mut egui::Ui, kind: RelationKind, 
     }
 }
 
-/// Profil-Zeile (Label + Wert).
+/// Vorschlag als bestehende Person verknüpfen (aus dem Übersichtsmodal):
+/// Snapshot + Art-spezifisches Verknüpfen + Picker zurücksetzen.
+pub fn link_existing(
+    app: &mut MiniGramps,
+    kind: RelationKind,
+    selected_id: &str,
+    candidate: &Person,
+) {
+    let relation = match kind {
+        RelationKind::Partner => "Partner",
+        RelationKind::Parent => "Elternteil",
+        RelationKind::Child => "Kind",
+        RelationKind::Sibling => "Geschwister",
+    };
+    app.snapshot(format!(
+        "{relation} verknüpfen: {}",
+        candidate.display_name()
+    ));
+    match kind {
+        RelationKind::Partner => app.data.link_partner(selected_id, &candidate.id),
+        RelationKind::Parent => app.data.link_child(&candidate.id, selected_id),
+        RelationKind::Child => {
+            app.data.link_child_to(
+                Some(selected_id),
+                app.pending_child_partner.as_deref(),
+                &candidate.id,
+                app.pending_child_relation,
+            );
+        }
+        RelationKind::Sibling => {
+            let parent_id = app
+                .data
+                .parents_of(selected_id)
+                .first()
+                .map(|parent| parent.id.clone());
+            if let Some(parent_id) = parent_id {
+                app.data.link_child(&parent_id, &candidate.id);
+            }
+        }
+    }
+    app.relation_picker = None;
+    app.relation_query.clear();
+    app.relation_family_name.clear();
+}
+
+/// Personenübersicht zum Verknüpfungs-Vorschlag (Klick in der Trefferliste):
+/// Beziehungen der Person plus Verknüpfen-Button.
+pub fn show_link_detail(app: &mut MiniGramps, ctx: &egui::Context) {
+    let Some((selected_id, candidate_id, kind)) = app.link_detail.clone() else {
+        return;
+    };
+    let Some(person) = app.data.find(&candidate_id).cloned() else {
+        app.link_detail = None;
+        return;
+    };
+    // Beziehungen einsammeln (owned, damit unten `&mut app` geht).
+    let relations = crate::ui::tree::TreeRelations::new(&app.data);
+    let names_of = |people: &[&Person]| {
+        people
+            .iter()
+            .map(|person| person.display_name())
+            .collect::<Vec<_>>()
+    };
+    let parents = names_of(relations.parents_of(&candidate_id));
+    let mut sibling_ids: Vec<String> = Vec::new();
+    for parent in relations.parents_of(&candidate_id) {
+        for child in relations.children_of(&parent.id) {
+            if child.id != candidate_id && !sibling_ids.contains(&child.id) {
+                sibling_ids.push(child.id.clone());
+            }
+        }
+    }
+    let siblings: Vec<String> = sibling_ids
+        .iter()
+        .filter_map(|id| app.data.find(id))
+        .map(|sibling| sibling.display_name())
+        .collect();
+    let partners = names_of(relations.partners_of(&candidate_id));
+    let children = names_of(relations.children_of(&candidate_id));
+    let born = if person.birth.trim().is_empty() {
+        "–".to_string()
+    } else {
+        person.birth.clone()
+    };
+    let died = if person.death.trim().is_empty() {
+        "–".to_string()
+    } else {
+        person.death.clone()
+    };
+    let kind_label = match kind {
+        RelationKind::Partner => "Partner",
+        RelationKind::Parent => "Elternteil",
+        RelationKind::Child => "Kind",
+        RelationKind::Sibling => "Geschwister",
+    };
+    let mut open = true;
+    let mut link_now = false;
+    egui::Window::new(crate::ui::window_title("Personenübersicht"))
+        .id(egui::Id::new("link-detail-v1"))
+        .open(&mut open)
+        .movable(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(380.0)
+        .max_height(ctx.content_rect().height() * 0.8)
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new(person.display_name()).strong());
+            ui.small(format!(
+                "{} · {born} – {died}",
+                gender_label(person.gender)
+            ));
+            ui.separator();
+            for (title, entries) in [
+                ("Eltern", &parents),
+                ("Geschwister", &siblings),
+                ("Partner", &partners),
+                ("Kinder", &children),
+            ] {
+                ui.label(egui::RichText::new(title).strong());
+                if entries.is_empty() {
+                    ui.small("–");
+                }
+                for entry in entries {
+                    ui.small(entry);
+                }
+            }
+            ui.separator();
+            if ui
+                .button("Verknüpfen")
+                .on_hover_text(format!("{kind_label} verknüpfen"))
+                .clicked()
+            {
+                link_now = true;
+            }
+        });
+    if link_now {
+        link_existing(app, kind, &selected_id, &person);
+        app.link_detail = None;
+    }
+    if !open {
+        app.link_detail = None;
+    }
+}
 pub fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.label(
         egui::RichText::new(label)
@@ -439,6 +572,28 @@ pub fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
     );
     let value = if value.is_empty() { "-" } else { value };
     left_label_single(ui, value, 13.0, ui.visuals().text_color());
+    ui.add_space(7.0);
+}
+
+/// Warnfarbe für Handlungsbedarf (Sicherheits-Warnstufe).
+pub fn warn_color() -> egui::Color32 {
+    egui::Color32::from_rgb(235, 175, 60)
+}
+
+/// Profil-Zeile mit Warntönung des Werts (Sicherheit unter Warnstufe).
+pub fn info_row_warn(ui: &mut egui::Ui, label: &str, value: &str, warn: bool) {
+    ui.label(
+        egui::RichText::new(label)
+            .small()
+            .color(crate::ui::panels::dim_text(ui)),
+    );
+    let value = if value.is_empty() { "-" } else { value };
+    let color = if warn {
+        warn_color()
+    } else {
+        ui.visuals().text_color()
+    };
+    left_label_single(ui, value, 13.0, color);
     ui.add_space(7.0);
 }
 
@@ -473,18 +628,223 @@ pub fn event_kind_combo(
 /// Standard-Ereignisse (immer vorhanden, Art fest, nicht löschbar), weitere
 /// Ereignisse sind frei wählbar. Je Ereignis: Typ als Dropdown, Datum und Ort
 /// direkt als Textfelder. Danach werden die Kurzfelder synchronisiert.
-pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
+/// Kontextmenü je Eintrag (Ereignis, Beziehung, Name …): Notiz ein/aus,
+/// Quelle hinzufügen, hinterlegte Quellenmedien öffnen, Sicherheit wählen.
+/// Gibt (Warnung, zu öffnendes Medium) zurück: Warnung bei Beglaubigt ohne
+/// Quelle (Aufrufer meldet per Status), Medium öffnet der Aufrufer.
+pub fn entry_menu(
+    ui: &mut egui::Ui,
+    notes: &mut Option<String>,
+    sources: &mut Vec<SourceEntry>,
+    certainty: &mut Certainty,
+) -> (bool, Option<String>) {
+    let mut warn = false;
+    let mut open_media: Option<String> = None;
+    ui.label(egui::RichText::new("Eintrag").strong());
+    ui.separator();
+    let note_label = if notes.is_some() {
+        "Notiz entfernen"
+    } else {
+        "Notiz hinzufügen"
+    };
+    if ui.selectable_label(false, note_label).clicked() {
+        if notes.is_some() {
+            *notes = None;
+        } else {
+            *notes = Some(String::new());
+        }
+        ui.close();
+    }
+    if ui.selectable_label(false, "+ Quelle").clicked() {
+        sources.push(SourceEntry {
+            title: String::new(),
+            detail: String::new(),
+            media: None,
+        });
+        ui.close();
+    }
+    // Hinterlegte Quellenmedien (separat von der Galerie) hier öffnen.
+    for source in sources.iter() {
+        if let Some(media) = source.media.as_deref() {
+            if media.trim().is_empty() {
+                continue;
+            }
+            let name = std::path::Path::new(media)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(media);
+            if ui
+                .selectable_label(false, format!("Medium öffnen: {name}"))
+                .clicked()
+            {
+                open_media = Some(media.to_string());
+                ui.close();
+            }
+        }
+    }
+    ui.separator();
+    ui.label(egui::RichText::new("Sicherheit").strong());
+    for level in [
+        Certainty::Unset,
+        Certainty::Oral,
+        Certainty::Document,
+        Certainty::Certified,
+    ] {
+        if ui
+            .selectable_label(*certainty == level, level.label())
+            .clicked()
+        {
+            *certainty = level;
+            if level == Certainty::Certified && sources.iter().all(|source| source.is_empty()) {
+                warn = true;
+            }
+            ui.close();
+        }
+    }
+    (warn, open_media)
+}
+
+/// Notiz-/Quellen-Editor unter einem Eintrag (nur Vorhandenes rendern;
+/// `None` blendet den jeweiligen Teil aus — so lassen sich Map-gestützte
+/// Einträge (Namensteile) ohne Adapter anbinden). `media_base` fürs Anhängen
+/// von Quellenmedien (separat von der Galerie).
+pub fn entry_extras_editor(
+    ui: &mut egui::Ui,
+    notes: Option<&mut String>,
+    sources: Option<&mut Vec<SourceEntry>>,
+    media_base: &std::path::Path,
+) {
+    if let Some(note) = notes {
+        ui.horizontal(|ui| {
+            ui.label("Notiz");
+            ui.add(
+                egui::TextEdit::multiline(note)
+                    .desired_rows(2)
+                    .desired_width(ui.available_width()),
+            );
+        });
+    }
+    if let Some(sources) = sources {
+        if sources.is_empty() {
+            return;
+        }
+        let mut remove_source: Option<usize> = None;
+        for (index, source) in sources.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(if index == 0 { "Quelle" } else { "" });
+                ui.add(
+                    egui::TextEdit::singleline(&mut source.title)
+                        .hint_text("Titel")
+                        .desired_width(100.0),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut source.detail)
+                        .hint_text("Detail/Seite")
+                        .desired_width(ui.available_width()),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("");
+                match source.media.clone() {
+                    None => {
+                        if ui
+                            .small_button("+ Medium")
+                            .on_hover_text("Mediendatei als Beleg anhängen (separat von der Galerie)")
+                            .clicked()
+                        {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                if let Some(relative) = crate::media::import_media_file_async(
+                                    ui.ctx(),
+                                    media_base,
+                                    &path,
+                                ) {
+                                    source.media = Some(relative);
+                                }
+                            }
+                        }
+                    }
+                    Some(media) => {
+                        let name = std::path::Path::new(&media)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(&media);
+                        ui.small(format!("Medium: {name}"));
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Medium lösen (Datei bleibt erhalten)")
+                            .clicked()
+                        {
+                            source.media = None;
+                        }
+                    }
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Quelle entfernen")
+                    .clicked()
+                {
+                    remove_source = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove_source {
+            sources.remove(index);
+        }
+    }
+}
+
+/// Zusatzinfos unter einem Eintrag (lesen + bearbeiten): Notiz, Quellen,
+/// Sicherheit (nur Gesetztes zeigen).
+pub fn entry_extras_view(
+    ui: &mut egui::Ui,
+    notes: Option<&str>,
+    sources: &[SourceEntry],
+    certainty: Certainty,
+) {
+    if let Some(note) = notes {
+        if !note.trim().is_empty() {
+            ui.small(format!("Notiz: {}", note.trim()));
+        }
+    }
+    for source in sources.iter().filter(|source| !source.is_empty()) {
+        let mut text = format!("Quelle: {}", source.title.trim());
+        if !source.detail.trim().is_empty() {
+            text += &format!(" — {}", source.detail.trim());
+        }
+        if let Some(media) = source.media.as_deref() {
+            if !media.trim().is_empty() {
+                text += &format!(" [Medium: {media}]");
+            }
+        }
+        ui.small(text);
+    }
+    if certainty != Certainty::Unset {
+        ui.small(format!("Sicherheit: {}", certainty.label()));
+    }
+}
+
+/// Ereigniseditor (Entwurf): Gibt (Warnung, zu öffnendes Medium) zurück —
+/// Warnung bei Beglaubigt ohne Quelle, Medium öffnet der Aufrufer.
+pub fn events_editor(
+    ui: &mut egui::Ui,
+    person: &mut Person,
+    media_base: &std::path::Path,
+) -> (bool, Option<String>) {
     use crate::model::{Event, EventKind};
     person.ensure_standard_events();
+    let mut warned = false;
+    let mut open_media: Option<String> = None;
     let mut remove: Option<usize> = None;
     for index in 0..person.events.len() {
         let event = &mut person.events[index];
         let standard = event.kind == EventKind::Birth || event.kind == EventKind::Death;
-        // Titelzeile: Ereignisart als (ggf. deaktiviertes) Dropdown.
         // Titelzeile: Ereignisart als (ggf. deaktiviertes) Dropdown über die
         // volle Breite; bei entfernbaren Ereignissen bleibt Platz für das
-        // Entfernen-Icon.
-        let combo_width = (ui.available_width() - if standard { 0.0 } else { 28.0 }).max(80.0);
+        // Entfernen-Icon plus Menü-Button (Eintrags-Menü: Notiz, Quellen,
+        // Sicherheit — Links- wie Rechtsklick; reine Zeilen-Responses hätten
+        // keinen Click-Sense für Rechtsklick).
+        let extra = if standard { 24.0 } else { 52.0 };
+        let combo_width = (ui.available_width() - extra).max(80.0);
         ui.horizontal(|ui| {
             if standard {
                 // Standard-Ereignisse sehen wie ein (deaktiviertes) Dropdown aus.
@@ -495,16 +855,47 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
             } else {
                 event_kind_combo(ui, &mut event.kind, ("event-kind", index), combo_width);
             }
-            if !standard {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !standard {
                     if icon_only_button(ui, ICON_CLOSE, "event-remove")
                         .on_hover_text("Ereignis entfernen")
                         .clicked()
                     {
                         remove = Some(index);
                     }
+                }
+                let menu_button = ui
+                    .small_button("…")
+                    .on_hover_text("Eintrags-Menü: Notiz, Quellen, Sicherheit");
+                egui::Popup::menu(&menu_button).show(|ui| {
+                    let (warn, open) = entry_menu(
+                        ui,
+                        &mut event.notes,
+                        &mut event.sources,
+                        &mut event.certainty,
+                    );
+                    if warn {
+                        warned = true;
+                    }
+                    if open.is_some() {
+                        open_media = open;
+                    }
                 });
-            }
+                egui::Popup::context_menu(&menu_button).show(|ui| {
+                    let (warn, open) = entry_menu(
+                        ui,
+                        &mut event.notes,
+                        &mut event.sources,
+                        &mut event.certainty,
+                    );
+                    if warn {
+                        warned = true;
+                    }
+                    if open.is_some() {
+                        open_media = open;
+                    }
+                });
+            });
         });
         // Datenzeile: Datum und Ort.
         ui.horizontal(|ui| {
@@ -526,6 +917,13 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
                     .desired_width(160.0),
             );
         }
+        // Zusatzinfos darunter (Notiz, Quellen).
+        entry_extras_editor(
+            ui,
+            event.notes.as_mut(),
+            Some(&mut event.sources),
+            media_base,
+        );
         ui.add_space(2.0);
     }
     if let Some(index) = remove {
@@ -539,6 +937,87 @@ pub fn events_editor(ui: &mut egui::Ui, person: &mut Person) {
         person.events.push(Event::new(EventKind::Residence));
     }
     person.sync_standard_fields();
+    (warned, open_media)
+}
+
+fn is_relation_event_kind(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Marriage | EventKind::Divorce)
+}
+
+fn same_relation_event(event: &Event, kind: &EventKind, date: &str, place: &str) -> bool {
+    event.kind == *kind && event.date == date && event.place == place
+}
+
+fn relation_event_keys(
+    app: &MiniGramps,
+    person_id: &str,
+    relative_id: &str,
+) -> Vec<(EventKind, String, String)> {
+    let mut keys: Vec<(EventKind, String, String)> = Vec::new();
+    for pid in [person_id, relative_id] {
+        if let Some(person) = app.data.find(pid) {
+            for event in &person.events {
+                if !is_relation_event_kind(&event.kind) {
+                    continue;
+                }
+                let key = (event.kind.clone(), event.date.clone(), event.place.clone());
+                if !keys
+                    .iter()
+                    .any(|(kind, date, place)| kind == &key.0 && date == &key.1 && place == &key.2)
+                {
+                    keys.push(key);
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn find_relation_event(
+    app: &MiniGramps,
+    person_id: &str,
+    relative_id: &str,
+    key: &(EventKind, String, String),
+) -> Option<Event> {
+    for pid in [person_id, relative_id] {
+        if let Some(person) = app.data.find(pid) {
+            if let Some(event) = person
+                .events
+                .iter()
+                .find(|event| same_relation_event(event, &key.0, &key.1, &key.2))
+            {
+                return Some(event.clone());
+            }
+        }
+    }
+    None
+}
+
+fn upsert_relation_event(
+    app: &mut MiniGramps,
+    pid: &str,
+    old_key: &(EventKind, String, String),
+    next: &Event,
+) {
+    if let Some(person) = app.data.people.iter_mut().find(|person| person.id == pid) {
+        if let Some(event) = person
+            .events
+            .iter_mut()
+            .find(|event| same_relation_event(event, &old_key.0, &old_key.1, &old_key.2))
+        {
+            *event = next.clone();
+        } else {
+            person.events.push(next.clone());
+        }
+    }
+}
+
+fn remove_relation_event(app: &mut MiniGramps, pid: &str, key: &(EventKind, String, String)) {
+    if let Some(person) = app.data.people.iter_mut().find(|person| person.id == pid) {
+        person
+            .events
+            .retain(|event| !same_relation_event(event, &key.0, &key.1, &key.2));
+    }
 }
 
 /// Optionen unter einer aufgeklappten Beziehungszeile (Beziehungseditor):
@@ -581,30 +1060,97 @@ pub fn relation_options(
                         .set_partner_relation(person_id, relative_id, selected);
                 }
                 // Beziehungsereignisse (Gramps: Ereignisse an der Beziehung):
-                // gemeinsame Heirat/Scheidung/Partnerschaft beider Personen,
-                // nur Lesen + Hinzufügen (Details pflegt der Personen-Editor).
+                // Heirat/Scheidung einmal anzeigen und auf beide Partner-
+                // Events spiegeln.
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new("BEZIEHUNGSEREIGNISSE")
                         .small()
                         .color(crate::ui::panels::dim_text(ui)),
                 );
-                let mut couple_events = 0;
-                for pid in [person_id, relative_id] {
-                    if let Some(partner) = app.data.find(pid) {
-                        for event in &partner.events {
-                            if matches!(event.kind, EventKind::Marriage | EventKind::Divorce) {
-                                info_row(
-                                    ui,
-                                    event.kind.label(),
-                                    &dated_place(&event.date, &event.place),
-                                );
-                                couple_events += 1;
+                let keys = relation_event_keys(app, person_id, relative_id);
+                let mut remove_key: Option<(EventKind, String, String)> = None;
+                for (index, key) in keys.iter().enumerate() {
+                    let Some(mut event) = find_relation_event(app, person_id, relative_id, key) else {
+                        continue;
+                    };
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("rel-event-kind", relative_id, index))
+                            .selected_text(event.kind.label())
+                            .width(110.0)
+                            .show_ui(ui, |ui| {
+                                for kind in [EventKind::Marriage, EventKind::Divorce] {
+                                    ui.selectable_value(&mut event.kind, kind.clone(), kind.label());
+                                }
+                            });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut event.date)
+                                .hint_text("Datum")
+                                .desired_width(92.0),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut event.place)
+                                .hint_text("Ort")
+                                .desired_width(ui.available_width().max(80.0)),
+                        );
+                        let menu_button = ui
+                            .small_button("…")
+                            .on_hover_text("Eintrags-Menü: Notiz, Quellen, Sicherheit");
+                        egui::Popup::menu(&menu_button).show(|ui| {
+                            let (warn, open) = entry_menu(
+                                ui,
+                                &mut event.notes,
+                                &mut event.sources,
+                                &mut event.certainty,
+                            );
+                            if warn {
+                                app.status = "Achtung: Beglaubigt ohne Quelle!".into();
                             }
+                            if let Some(relative) = open {
+                                app.open_source_media(&relative);
+                            }
+                        });
+                        egui::Popup::context_menu(&menu_button).show(|ui| {
+                            let (warn, open) = entry_menu(
+                                ui,
+                                &mut event.notes,
+                                &mut event.sources,
+                                &mut event.certainty,
+                            );
+                            if warn {
+                                app.status = "Achtung: Beglaubigt ohne Quelle!".into();
+                            }
+                            if let Some(relative) = open {
+                                app.open_source_media(&relative);
+                            }
+                        });
+                        if icon_only_button(ui, ICON_CLOSE, "rel-event-remove")
+                            .on_hover_text("Beziehungsereignis entfernen")
+                            .clicked()
+                        {
+                            remove_key = Some(key.clone());
                         }
-                    }
+                    });
+                    entry_extras_editor(
+                        ui,
+                        event.notes.as_mut(),
+                        Some(&mut event.sources),
+                        &app.library,
+                    );
+                    upsert_relation_event(app, person_id, key, &event);
+                    upsert_relation_event(app, relative_id, key, &event);
                 }
-                if couple_events == 0 {
+                if let Some(key) = remove_key {
+                    let name = app
+                        .data
+                        .find(relative_id)
+                        .map(|person| person.display_name())
+                        .unwrap_or_else(|| relative_id.to_string());
+                    app.snapshot(format!("Beziehungsereignis entfernen: {name}"));
+                    remove_relation_event(app, person_id, &key);
+                    remove_relation_event(app, relative_id, &key);
+                }
+                if keys.is_empty() {
                     ui.label(
                         egui::RichText::new("Noch keine")
                             .italics()

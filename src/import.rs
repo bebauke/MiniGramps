@@ -15,7 +15,10 @@ use std::{
 
 use roxmltree::Document;
 
-use crate::model::{EventKind, Family, Gender, Person, TreeData, person};
+use crate::model::{
+    AlternativeName, Certainty, DocumentEntry, Event, EventKind, Family, Gender, PartnerRelation,
+    Person, SourceEntry, TreeData, person,
+};
 
 /// Kleine, schnell lesbare Projektbeschreibung neben der eigentlichen
 /// Datendatei. Spaetere `.mfg`/`.mmg`-Pakete verwenden dieselben Felder in
@@ -331,15 +334,66 @@ fn flush_event(
     current_event: &mut Option<EventKind>,
     date: &mut String,
     place: &mut String,
+    description: &mut String,
+    notes: &mut Option<String>,
+    sources: &mut Vec<SourceEntry>,
 ) {
     if let Some(kind) = current_event.take() {
-        if !date.is_empty() || !place.is_empty() {
+        if !date.is_empty() || !place.is_empty() || !description.is_empty() || notes.is_some() || !sources.is_empty() {
             p.events.push(crate::model::Event {
                 kind,
                 date: std::mem::take(date),
                 place: std::mem::take(place),
-                description: String::new(),
+                description: std::mem::take(description),
+                notes: notes.take(),
+                sources: std::mem::take(sources),
+                certainty: Certainty::Unset,
             });
+        }
+        date.clear();
+        place.clear();
+        description.clear();
+        *notes = None;
+        sources.clear();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GedcomNoteTarget {
+    Person,
+    Event,
+    Family,
+}
+
+fn append_note(target: &mut Option<String>, text: &str, newline: bool) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    match target {
+        Some(existing) => {
+            if newline {
+                existing.push('\n');
+            }
+            existing.push_str(text);
+        }
+        None => *target = Some(text.to_string()),
+    }
+}
+
+/// FAM-Ereignis (MARR/DIV) abschließen: Datum/Ort nur merken — die
+/// Übertragung auf beide Elternteile erfolgt NACH dem vollständigen Parsen,
+/// denn Personen können erst später im Text auftauchen.
+fn flush_family_event(
+    family_index: usize,
+    current: &mut Option<EventKind>,
+    date: &mut String,
+    place: &mut String,
+    out: &mut Vec<(usize, EventKind, String, String)>,
+) {
+    if let Some(kind) = current.take() {
+        if !date.is_empty() || !place.is_empty() {
+            out.push((family_index, kind, std::mem::take(date), std::mem::take(place)));
         }
         date.clear();
         place.clear();
@@ -348,7 +402,8 @@ fn flush_event(
 
 /// GEDCOM-Parser: Zeilenzustandsmaschine. Erkennt Personen (INDI), Familien
 /// (FAM), NAME/SEX sowie BIRT/DEAT-Ereignisse mit DATE und PLAC
-/// (Ereignis-Kontext `current_event`).
+/// (Ereignis-Kontext `current_event`). FAM-level MARR/DIV werden samt
+/// DATE/PLAC gesammelt und nach dem Parsen auf beide Elternteile übertragen.
 fn parse_gedcom(text: &str) -> Result<TreeData, String> {
     let mut data = TreeData::default();
     let mut current_person: Option<Person> = None;
@@ -356,24 +411,75 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
     let mut current_event: Option<EventKind> = None;
     let mut current_event_date = String::new();
     let mut current_event_place = String::new();
+    let mut current_event_description = String::new();
+    let mut current_event_notes: Option<String> = None;
+    let mut current_event_sources: Vec<SourceEntry> = Vec::new();
+    let mut current_name = false;
+    let mut current_note_target: Option<GedcomNoteTarget> = None;
+    // Namensblöcke je Person: erster `1 NAME` = Hauptname, jeder weitere =
+    // Alternativname (Gramps-Prinzip). `current_alt` lenkt die Subtags um.
+    let mut name_seen = false;
+    let mut current_alt: Option<usize> = None;
+    // Medien: `0 @X@ OBJE`-Records (Datei+Titel) plus Verweise `1 OBJE @X@`
+    // bzw. eingebettete `1 OBJE`/`2 FILE`-Blöcke je Person.
+    let mut current_obje: Option<String> = None;
+    let mut obje_file: String = String::new();
+    let mut obje_title: String = String::new();
+    let mut obje_records: HashMap<String, (String, String)> = HashMap::new();
+    let mut person_obje: Vec<(String, String)> = Vec::new();
+    let mut inline_obje_person: Option<String> = None;
+    let mut inline_counter: usize = 0;
+    // FAM-Ereigniskontext (MARR/DIV mit LEVEL-2 DATE/PLAC) + gesammelte
+    // Ereignisse, die nach dem Parsen auf die Eltern übertragen werden.
+    let mut current_family_event: Option<EventKind> = None;
+    let mut current_family_event_date = String::new();
+    let mut current_family_event_place = String::new();
+    let mut pending_family_events: Vec<(usize, EventKind, String, String)> = Vec::new();
     for line in text.lines() {
         let part: Vec<_> = line.split_whitespace().collect();
         if part.len() < 2 {
             continue;
         }
         if part[0] == "0" {
+            // FAM-Ereignis am Ende eines FAM-Records abschließen (der neue
+            // RECORD wechselt danach `current_family`).
+            if let Some(family_index) = current_family {
+                flush_family_event(
+                    family_index,
+                    &mut current_family_event,
+                    &mut current_family_event_date,
+                    &mut current_family_event_place,
+                    &mut pending_family_events,
+                );
+            }
             if let Some(ref mut person) = current_person {
                 flush_event(
                     person,
                     &mut current_event,
                     &mut current_event_date,
                     &mut current_event_place,
+                    &mut current_event_description,
+                    &mut current_event_notes,
+                    &mut current_event_sources,
                 );
             }
             if let Some(person) = current_person.take() {
+                let mut person = person;
+                person.alt_names.retain(|alt| !alt.is_empty());
                 data.people.push(person);
             }
             current_family = None;
+            if let Some(obje_id) = current_obje.take() {
+                if !obje_file.trim().is_empty() {
+                    obje_records.insert(obje_id, (obje_file.clone(), obje_title.clone()));
+                }
+            }
+            obje_file.clear();
+            obje_title.clear();
+            inline_obje_person = None;
+            name_seen = false;
+            current_alt = None;
+            current_name = false;
             if part.get(2) == Some(&"INDI") {
                 current_person = Some(person(
                     part[1].trim_matches('@'),
@@ -382,6 +488,8 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
                     "",
                     Gender::Unknown,
                 ));
+            } else if part.get(2) == Some(&"OBJE") {
+                current_obje = Some(part[1].trim_matches('@').to_string());
             } else if part.get(2) == Some(&"FAM") {
                 let id = part[1].trim_matches('@').to_string();
                 data.families.push(Family {
@@ -389,43 +497,249 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
                     parent_a: None,
                     parent_b: None,
                     children: vec![],
+                    notes: None,
+                    sources: Vec::new(),
+                    certainty: Certainty::Unset,
                 });
                 current_family = Some(data.families.len() - 1);
             }
         } else if let Some(p) = current_person.as_mut() {
             match part.get(1).copied() {
                 Some("NAME") => {
+                    flush_event(
+                        p,
+                        &mut current_event,
+                        &mut current_event_date,
+                        &mut current_event_place,
+                        &mut current_event_description,
+                        &mut current_event_notes,
+                        &mut current_event_sources,
+                    );
                     let raw = part[2..].join(" ");
-                    if let Some((given, family)) = raw.split_once('/') {
-                        p.given_name = given.trim().to_string();
-                        p.family_name = family.trim().trim_matches('/').to_string();
+                    let (given, family) = if let Some((given, family)) = raw.split_once('/') {
+                        (
+                            given.trim().to_string(),
+                            family.trim().trim_matches('/').to_string(),
+                        )
                     } else {
                         let tokens: Vec<&str> = raw.split_whitespace().collect();
-                        if let Some((last, first)) = tokens.split_last() {
-                            p.family_name = last.to_string();
-                            p.given_name = first.join(" ");
+                        match tokens.split_last() {
+                            Some((last, first)) => (first.join(" "), last.to_string()),
+                            None => (String::new(), String::new()),
                         }
+                    };
+                    if !name_seen {
+                        // Erster Namensblock = Hauptname.
+                        p.given_name = given;
+                        p.family_name = family;
+                        name_seen = true;
+                        current_alt = None;
+                    } else {
+                        // Jeder weitere Block = Alternativname (Gramps-Prinzip).
+                        let mut alt = AlternativeName::default();
+                        alt.given_name = given;
+                        alt.family_name = family;
+                        p.alt_names.push(alt);
+                        current_alt = Some(p.alt_names.len() - 1);
                     }
-                    current_event = None;
+                    current_name = true;
+                    current_note_target = None;
                 }
                 Some("SEX") => {
+                    if part[0] == "1" {
+                        flush_event(
+                            p,
+                            &mut current_event,
+                            &mut current_event_date,
+                            &mut current_event_place,
+                            &mut current_event_description,
+                            &mut current_event_notes,
+                            &mut current_event_sources,
+                        );
+                        current_name = false;
+                        current_alt = None;
+                        current_note_target = None;
+                    }
                     p.gender = match part.get(2) {
                         Some(&"M") => Gender::Male,
                         Some(&"F") => Gender::Female,
                         _ => Gender::Unknown,
                     };
                 }
+                Some("GIVN") if current_name => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    match current_alt.and_then(|index| p.alt_names.get_mut(index)) {
+                        Some(alt) => alt.given_name = value,
+                        None => p.given_name = value,
+                    }
+                }
+                Some("SURN") if current_name => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    match current_alt.and_then(|index| p.alt_names.get_mut(index)) {
+                        Some(alt) => alt.family_name = value,
+                        None => p.family_name = value,
+                    }
+                }
+                Some("NPFX") if current_name => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    match current_alt.and_then(|index| p.alt_names.get_mut(index)) {
+                        Some(alt) => alt.name_prefix = value,
+                        None => p.name_prefix = value,
+                    }
+                }
+                Some("SPFX") if current_name => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    match current_alt.and_then(|index| p.alt_names.get_mut(index)) {
+                        Some(alt) => alt.surname_prefix = value,
+                        None => p.surname_prefix = value,
+                    }
+                }
+                Some("NSFX") if current_name => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    match current_alt.and_then(|index| p.alt_names.get_mut(index)) {
+                        Some(alt) => alt.suffix = value,
+                        None => p.suffix = value,
+                    }
+                }
+                Some("NICK") if current_name || part[0] == "1" => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    match current_alt.and_then(|index| p.alt_names.get_mut(index)) {
+                        Some(alt) => alt.nick_name = value,
+                        None => p.nick_name = value,
+                    }
+                }
+                Some("TYPE") if current_name => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    match current_alt.and_then(|index| p.alt_names.get_mut(index)) {
+                        Some(alt) => alt.name_type = value,
+                        None => p.name_type = value,
+                    }
+                }
+                Some("TITL") if part[0] == "1" => {
+                    flush_event(
+                        p,
+                        &mut current_event,
+                        &mut current_event_date,
+                        &mut current_event_place,
+                        &mut current_event_description,
+                        &mut current_event_notes,
+                        &mut current_event_sources,
+                    );
+                    p.title = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    current_name = false;
+                    current_alt = None;
+                    current_note_target = None;
+                }
+                Some("NOTE") => {
+                    if part[0] == "1" {
+                        flush_event(
+                            p,
+                            &mut current_event,
+                            &mut current_event_date,
+                            &mut current_event_place,
+                            &mut current_event_description,
+                            &mut current_event_notes,
+                            &mut current_event_sources,
+                        );
+                        let line = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                        if !line.trim().is_empty() {
+                            if !p.notes.trim().is_empty() {
+                                p.notes.push('\n');
+                            }
+                            p.notes.push_str(line.trim());
+                        }
+                        current_name = false;
+                        current_alt = None;
+                        current_note_target = Some(GedcomNoteTarget::Person);
+                    } else if current_event.is_some() {
+                        let line = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                        append_note(&mut current_event_notes, &line, true);
+                        current_note_target = Some(GedcomNoteTarget::Event);
+                    }
+                }
+                Some("SOUR") => {
+                    let Some(value) = part.get(2) else {
+                        continue;
+                    };
+                    let entry = SourceEntry {
+                        title: value.trim_matches('@').to_string(),
+                        detail: String::new(),
+                        media: None,
+                    };
+                    if part[0] == "1" {
+                        flush_event(
+                            p,
+                            &mut current_event,
+                            &mut current_event_date,
+                            &mut current_event_place,
+                            &mut current_event_description,
+                            &mut current_event_notes,
+                            &mut current_event_sources,
+                        );
+                        if !p.sources.contains(&entry) {
+                            p.sources.push(entry);
+                        }
+                        current_name = false;
+                        current_alt = None;
+                        current_note_target = None;
+                    } else if current_event.is_some() && !current_event_sources.contains(&entry) {
+                        current_event_sources.push(entry);
+                    }
+                }
+                Some("CONT" | "CONC") => {
+                    let line = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    let newline = part.get(1) == Some(&"CONT");
+                    match current_note_target {
+                        Some(GedcomNoteTarget::Person) => {
+                            if newline && !p.notes.is_empty() {
+                                p.notes.push('\n');
+                            }
+                            p.notes.push_str(line.trim());
+                        }
+                        Some(GedcomNoteTarget::Event) => {
+                            append_note(&mut current_event_notes, &line, newline);
+                        }
+                        _ => {}
+                    }
+                }
+                Some("TYPE") if current_event.is_some() => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    if let Some(EventKind::Custom(label)) = &mut current_event {
+                        if label == "EVEN" || label.is_empty() {
+                            *label = value;
+                        }
+                    } else if !value.trim().is_empty() {
+                        current_event_description = value;
+                    }
+                }
+                Some("CAUS" | "AGNC") if current_event.is_some() => {
+                    let value = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    if !value.trim().is_empty() {
+                        if !current_event_description.is_empty() {
+                            current_event_description.push_str("; ");
+                        }
+                        current_event_description.push_str(value.trim());
+                    }
+                }
                 Some(
                     tag @ ("BIRT" | "DEAT" | "MARR" | "DIV" | "BAPM" | "CHR" | "BURI" | "CREM"
-                    | "OCCU" | "RESI" | "IMMI" | "EMIG" | "CENS" | "GRAD" | "EDUC" | "RETI"),
+                    | "OCCU" | "RESI" | "IMMI" | "EMIG" | "CENS" | "GRAD" | "EDUC" | "RETI"
+                    | "ADOP" | "CONFIRM" | "FCOM" | "ORDN" | "PROB" | "PROP" | "WILL" | "EVEN"),
                 ) => {
                     flush_event(
                         p,
                         &mut current_event,
                         &mut current_event_date,
                         &mut current_event_place,
+                        &mut current_event_description,
+                        &mut current_event_notes,
+                        &mut current_event_sources,
                     );
                     current_event = Some(EventKind::from_gedcom(tag));
+                    current_event_description = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    current_name = false;
+                    current_alt = None;
+                    current_note_target = None;
                 }
                 Some("DATE") => {
                     if current_event.is_some() {
@@ -448,6 +762,41 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
                         }
                     }
                 }
+                Some("OBJE") if part[0] == "1" => {
+                    match part.get(2).map(|value| value.trim_matches('@')) {
+                        Some(target) if !target.is_empty() && !target.contains(' ') => {
+                            // Verweis auf einen `0 @X@ OBJE`-Record.
+                            person_obje.push((p.id.clone(), target.to_string()));
+                            inline_obje_person = None;
+                        }
+                        _ => {
+                            // Eingebetteter Block (`1 OBJE` + `2 FILE …`).
+                            inline_obje_person = Some(p.id.clone());
+                        }
+                    }
+                    current_name = false;
+                    current_alt = None;
+                    current_note_target = None;
+                }
+                Some("FILE") if part[0] == "2" && inline_obje_person.is_some() => {
+                    let file = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    if !file.trim().is_empty() {
+                        inline_counter += 1;
+                        let key = format!("inline:{inline_counter}");
+                        obje_records.insert(key.clone(), (file, String::new()));
+                        if let Some(pid) = inline_obje_person.clone() {
+                            person_obje.push((pid, key));
+                        }
+                    }
+                }
+                Some("TITL") if part[0] == "2" && inline_obje_person.is_some() => {
+                    let title = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    if let Some((_, last)) = person_obje.last() {
+                        if let Some(record) = obje_records.get_mut(last) {
+                            record.1 = title;
+                        }
+                    }
+                }
                 _ => {
                     if part[0] == "1" {
                         flush_event(
@@ -455,21 +804,143 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
                             &mut current_event,
                             &mut current_event_date,
                             &mut current_event_place,
+                            &mut current_event_description,
+                            &mut current_event_notes,
+                            &mut current_event_sources,
                         );
+                        current_name = false;
+                        current_alt = None;
+                        current_note_target = None;
+                        inline_obje_person = None;
                     }
                 }
             }
         }
-        if part.len() >= 3 {
-            let value = part[2].trim_matches('@').to_string();
-            if let Some(family_index) = current_family {
-                let f = &mut data.families[family_index];
-                match part[1] {
-                    "HUSB" => f.parent_a = Some(value),
-                    "WIFE" => f.parent_b = Some(value),
-                    "CHIL" => f.children.push(value),
-                    _ => {}
+        // FAM-Level: HUSB/WIFE/CHIL (mit Wert), FAM-Ereignisse MARR/DIV mit
+        // LEVEL-2 DATE/PLAC sowie NOTE/SOUR für die Familie.
+        if let Some(family_index) = current_family {
+            match part[0] {
+                "1" => {
+                    // Jedes neue Level-1-Tag beendet ein laufendes FAM-Ereignis.
+                    flush_family_event(
+                        family_index,
+                        &mut current_family_event,
+                        &mut current_family_event_date,
+                        &mut current_family_event_place,
+                        &mut pending_family_events,
+                    );
+                    let f = &mut data.families[family_index];
+                    match part.get(1).copied() {
+                        Some("HUSB") => {
+                            if let Some(value) = part.get(2) {
+                                f.parent_a = Some(value.trim_matches('@').to_string());
+                            }
+                            current_note_target = None;
+                        }
+                        Some("WIFE") => {
+                            if let Some(value) = part.get(2) {
+                                f.parent_b = Some(value.trim_matches('@').to_string());
+                            }
+                            current_note_target = None;
+                        }
+                        Some("CHIL") => {
+                            if let Some(value) = part.get(2) {
+                                f.children.push(value.trim_matches('@').to_string());
+                            }
+                            current_note_target = None;
+                        }
+                        Some(tag @ ("MARR" | "DIV")) => {
+                            current_family_event = Some(EventKind::from_gedcom(tag));
+                            current_note_target = None;
+                        }
+                        Some("NOTE") => {
+                            if let Some(text) = part.get(2..) {
+                                let line = text.join(" ").trim().to_string();
+                                if !line.is_empty() {
+                                    match &mut f.notes {
+                                        Some(existing) => {
+                                            existing.push_str(&format!("\n{line}"))
+                                        }
+                                        None => f.notes = Some(line),
+                                    }
+                                }
+                            }
+                            current_note_target = Some(GedcomNoteTarget::Family);
+                        }
+                        Some("SOUR") => {
+                            if let Some(value) = part.get(2) {
+                                let entry = SourceEntry {
+                                    title: value.trim_matches('@').to_string(),
+                                    detail: String::new(),
+                                    media: None,
+                                };
+                                if !f
+                                    .sources
+                                    .iter()
+                                    .any(|existing| existing.title == entry.title)
+                                {
+                                    f.sources.push(entry);
+                                }
+                            }
+                            current_note_target = None;
+                        }
+                        _ => {}
+                    }
                 }
+                "2" => {
+                    if matches!(part.get(1).copied(), Some("CONT" | "CONC"))
+                        && matches!(current_note_target, Some(GedcomNoteTarget::Family))
+                    {
+                        let line = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                        if !line.trim().is_empty() {
+                            let f = &mut data.families[family_index];
+                            match &mut f.notes {
+                                Some(existing) => {
+                                    if part.get(1) == Some(&"CONT") {
+                                        existing.push('\n');
+                                    }
+                                    existing.push_str(line.trim());
+                                }
+                                None => f.notes = Some(line.trim().to_string()),
+                            }
+                        }
+                    }
+                    if current_family_event.is_some() {
+                        match part.get(1).copied() {
+                            Some("DATE") => {
+                                if let Some(text) = part.get(2..) {
+                                    current_family_event_date = text.join(" ");
+                                }
+                            }
+                            Some("PLAC") => {
+                                if let Some(text) = part.get(2..) {
+                                    current_family_event_place = text.join(" ");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // OBJE-Records (`0 @X@ OBJE`): Datei + Titel sammeln, Verweise wurden
+        // oben je Person gesammelt (`1 OBJE @X@` bzw. eingebettet).
+        if current_obje.is_some() {
+            match (part[0], part.get(1).copied()) {
+                ("1", Some("FILE")) => {
+                    let file = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    if !file.trim().is_empty() && obje_file.trim().is_empty() {
+                        obje_file = file;
+                    }
+                }
+                ("1", Some("TITL")) => {
+                    let title = part.get(2..).map(|text| text.join(" ")).unwrap_or_default();
+                    if !title.trim().is_empty() && obje_title.trim().is_empty() {
+                        obje_title = title;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -479,14 +950,136 @@ fn parse_gedcom(text: &str) -> Result<TreeData, String> {
             &mut current_event,
             &mut current_event_date,
             &mut current_event_place,
+            &mut current_event_description,
+            &mut current_event_notes,
+            &mut current_event_sources,
         );
+        person.alt_names.retain(|alt| !alt.is_empty());
         data.people.push(person);
+    }
+    // Letzten OBJE-Record am Dateiende abschließen.
+    if let Some(obje_id) = current_obje {
+        if !obje_file.trim().is_empty() {
+            obje_records.insert(obje_id, (obje_file.clone(), obje_title.clone()));
+        }
+    }
+    // FAM-Ereignisse am Dateiende abschließen und auf beide Elternteile
+    // übertragen (MARR/DIV als Ereignis je Elternteil + Beziehungsart).
+    if let Some(family_index) = current_family {
+        flush_family_event(
+            family_index,
+            &mut current_family_event,
+            &mut current_family_event_date,
+            &mut current_family_event_place,
+            &mut pending_family_events,
+        );
+    }
+    for (family_index, kind, date, place) in pending_family_events {
+        if let Some(family) = data.families.get(family_index) {
+            for id in [family.parent_a.as_deref(), family.parent_b.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(person) = data.people.iter_mut().find(|person| person.id == id) {
+                    let duplicate = person.events.iter().any(|event| {
+                        event.kind == kind && event.date == date && event.place == place
+                    });
+                    if !duplicate {
+                        person.events.push(Event {
+                            kind: kind.clone(),
+                            date: date.clone(),
+                            place: place.clone(),
+                            description: String::new(),
+                            notes: None,
+                            sources: Vec::new(),
+                            certainty: Certainty::Unset,
+                        });
+                    }
+                }
+            }
+            match kind {
+                EventKind::Marriage => {
+                    data.partner_relations
+                        .insert(family.id.clone(), PartnerRelation::Married);
+                }
+                EventKind::Divorce => {
+                    data.partner_relations
+                        .insert(family.id.clone(), PartnerRelation::Divorced);
+                }
+                _ => {}
+            }
+        }
+    }
+    // OBJE-Medien auf Personen verteilen: erstes Bild = Profilfoto (falls
+    // leer), weitere Bilder = Galerie, Nicht-Bilder = Dokumente. Die Pfade
+    // bleiben zunächst relativ zum GEDCOM-Ordner; `rebase_media_files` kopiert
+    // sie beim Anhängen ins Zielprojekt.
+    for (person_id, obje_id) in &person_obje {
+        let Some((file, title)) = obje_records.get(obje_id) else {
+            continue;
+        };
+        if file.trim().is_empty() {
+            continue;
+        }
+        let Some(person) = data
+            .people
+            .iter_mut()
+            .find(|person| &person.id == person_id)
+        else {
+            continue;
+        };
+        if obje_is_image(file) {
+            let photo_empty = person
+                .photo
+                .as_deref()
+                .is_none_or(|photo| photo.trim().is_empty());
+            if photo_empty {
+                person.photo = Some(file.clone());
+            } else if !person.gallery.iter().any(|entry| entry == file) {
+                person.gallery.push(file.clone());
+            }
+        } else {
+            let name = if title.trim().is_empty() {
+                std::path::Path::new(file)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(file)
+                    .to_string()
+            } else {
+                title.clone()
+            };
+            if !person
+                .documents
+                .iter()
+                .any(|document| document.path == *file)
+            {
+                person.documents.push(DocumentEntry {
+                    path: file.clone(),
+                    name,
+                });
+            }
+        }
     }
     if data.people.is_empty() {
         Err("Keine Personen in GEDCOM gefunden".into())
     } else {
         Ok(data)
     }
+}
+
+/// Bilddatei anhand der Endung erkennen (OBJE-Verteilung: Bild =
+/// Foto/Galerie, Rest = Dokument).
+fn obje_is_image(path: &str) -> bool {
+    matches!(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "heic" | "heif"
+            | "avif"
+    )
 }
 
 /// Gramps-XML-Parser (auch GZIP-gepackte Sicherungen, siehe `load_file`).
@@ -608,6 +1201,9 @@ fn parse_gramps_xml(text: &str) -> Result<TreeData, String> {
                         date: date.clone(),
                         place: place.clone(),
                         description: desc.clone(),
+                        notes: None,
+                        sources: Vec::new(),
+                        certainty: Certainty::Unset,
                     });
                 }
             }
@@ -622,6 +1218,7 @@ fn parse_gramps_xml(text: &str) -> Result<TreeData, String> {
                     let entry = crate::model::SourceEntry {
                         title: title.clone(),
                         detail: page.clone(),
+                        media: None,
                     };
                     if !person_sources.contains(&entry) {
                         person_sources.push(entry);
@@ -642,6 +1239,9 @@ fn parse_gramps_xml(text: &str) -> Result<TreeData, String> {
             parent_a: None,
             parent_b: None,
             children: vec![],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         };
         for child in node.children() {
             match child.tag_name().name() {
@@ -783,12 +1383,176 @@ mod tests {
     }
 
     #[test]
+    fn imports_gedcom_person_notes_sources_names_and_event_details() {
+        let data = parse_gedcom(
+            "0 @I1@ INDI\n1 NAME Johann /Muster/\n2 GIVN Johann Peter\n2 SURN Mustermann\n2 NPFX Dr.\n2 SPFX von\n2 NSFX jr.\n2 NICK Hannes\n2 TYPE Geburtsname\n1 TITL Prof.\n1 NOTE Erste Zeile\n2 CONT zweite Zeile\n1 SOUR @S1@\n1 OCCU Bäcker\n2 NOTE aus Meisterbrief\n2 SOUR @S2@\n1 EVEN\n2 TYPE Konfirmation\n2 DATE 1900\n",
+        )
+        .unwrap();
+        let person = data.find("I1").unwrap();
+        assert_eq!(person.given_name, "Johann Peter");
+        assert_eq!(person.family_name, "Mustermann");
+        assert_eq!(person.name_prefix, "Dr.");
+        assert_eq!(person.surname_prefix, "von");
+        assert_eq!(person.suffix, "jr.");
+        assert_eq!(person.nick_name, "Hannes");
+        assert_eq!(person.name_type, "Geburtsname");
+        assert_eq!(person.title, "Prof.");
+        assert_eq!(person.notes, "Erste Zeile\nzweite Zeile");
+        assert_eq!(person.sources[0].title, "S1");
+        let occ = person
+            .events
+            .iter()
+            .find(|event| event.kind == EventKind::Occupation)
+            .unwrap();
+        assert_eq!(occ.description, "Bäcker");
+        assert_eq!(occ.notes.as_deref(), Some("aus Meisterbrief"));
+        assert_eq!(occ.sources[0].title, "S2");
+        let custom = person
+            .events
+            .iter()
+            .find(|event| event.kind == EventKind::Custom("Konfirmation".into()))
+            .unwrap();
+        assert_eq!(custom.date, "1900");
+    }
+
+    #[test]
     fn imports_gedcom_family_relationships() {
         let data = parse_gedcom("0 @I1@ INDI\n1 NAME Alex /Muster/\n1 SEX M\n0 @I2@ INDI\n1 NAME Bea /Muster/\n1 SEX F\n0 @I3@ INDI\n1 NAME Chris /Muster/\n0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I2@\n1 CHIL @I3@\n").unwrap();
         assert_eq!(data.people.len(), 3);
         assert_eq!(data.parents_of("I3").len(), 2);
         assert_eq!(data.children_of("I1")[0].display_name(), "Chris Muster");
         assert_eq!(data.partners_of("I1")[0].display_name(), "Bea Muster");
+    }
+
+    #[test]
+    fn imports_gedcom_alternative_names() {
+        // Zweiter `1 NAME`-Block = Alternativname (Gramps-Prinzip), Subtags
+        // lenken auf den jeweiligen Eintrag um.
+        let data = parse_gedcom(
+            "0 @I1@ INDI\n1 NAME Johann /Bauke/\n1 NAME Johann /Kassner/\n2 TYPE Ehename\n2 GIVN Johann Friedrich\n",
+        )
+        .unwrap();
+        let person = data.find("I1").unwrap();
+        assert_eq!(person.given_name, "Johann");
+        assert_eq!(person.family_name, "Bauke");
+        assert_eq!(person.alt_names.len(), 1);
+        assert_eq!(person.alt_names[0].given_name, "Johann Friedrich");
+        assert_eq!(person.alt_names[0].family_name, "Kassner");
+        assert_eq!(person.alt_names[0].name_type, "Ehename");
+    }
+
+    #[test]
+    fn imports_gedcom_obje_media_to_photo_gallery_and_documents() {
+        let data = parse_gedcom(
+            "0 @I1@ INDI\n1 NAME A /B/\n1 OBJE @O1@\n1 OBJE @O2@\n1 OBJE @O3@\n0 @O1@ OBJE\n1 FILE fotos/portrait.jpg\n1 TITL Portrait\n0 @O2@ OBJE\n1 FILE fotos/gruppe.png\n0 @O3@ OBJE\n1 FILE dokumente/urkunde.pdf\n1 TITL Urkunde\n",
+        )
+        .unwrap();
+        let person = data.find("I1").unwrap();
+        assert_eq!(person.photo.as_deref(), Some("fotos/portrait.jpg"));
+        assert_eq!(person.gallery, vec!["fotos/gruppe.png".to_string()]);
+        assert_eq!(person.documents.len(), 1);
+        assert_eq!(person.documents[0].path, "dokumente/urkunde.pdf");
+        assert_eq!(person.documents[0].name, "Urkunde");
+    }
+
+    #[test]
+    fn imports_gedcom_inline_obje() {
+        let data = parse_gedcom(
+            "0 @I1@ INDI\n1 NAME A /B/\n1 OBJE\n2 FILE bilder/inline.jpg\n2 TITL Inlinebild\n",
+        )
+        .unwrap();
+        let person = data.find("I1").unwrap();
+        assert_eq!(person.photo.as_deref(), Some("bilder/inline.jpg"));
+    }
+
+    #[test]
+    fn imports_gedcom_marriage_from_family() {
+        // FAM-level MARR mit DATE/PLAC (Standard-GEDCOM) muss als
+        // Beziehungsereignis auf BEIDEN Partnern landen + Beziehungsart.
+        let data = parse_gedcom(
+            "0 @I1@ INDI\n1 NAME Alex /Muster/\n1 SEX M\n0 @I2@ INDI\n1 NAME Bea /Muster/\n1 SEX F\n0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I2@\n1 MARR\n2 DATE 10 MAY 1811\n2 PLAC Zielenzig\n",
+        )
+        .unwrap();
+        for id in ["I1", "I2"] {
+            let person = data.find(id).unwrap();
+            let marr = person
+                .events
+                .iter()
+                .find(|e| e.kind == EventKind::Marriage)
+                .unwrap_or_else(|| panic!("kein Heiratsevent bei {id}"));
+            assert_eq!(marr.date, "10 MAY 1811");
+            assert_eq!(marr.place, "Zielenzig");
+        }
+        data.partners_of("I1")
+            .iter()
+            .find(|person| person.id == "I2")
+            .expect("Partner I2 fehlt");
+        assert_eq!(
+            data.partner_relations.get("F1"),
+            Some(&PartnerRelation::Married)
+        );
+    }
+
+    #[test]
+    fn imports_gedcom_real_aschenborn_marriage() {
+        // Exakte Struktur der Datei Aschenborn_Kassner_32_33.ged: FAM-Record
+        // kommt NACH den Personen, MARR am Ende des FAM-Records.
+        let ged = "\
+0 HEAD
+1 SOUR Genealogische_Ahnentafel
+1 CHAR UTF-8
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+0 @I32@ INDI
+1 NAME Karl Heinrich Adolf /Aschenborn/
+1 SEX M
+1 BIRT
+2 DATE 25 NOV 1779
+2 PLAC Finsterwalde
+1 DEAT
+2 DATE 27 FEB 1847
+2 PLAC Schweidnitz
+1 FAMC @F64@
+1 FAMS @F32@
+0 @I33@ INDI
+1 NAME Wilhelmine Ernestine Antoinette /Kaßner/
+1 SEX F
+1 BIRT
+2 DATE 1785
+2 PLAC Hermsdorf
+1 DEAT
+2 DATE 24 OCT 1814
+2 PLAC Schweidnitz
+1 FAMS @F32@
+1 NOTE Geburtsname: Kaßner od. Kassner.
+0 @I64@ INDI
+1 NAME Georg Karl /Aschenborn/
+1 SEX M
+1 FAMS @F64@
+0 @F32@ FAM
+1 HUSB @I32@
+1 WIFE @I33@
+1 MARR
+2 DATE 10 MAY 1811
+2 PLAC Zielenzig
+0 TRLR
+";
+        let data = parse_gedcom(ged).unwrap();
+        for id in ["I32", "I33"] {
+            let person = data.find(id).unwrap();
+            let marr = person
+                .events
+                .iter()
+                .find(|e| e.kind == EventKind::Marriage)
+                .unwrap_or_else(|| panic!("kein Heiratsevent bei {id}"));
+            assert_eq!(marr.date, "10 MAY 1811");
+            assert_eq!(marr.place, "Zielenzig");
+        }
+        assert_eq!(
+            data.partner_relations.get("F32"),
+            Some(&PartnerRelation::Married)
+        );
     }
 
     #[test]

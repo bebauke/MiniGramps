@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn median_removes_scanline_and_keeps_flat_areas() {
-        use image::{GenericImageView, RgbaImage};
+        use image::RgbaImage;
         // Graue Fläche mit einer weißen Scanlinie in der Mitte.
         let striped = RgbaImage::from_fn(7, 7, |_x, y| {
             if y == 3 {

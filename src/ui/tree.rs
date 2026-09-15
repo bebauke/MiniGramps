@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, TextureHandle, Vec2};
 
 use crate::media::{cover_uv_to, initials, photo_card_texture, round_avatar_texture_cached};
-use crate::model::{Person, TreeData};
+use crate::model::{Certainty, Person, TreeData};
 use crate::ui::CardLayout;
 
 /// Fester Mindestabstand zwischen Karten. Der einstellbare Baum-Abstand ist
@@ -350,7 +350,7 @@ fn fit_descendant_block_starts(blocks: &[DescendantBlock<'_>], gap: f32) -> Vec<
 mod descendant_layout_tests {
     use std::collections::{HashMap, HashSet};
 
-    use crate::model::{Family, Gender, TreeData, person};
+    use crate::model::{Certainty, Family, Gender, TreeData, person};
 
     use super::{
         DescendantBlock, TreeRelations, collect_visible_levels, fit_descendant_block_starts,
@@ -444,6 +444,9 @@ mod descendant_layout_tests {
             parent_a: Some("root".into()),
             parent_b: None,
             children,
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         let relations = TreeRelations::new(&data);
         let expanded = HashSet::new();
@@ -486,18 +489,27 @@ mod descendant_layout_tests {
             parent_a: Some("r".into()),
             parent_b: None,
             children: vec!["a".into(), "b".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         data.families.push(Family {
             id: "f1".into(),
             parent_a: Some("a".into()),
             parent_b: None,
             children: kids,
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         data.families.push(Family {
             id: "f2".into(),
             parent_a: Some("b".into()),
             parent_b: None,
             children: vec!["c1".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         let levels: HashMap<&str, usize> = HashMap::from([
             ("r", 0),
@@ -572,6 +584,9 @@ mod descendant_layout_tests {
                 parent_a: Some("p".into()),
                 parent_b: None,
                 children: vec![format!("{family}1"), format!("{family}2")],
+                notes: None,
+                sources: Vec::new(),
+                certainty: Certainty::Unset,
             });
         }
         data.families.push(Family {
@@ -579,6 +594,9 @@ mod descendant_layout_tests {
             parent_a: Some("r".into()),
             parent_b: None,
             children: vec!["p".into(), "s".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         let levels: HashMap<&str, usize> = HashMap::from([
             ("r", 0),
@@ -628,7 +646,7 @@ mod descendant_layout_tests {
 mod ancestor_layout_tests {
     use std::collections::{HashMap, HashSet};
 
-    use crate::model::{Family, Gender, TreeData, person};
+    use crate::model::{Certainty, Family, Gender, TreeData, person};
 
     use super::{
         TreeRelations, ancestor_drag_offsets, block_ancestor_occ_drag, collect_ancestor_occs,
@@ -647,12 +665,18 @@ mod ancestor_layout_tests {
             parent_a: Some("f".into()),
             parent_b: Some("m".into()),
             children: vec!["r".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         data.families.push(Family {
             id: "f1".into(),
             parent_a: Some("gf".into()),
             parent_b: Some("gm".into()),
             children: vec!["f".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         data
     }
@@ -873,6 +897,9 @@ mod ancestor_layout_tests {
             parent_a: Some("mf".into()),
             parent_b: Some("mm".into()),
             children: vec!["m".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         let relations = TreeRelations::new(&data);
         let expanded = HashSet::new();
@@ -938,6 +965,9 @@ mod ancestor_layout_tests {
             parent_a: Some("gf".into()),
             parent_b: Some("mm2".into()),
             children: vec!["m".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         let relations = TreeRelations::new(&data);
         let expanded = HashSet::new();
@@ -1089,6 +1119,9 @@ mod ancestor_layout_tests {
             parent_a: Some("a".into()),
             parent_b: Some("b".into()),
             children: vec!["r".into()],
+            notes: None,
+            sources: Vec::new(),
+            certainty: Certainty::Unset,
         });
         let relations = TreeRelations::new(&data);
         let expanded = HashSet::new();
@@ -1938,6 +1971,9 @@ pub fn draw_tree(
     // mit Foto / ohne Foto (Initialen).
     photo_full_zoom: f32,
     initials_full_zoom: f32,
+    // Warnstufe Sicherheit (Einstellungen): Infos bis zu dieser Stufe werden
+    // farblich hervorgehoben (Handlungsbedarf). None = aus.
+    warn_certainty: Option<Certainty>,
 ) -> Rect {
     // Treffer-Rechtecke für Datei-Drops auf Personenkarten (siehe mod.rs).
     card_rects.clear();
@@ -2210,6 +2246,7 @@ pub fn draw_tree(
                 multi,
                 photo_full_zoom,
                 initials_full_zoom,
+                warn_certainty,
             );
             
             let empty_occs: Vec<usize> = Vec::new();
@@ -3459,48 +3496,49 @@ pub fn draw_tree(
             if let Some(container_rect) = container {
                 let marker = format!("container:{}", family.id);
                 let is_active = card_drag.as_ref().is_some_and(|(id, _)| *id == marker);
-                if viewport.intersects(container_rect) {
-                    let (container_delta, container_start) = painter.ctx().input(|i| {
-                        if input_blocked {
-                            return (0.0, false);
-                        }
-                        if !(i.pointer.primary_down() && i.modifiers.shift) {
-                            return (0.0, false);
-                        }
-                        let pressed_here = i.pointer.press_origin().is_some_and(|q| {
-                            container_rect.contains(q)
-                                && painter.clip_rect().contains(q)
-                                && !blocks.iter().any(|block| block.contains(q))
-                        });
-                        if !(pressed_here || is_active) {
-                            return (0.0, false);
-                        }
-                        let delta = i.pointer.delta();
-                        (
-                            if orientation == TreeOrientation::Vertical {
-                                delta.x
-                            } else {
-                                delta.y
-                            },
-                            pressed_here,
-                        )
-                    });
-                    if container_delta != 0.0 || (container_start && card_drag.is_none()) {
-                        let layout_delta = container_delta / zoom;
-                        if let Some((_, members)) = card_drag {
-                            for id in members.clone() {
-                                *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
-                            }
-                        } else {
-                            let members: Vec<String> =
-                                block_children.iter().map(|id| (*id).to_string()).collect();
-                            for id in &members {
-                                *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
-                            }
-                            *card_drag = Some((marker, members));
-                        }
-                        *frame_drag = true;
+                // Input IMMER auswerten (laufender Drag gilt auch jenseits des
+                // Viewports — sonst stockt das Ziehen an unsichtbaren Kanten);
+                // nur das Zeichnen wird per Viewport beschnitten (oben).
+                let (container_delta, container_start) = painter.ctx().input(|i| {
+                    if input_blocked {
+                        return (0.0, false);
                     }
+                    if !(i.pointer.primary_down() && i.modifiers.shift) {
+                        return (0.0, false);
+                    }
+                    let pressed_here = i.pointer.press_origin().is_some_and(|q| {
+                        container_rect.contains(q)
+                            && painter.clip_rect().contains(q)
+                            && !blocks.iter().any(|block| block.contains(q))
+                    });
+                    if !(pressed_here || is_active) {
+                        return (0.0, false);
+                    }
+                    let delta = i.pointer.delta();
+                    (
+                        if orientation == TreeOrientation::Vertical {
+                            delta.x
+                        } else {
+                            delta.y
+                        },
+                        pressed_here,
+                    )
+                });
+                if container_delta != 0.0 || (container_start && card_drag.is_none()) {
+                    let layout_delta = container_delta / zoom;
+                    if let Some((_, members)) = card_drag {
+                        for id in members.clone() {
+                            *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
+                        }
+                    } else {
+                        let members: Vec<String> =
+                            block_children.iter().map(|id| (*id).to_string()).collect();
+                        for id in &members {
+                            *manual_offsets.entry(id.clone()).or_insert(0.0) += layout_delta;
+                        }
+                        *card_drag = Some((marker, members));
+                    }
+                    *frame_drag = true;
                 }
             }
             let target = match &container {
@@ -3671,6 +3709,7 @@ pub fn draw_tree(
             multi,
             photo_full_zoom,
             initials_full_zoom,
+            warn_certainty,
         );
         // Ausklapp-Abzeichen: Grenzknoten mit nicht sichtbaren Verwandten.
         let has_more = {
@@ -3936,6 +3975,7 @@ pub fn draw_tree(
                 multi,
                 photo_full_zoom,
                 initials_full_zoom,
+                warn_certainty,
             );
             let partner_active = card_drag
                 .as_ref()
@@ -5044,6 +5084,25 @@ fn ellipsize(text: &str, max_chars: usize) -> String {
     result
 }
 
+/// Grüner Innenschatten für mehrfach ausgewählte Karten: konzentrische
+/// Innenkonturen mit nach innen fallender Deckkraft (Glow), damit die
+/// Auswahl auch ohne Füllung gut sichtbar ist (Rahmen allein genügt nicht).
+fn paint_multi_inner_glow(painter: &egui::Painter, card: Rect, rounding: f32, zoom: f32) {
+    let scale = zoom.clamp(0.4, 1.0);
+    for (width, alpha) in [(7.0, 16u8), (4.5, 34u8), (2.5, 70u8)] {
+        painter.rect(
+            card,
+            rounding,
+            Color32::TRANSPARENT,
+            Stroke::new(
+                width * scale,
+                Color32::from_rgba_unmultiplied(158, 213, 199, alpha),
+            ),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
 /// Eine Personenkarte zeichnen; Rückgabe true bei Klick auf die Karte.
 /// `muted` = Partner-Pseudokarte (dezentere Umrandung).
 fn draw_person_card(
@@ -5069,6 +5128,8 @@ fn draw_person_card(
     // mit Foto / ohne Foto (Initialen).
     photo_full_zoom: f32,
     initials_full_zoom: f32,
+    // Warnstufe Sicherheit (Einstellungen, siehe draw_tree).
+    warn_certainty: Option<Certainty>,
 ) -> bool {
     let size = Vec2::new(width, card_layout.height()) * zoom;
     let card = Rect::from_center_size(at, size);
@@ -5077,6 +5138,23 @@ fn draw_person_card(
     }
     hit_rects.push((person.id.clone(), card));
     let multi_now = !selected_now && multi.iter().any(|id| id == &person.id);
+    // Warnstufe: Name/Daten unter der Stufe amber tönen (Handlungsbedarf).
+    let warn_color = Color32::from_rgb(235, 175, 60);
+    let warn_of = |key: &str| {
+        let level = person
+            .field_certainty
+            .get(key)
+            .copied()
+            .unwrap_or(Certainty::Unset);
+        crate::model::certainty_warns(level, warn_certainty)
+    };
+    let name_warn = warn_of("given_name") || warn_of("family_name");
+    let birth_warn = warn_of("birth");
+    let death_warn = warn_of("death");
+    let name_color = if name_warn { warn_color } else { Color32::WHITE };
+    let date_color = Color32::from_rgb(202, 222, 221);
+    let birth_color = if birth_warn { warn_color } else { date_color };
+    let death_color = if death_warn { warn_color } else { date_color };
     // Ganzfoto-Schwelle je Fotostatus (Einstellungen): Foto einmal holen,
     // Schwelle wählen, dann rendern.
     let photo = photo_card_texture(painter.ctx(), person, photo_cache, media_base);
@@ -5112,6 +5190,9 @@ fn draw_person_card(
         ),
         egui::StrokeKind::Outside,
     );
+    if multi_now {
+        paint_multi_inner_glow(painter, card, 10. * zoom, zoom);
+    }
     if zoom < full_zoom {
         // Statt leerer Farbfläche füllt das Profilbild die Karte, ohne sie zu
         // verzerren: Cover-Beschnitt mit dem KARTEN-Seitenverhältnis, sodass
@@ -5154,6 +5235,9 @@ fn draw_person_card(
                 ),
                 egui::StrokeKind::Outside,
             );
+            if multi_now {
+                paint_multi_inner_glow(painter, card, 10. * zoom, zoom);
+            }
         } else {
             painter.text(
                 card.center(),
@@ -5249,7 +5333,7 @@ fn draw_person_card(
                 name_align,
                 ellipsize(&diagram_display_name_short(person), max_chars),
                 FontId::proportional(13. * zoom),
-                Color32::WHITE,
+                name_color,
             );
         }
         CardLayout::Portrait => {
@@ -5258,7 +5342,7 @@ fn draw_person_card(
                 name_align,
                 ellipsize(&person.given_short(), max_chars),
                 FontId::proportional(13. * zoom),
-                Color32::WHITE,
+                name_color,
             );
             if !person.family_name.is_empty() {
                 painter.text(
@@ -5279,7 +5363,7 @@ fn draw_person_card(
             max_chars,
         ),
         FontId::proportional(12. * zoom),
-        Color32::from_rgb(202, 222, 221),
+        birth_color,
     );
     let death = person.death_short();
     if !death.is_empty() {
@@ -5288,7 +5372,7 @@ fn draw_person_card(
             birth_align,
             ellipsize(&symbolized(death_symbol, &death), max_chars),
             FontId::proportional(12. * zoom),
-            Color32::from_rgb(202, 222, 221),
+            death_color,
         );
     }
     let canvas = painter.clip_rect();

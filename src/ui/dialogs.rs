@@ -17,10 +17,13 @@ use eframe::egui;
 use crate::media::clear_person_photo_cache;
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use crate::media::import_media_file_async;
-use crate::model::{Gender, person};
+use crate::model::{
+    Gender, PartnerRelation, RelDiffKind, RelationEventMode, person,
+};
 use crate::ui::{
     CardLayout, ICON_CHEVRON_LEFT, ICON_CHEVRON_RIGHT, ICON_EXPORT, ICON_EXTERNAL_LINK,
-    ICON_TRASH, MiniGramps, icon_button, icon_only_button, panels::palette, window_title,
+    ICON_TRASH, ICON_UNLINK, MiniGramps, WizardStep, icon_button, icon_only_button,
+    panels::palette, window_title,
 };
 
 pub fn show_project(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -150,6 +153,115 @@ pub fn show_project(app: &mut MiniGramps, ctx: &egui::Context) {
             });
         });
     app.show_project = app.show_project && open;
+}
+
+/// Vergleichstabelle Neu/Ergebnis/Vorhanden mit Radio-Wahl je Name/Geburt/Tod
+/// (Review- und Einzel-Merge-Dialog teilen sich Darstellung + Auswahl-Logik).
+/// `rows`: (Label, Auswahl-Spalte?, Neu-Text, Vorhanden-Text) in der Ordnung
+/// Name, Geburt, Tod, … — Index 0→Name, 1→Geburt, Rest→Tod. Wertspalten mit
+/// maximaler Breite (Inhalt bestimmt, Umbruch statt Abschneiden).
+fn merge_fields_grid(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    rows: &[(String, bool, String, String)],
+    take_name: &mut bool,
+    take_birth: &mut bool,
+    take_death: &mut bool,
+) {
+    // Ergebnis-Vorschau: Auswahl ? Neu : Vorhanden; Verknüpfungen vereint.
+    fn union_text(first: &str, second: &str) -> String {
+        let mut seen: Vec<&str> = Vec::new();
+        for token in first
+            .split(", ")
+            .chain(second.split(", "))
+            .map(str::trim)
+            .filter(|token| !token.is_empty() && *token != "—" && *token != "?")
+        {
+            if !seen.contains(&token) {
+                seen.push(token);
+            }
+        }
+        if seen.is_empty() {
+            "—".to_string()
+        } else {
+            seen.join(", ")
+        }
+    }
+    egui::Grid::new(id_salt)
+        .num_columns(6)
+        .striped(true)
+        .max_col_width(560.0)
+        .show(ui, |ui| {
+            ui.label("");
+            ui.label(egui::RichText::new("Neu").strong());
+            ui.label("");
+            ui.label(egui::RichText::new("Ergebnis").strong());
+            ui.label(egui::RichText::new("Vorhanden").strong());
+            ui.label("");
+            ui.end_row();
+            for (row_index, (label, is_choice, new_text, old_text)) in rows.iter().enumerate() {
+                ui.label(label);
+                ui.label(new_text);
+                let current = match row_index {
+                    0 => *take_name,
+                    1 => *take_birth,
+                    _ => *take_death,
+                };
+                if *is_choice {
+                    let mut take = current;
+                    ui.radio_value(&mut take, true, "");
+                    if take != current {
+                        match row_index {
+                            0 => *take_name = take,
+                            1 => *take_birth = take,
+                            _ => *take_death = take,
+                        }
+                    }
+                } else {
+                    ui.label("");
+                }
+                let result = match row_index {
+                    0 => {
+                        if *take_name {
+                            new_text.clone()
+                        } else {
+                            old_text.clone()
+                        }
+                    }
+                    1 => {
+                        if *take_birth {
+                            new_text.clone()
+                        } else {
+                            old_text.clone()
+                        }
+                    }
+                    2 => {
+                        if *take_death {
+                            new_text.clone()
+                        } else {
+                            old_text.clone()
+                        }
+                    }
+                    _ => union_text(new_text, old_text),
+                };
+                ui.label(&result);
+                ui.label(old_text);
+                if *is_choice {
+                    let mut take = current;
+                    ui.radio_value(&mut take, false, "");
+                    if take != current {
+                        match row_index {
+                            0 => *take_name = take,
+                            1 => *take_birth = take,
+                            _ => *take_death = take,
+                        }
+                    }
+                } else {
+                    ui.label("");
+                }
+                ui.end_row();
+            }
+        });
 }
 
 /// Duplikat-Review nach angehängtem Import: pro Treffer selektiv
@@ -396,10 +508,6 @@ pub fn show_merge_review(app: &mut MiniGramps, ctx: &egui::Context) {
             }
             }
             ui.separator();
-            // Beide Wertspalten teilen sich die Dialogbreite (Label- +
-            // Radiospalten abgezogen, je min. 220); kein oberer Deckel —
-            // lange Namen/Daten stehen voll da, Rest scrollt in der Zelle.
-            let cell_max = ((ui.available_width() - 130.0) / 2.0).max(220.0);
             egui::ScrollArea::both()
                 .max_height(candidate_list_h)
                 .show(ui, |ui| {
@@ -417,160 +525,190 @@ pub fn show_merge_review(app: &mut MiniGramps, ctx: &egui::Context) {
                             .and_then(|review| review.candidates.get(index))
                             .map(|entry| {
                                 let candidate = &entry.candidate;
-                                let keep = app.data.find(&candidate.keep_id);
-                                let drop = app.data.find(&candidate.drop_id);
-                                let name = |person: Option<&crate::model::Person>, fallback: &str| {
-                                    person
-                                        .map(|person| person.display_name())
-                                        .unwrap_or_else(|| fallback.to_string())
-                                };
-                                let fmt_date_place = |date: &str, place: &str| -> String {
-                                    if date.trim().is_empty() {
-                                        "—".to_string()
-                                    } else if place.trim().is_empty() {
-                                        date.to_string()
-                                    } else {
-                                        format!("{date}, {place}")
-                                    }
-                                };
-                                let dates =
-                                    |person: Option<&crate::model::Person>| -> (String, String) {
-                                        match person {
-                                            Some(person) => (
-                                                fmt_date_place(&person.birth, &person.birth_place),
-                                                fmt_date_place(&person.death, &person.death_place),
-                                            ),
-                                            None => ("?".to_string(), "?".to_string()),
-                                        }
-                                    };
-                                let (drop_birth, drop_death) = dates(drop);
-                                let (keep_birth, keep_death) = dates(keep);
-                                let names_of = |ids: Vec<String>| -> String {
-                                    if ids.is_empty() {
-                                        "—".to_string()
-                                    } else {
-                                        ids.iter()
-                                            .filter_map(|id| {
-                                                app.data
-                                                    .find(id)
-                                                    .map(|relative| relative.display_name())
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    }
-                                };
-                                let relations =
-                                    |person: Option<&crate::model::Person>| -> [String; 4] {
-                                        let unknown = || {
-                                            [
-                                                "?".to_string(),
-                                                "?".to_string(),
-                                                "?".to_string(),
-                                                "?".to_string(),
-                                            ]
-                                        };
-                                        let Some(person) = person else {
-                                            return unknown();
-                                        };
-                                        [
-                                            names_of(
-                                                app.data
-                                                    .parents_of(&person.id)
-                                                    .iter()
-                                                    .map(|relative| relative.id.clone())
-                                                    .collect(),
-                                            ),
-                                            names_of(
-                                                app.data
-                                                    .siblings_of(&person.id)
-                                                    .iter()
-                                                    .map(|relative| relative.id.clone())
-                                                    .collect(),
-                                            ),
-                                            names_of(
-                                                app.data
-                                                    .partners_of(&person.id)
-                                                    .iter()
-                                                    .map(|relative| relative.id.clone())
-                                                    .collect(),
-                                            ),
-                                            names_of(
-                                                app.data
-                                                    .children_of(&person.id)
-                                                    .iter()
-                                                    .map(|relative| relative.id.clone())
-                                                    .collect(),
-                                            ),
-                                        ]
-                                    };
-                                let drop_rel = relations(drop);
-                                let keep_rel = relations(keep);
-                                let names = format!(
-                                    "{} ↔ {}",
-                                    name(keep, &candidate.keep_id),
-                                    name(drop, &candidate.drop_id),
-                                );
-                                let scores = format!(
-                                    "— Vorname {:.0} % · Nachname {:.0} % · Verwandt {:.0} %{}",
-                                    candidate.name_score * 100.0,
-                                    candidate.family_score * 100.0,
-                                    candidate.kin_score * 100.0,
-                                    if candidate.birth_match {
-                                        " · Geburt gleich"
-                                    } else {
-                                        ""
-                                    },
-                                );
-                                let fields = vec![
-                                    ("Geburt", true, drop_birth, keep_birth),
-                                    ("Tod", true, drop_death, keep_death),
-                                    (
-                                        "Eltern",
-                                        false,
-                                        drop_rel[0].clone(),
-                                        keep_rel[0].clone(),
-                                    ),
-                                    (
-                                        "Geschwister",
-                                        false,
-                                        drop_rel[1].clone(),
-                                        keep_rel[1].clone(),
-                                    ),
-                                    (
-                                        "Partner",
-                                        false,
-                                        drop_rel[2].clone(),
-                                        keep_rel[2].clone(),
-                                    ),
-                                    (
-                                        "Kinder",
-                                        false,
-                                        drop_rel[3].clone(),
-                                        keep_rel[3].clone(),
-                                    ),
-                                ];
+                                let (names, scores, fields) =
+                                    merge_candidate_fields(app, candidate);
                                 let rows: Vec<FieldRow> = fields
                                     .into_iter()
-                                    .map(|(label, is_choice, new_text, old_text)| FieldRow {
-                                        label: label.to_string(),
-                                        is_choice,
-                                        new_text,
-                                        old_text,
-                                    })
+                                    .map(
+                                        |(label, is_choice, new_text, old_text)| FieldRow {
+                                            label,
+                                            is_choice,
+                                            new_text,
+                                            old_text,
+                                        },
+                                    )
                                     .collect();
                                 (
+                                    candidate.keep_id.clone(),
                                     candidate.drop_id.clone(),
                                     names,
                                     scores,
                                     entry.selected,
                                     entry.take_new_birth,
                                     entry.take_new_death,
+                                    entry.take_new_name,
+                                    entry.parent_pick_new.clone(),
+                                    entry.parent_pick_old.clone(),
                                     rows,
                                 )
                             });
-                        let Some((drop_id, names, scores, selected, take_birth, take_death, rows)) =
-                            rows
-                        else {
+/// Vergleichsdaten eines Merge-Treffers (Namen, Scores, Zeilen aus Label +
+/// Neu/Vorhanden-Text + Auswahl-Flag): geteilt von Review-Dialog und
+/// Einzel-Merge-Dialog.
+fn merge_candidate_fields(
+    app: &MiniGramps,
+    candidate: &crate::model::MergeCandidate,
+) -> (String, String, Vec<(String, bool, String, String)>) {
+    let keep = app.data.find(&candidate.keep_id);
+    let drop = app.data.find(&candidate.drop_id);
+    let name = |person: Option<&crate::model::Person>, fallback: &str| {
+        person
+            .map(|person| person.display_name())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    let fmt_date_place = |date: &str, place: &str| -> String {
+        if date.trim().is_empty() {
+            "—".to_string()
+        } else if place.trim().is_empty() {
+            date.to_string()
+        } else {
+            format!("{date}, {place}")
+        }
+    };
+    let dates = |person: Option<&crate::model::Person>| -> (String, String) {
+        match person {
+            Some(person) => (
+                fmt_date_place(&person.birth, &person.birth_place),
+                fmt_date_place(&person.death, &person.death_place),
+            ),
+            None => ("?".to_string(), "?".to_string()),
+        }
+    };
+    let (drop_birth, drop_death) = dates(drop);
+    let (keep_birth, keep_death) = dates(keep);
+    let names_of = |ids: Vec<String>| -> String {
+        if ids.is_empty() {
+            "—".to_string()
+        } else {
+            ids.iter()
+                .filter_map(|id| {
+                    app.data
+                        .find(id)
+                        .map(|relative| relative.display_name())
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    let relations = |person: Option<&crate::model::Person>| -> [String; 4] {
+        let unknown = || {
+            [
+                "?".to_string(),
+                "?".to_string(),
+                "?".to_string(),
+                "?".to_string(),
+            ]
+        };
+        let Some(person) = person else {
+            return unknown();
+        };
+        [
+            names_of(
+                app.data
+                    .parents_of(&person.id)
+                    .iter()
+                    .map(|relative| relative.id.clone())
+                    .collect(),
+            ),
+            names_of(
+                app.data
+                    .siblings_of(&person.id)
+                    .iter()
+                    .map(|relative| relative.id.clone())
+                    .collect(),
+            ),
+            names_of(
+                app.data
+                    .partners_of(&person.id)
+                    .iter()
+                    .map(|relative| relative.id.clone())
+                    .collect(),
+            ),
+            names_of(
+                app.data
+                    .children_of(&person.id)
+                    .iter()
+                    .map(|relative| relative.id.clone())
+                    .collect(),
+            ),
+        ]
+    };
+    let drop_rel = relations(drop);
+    let keep_rel = relations(keep);
+    let keep_name = name(keep, &candidate.keep_id);
+    let drop_name = name(drop, &candidate.drop_id);
+    let names = format!("{keep_name} ↔ {drop_name}",);
+    let scores = format!(
+        "— Vorname {:.0} % · Nachname {:.0} % · Verwandt {:.0} %{}",
+        candidate.name_score * 100.0,
+        candidate.family_score * 100.0,
+        candidate.kin_score * 100.0,
+        if candidate.birth_match {
+            " · Geburt gleich"
+        } else {
+            ""
+        },
+    );
+    let fields = vec![
+        ("Name", true, drop_name, keep_name),
+        ("Geburt", true, drop_birth, keep_birth),
+        ("Tod", true, drop_death, keep_death),
+        (
+            "Eltern",
+            false,
+            drop_rel[0].clone(),
+            keep_rel[0].clone(),
+        ),
+        (
+            "Geschwister",
+            false,
+            drop_rel[1].clone(),
+            keep_rel[1].clone(),
+        ),
+        (
+            "Partner",
+            false,
+            drop_rel[2].clone(),
+            keep_rel[2].clone(),
+        ),
+        (
+            "Kinder",
+            false,
+            drop_rel[3].clone(),
+            keep_rel[3].clone(),
+        ),
+    ];
+    let rows: Vec<(String, bool, String, String)> = fields
+        .into_iter()
+        .map(|(label, is_choice, new_text, old_text)| {
+            (label.to_string(), is_choice, new_text, old_text)
+        })
+        .collect();
+    (names, scores, rows)
+}
+                        let Some((
+                            keep_id,
+                            drop_id,
+                            names,
+                            scores,
+                            selected,
+                            take_birth,
+                            take_death,
+                            take_name,
+                            pick_new,
+                            pick_old,
+                            rows,
+                        )) = rows else {
                             continue;
                         };
                         // Kopfzeile: Namen groß, Scores klein. Auswahl klappt
@@ -589,76 +727,117 @@ pub fn show_merge_review(app: &mut MiniGramps, ctx: &egui::Context) {
                             }
                         });
                         if selected {
-                            // Lange Feldwerte (v. a. Verwandtschaftslisten) bekommen
-                            // höchstens ihren Anteil der Dialogbreite; der Rest
-                            // scrollt horizontal in der Zelle allein.
-                            let scroll_cell = |ui: &mut egui::Ui, text: &str| {
-                                egui::ScrollArea::horizontal()
-                                    .max_width(cell_max)
-                                    .show(ui, |ui| {
-                                        ui.label(text);
-                                    });
-                            };
-                            egui::Grid::new(("merge-fields", drop_id.clone()))
-                                .num_columns(5)
-                                .striped(true)
-                                .show(ui, |ui| {
-                                    ui.label("");
-                                    ui.label(egui::RichText::new("Neu").strong());
-                                    ui.label("");
-                                    ui.label(egui::RichText::new("Vorhanden").strong());
-                                    ui.label("");
-                                    ui.end_row();
-                                    for (row_index, row) in rows.iter().enumerate() {
-                                        ui.label(&row.label);
-                                        scroll_cell(ui, &row.new_text);
-                                        let current = if row_index == 0 {
-                                            take_birth
-                                        } else {
-                                            take_death
-                                        };
-                                        if row.is_choice {
-                                            let mut take = current;
-                                            ui.radio_value(&mut take, true, "");
-                                            if take != current {
+                            let tuples: Vec<(String, bool, String, String)> = rows
+                                .iter()
+                                .map(|row| {
+                                    (
+                                        row.label.clone(),
+                                        row.is_choice,
+                                        row.new_text.clone(),
+                                        row.old_text.clone(),
+                                    )
+                                })
+                                .collect();
+                            let mut take_birth = take_birth;
+                            let mut take_death = take_death;
+                            let mut take_name = take_name;
+                            merge_fields_grid(
+                                ui,
+                                ("merge-fields", drop_id.clone()),
+                                &tuples,
+                                &mut take_name,
+                                &mut take_birth,
+                                &mut take_death,
+                            );
+                            if let Some(review) = app.merge_review.as_mut() {
+                                if let Some(entry) = review.candidates.get_mut(index) {
+                                    entry.take_new_birth = take_birth;
+                                    entry.take_new_death = take_death;
+                                    entry.take_new_name = take_name;
+                                }
+                            }
+                            // Eltern mit-mergen: je Seite ein Elternteil wählen,
+                            // Button fügt das Paar als Treffer hinzu.
+                            let keep_parents: Vec<(String, String)> = app
+                                .data
+                                .parents_of(&keep_id)
+                                .iter()
+                                .map(|person| (person.id.clone(), person.display_name()))
+                                .collect();
+                            let drop_parents: Vec<(String, String)> = app
+                                .data
+                                .parents_of(&drop_id)
+                                .iter()
+                                .map(|person| (person.id.clone(), person.display_name()))
+                                .collect();
+                            if !keep_parents.is_empty() && !drop_parents.is_empty() {
+                                ui.small("Eltern mit-mergen (je Seite wählen):");
+                                ui.horizontal(|ui| {
+                                    for (pid, pname) in &drop_parents {
+                                        let is_picked = pick_new.as_deref() == Some(pid.as_str());
+                                        if ui.selectable_label(is_picked, pname).clicked() {
+                                            if let Some(review) = app.merge_review.as_mut() {
+                                                if let Some(entry) =
+                                                    review.candidates.get_mut(index)
+                                                {
+                                                    entry.parent_pick_new = if is_picked {
+                                                        None
+                                                    } else {
+                                                        Some(pid.clone())
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ui.label("↔");
+                                    for (pid, pname) in &keep_parents {
+                                        let is_picked = pick_old.as_deref() == Some(pid.as_str());
+                                        if ui.selectable_label(is_picked, pname).clicked() {
+                                            if let Some(review) = app.merge_review.as_mut() {
+                                                if let Some(entry) =
+                                                    review.candidates.get_mut(index)
+                                                {
+                                                    entry.parent_pick_old = if is_picked {
+                                                        None
+                                                    } else {
+                                                        Some(pid.clone())
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let ready = pick_new.is_some() && pick_old.is_some();
+                                    if ui
+                                        .add_enabled(
+                                            ready,
+                                            egui::Button::new("+ Elternpaar"),
+                                        )
+                                        .on_hover_text(
+                                            "Gewählte Eltern als Mergepaar hinzufügen",
+                                        )
+                                        .clicked()
+                                        && ready
+                                    {
+                                        if let (Some(keep_pick), Some(drop_pick)) =
+                                            (pick_old.clone(), pick_new.clone())
+                                        {
+                                            if app.add_parent_pair_as_match(
+                                                &keep_pick,
+                                                &drop_pick,
+                                            ) {
                                                 if let Some(review) = app.merge_review.as_mut() {
                                                     if let Some(entry) =
                                                         review.candidates.get_mut(index)
                                                     {
-                                                        if row_index == 0 {
-                                                            entry.take_new_birth = take;
-                                                        } else {
-                                                            entry.take_new_death = take;
-                                                        }
+                                                        entry.parent_pick_new = None;
+                                                        entry.parent_pick_old = None;
                                                     }
                                                 }
                                             }
-                                        } else {
-                                            ui.label("");
                                         }
-                                        scroll_cell(ui, &row.old_text);
-                                        if row.is_choice {
-                                            let mut take = current;
-                                            ui.radio_value(&mut take, false, "");
-                                            if take != current {
-                                                if let Some(review) = app.merge_review.as_mut() {
-                                                    if let Some(entry) =
-                                                        review.candidates.get_mut(index)
-                                                    {
-                                                        if row_index == 0 {
-                                                            entry.take_new_birth = take;
-                                                        } else {
-                                                            entry.take_new_death = take;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            ui.label("");
-                                        }
-                                        ui.end_row();
                                     }
                                 });
+                            }
                             ui.small("Verknüpfungen (Eltern, Geschwister, Partner, Kinder) werden vereint.");
                         }
                     }
@@ -703,6 +882,289 @@ pub fn show_merge_review(app: &mut MiniGramps, ctx: &egui::Context) {
     }
 }
 
+/// Gesamt-Übereinstimmung eines Treffers in Prozent (Mittel aus Vorname,
+/// Nachname, Verwandtschaft, gedeckelt) für Trefferlisten.
+fn match_total_percent(candidate: &crate::model::MergeCandidate) -> u32 {
+    ((candidate.name_score + candidate.family_score + candidate.kin_score) / 3.0 * 100.0)
+        .round()
+        .clamp(0.0, 100.0) as u32
+}
+
+/// Einzel-Merge-Dialog (rechte Leiste, Zusammenführen): Top-5 Treffer zur
+/// gewählten Person (ohne Selbst), Klick öffnet die Detailansicht mit
+/// Vergleichstabelle und Zusammenführen-Button.
+pub fn show_person_merge(app: &mut MiniGramps, ctx: &egui::Context) {
+    if !app.show_person_merge {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(window_title("Person zusammenführen"))
+        .id(egui::Id::new("person-merge-v1"))
+        .open(&mut open)
+        .movable(false)
+        .resizable(true)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(720.0)
+        .max_height(ctx.content_rect().height() * 0.9)
+        .show(ctx, |ui| {
+            let target_name = app
+                .selected
+                .as_deref()
+                .and_then(|id| app.data.find(id))
+                .map(|person| person.display_name())
+                .unwrap_or_else(|| "–".to_string());
+            ui.label(
+                egui::RichText::new(format!("Zusammenführen mit: {target_name}")).strong(),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Suche");
+                ui.text_edit_singleline(&mut app.person_merge_query)
+                    .on_hover_text("Filtert die Trefferliste zusätzlich nach Namen.");
+            });
+            ui.separator();
+            // Trefferliste (Top-5): Name + Prozent + Scores.
+            let needle = app.person_merge_query.trim().to_lowercase();
+            let mut detail_pick: Option<(String, String)> = None;
+            for candidate in &app.person_merge_hits {
+                let drop_name = app
+                    .data
+                    .find(&candidate.drop_id)
+                    .map(|person| person.display_name())
+                    .unwrap_or_else(|| candidate.drop_id.clone());
+                if !needle.is_empty() && !drop_name.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                let total = match_total_percent(candidate);
+                let label = format!(
+                    "{drop_name} — {total} % (V {:.0} · N {:.0} · Verw {:.0})",
+                    candidate.name_score * 100.0,
+                    candidate.family_score * 100.0,
+                    candidate.kin_score * 100.0,
+                );
+                let selected = app.person_merge_detail.as_ref().is_some_and(
+                    |(keep, drop)| {
+                        keep == &candidate.keep_id && drop == &candidate.drop_id
+                    },
+                );
+                if ui.selectable_label(selected, label).clicked() {
+                    detail_pick = Some((candidate.keep_id.clone(), candidate.drop_id.clone()));
+                }
+            }
+            if app.person_merge_hits.is_empty() {
+                ui.small("Keine Übereinstimmungen gefunden.");
+            }
+            if let Some((keep_id, drop_id)) = detail_pick {
+                let take_birth = app
+                    .data
+                    .find(&keep_id)
+                    .map(|person| person.birth.trim().is_empty())
+                    .unwrap_or(true);
+                let take_death = app
+                    .data
+                    .find(&keep_id)
+                    .map(|person| person.death.trim().is_empty())
+                    .unwrap_or(true);
+                app.person_merge_take_birth = take_birth;
+                app.person_merge_take_death = take_death;
+                app.person_merge_detail = Some((keep_id, drop_id));
+            }
+            // Detailansicht: Scores, Geburt/Tod-Vergleich, Beziehungen der
+            // Treffer-Person, Feldwahl und Zusammenführen-Button.
+            let detail = app.person_merge_detail.clone().and_then(|(keep, drop)| {
+                let threshold = (app.match_threshold / 100.0).clamp(0.0, 1.0);
+                let common_min = app.common_given_threshold.clamp(2, 10);
+                let candidate =
+                    app.data
+                        .pair_match_candidate(&keep, &drop, threshold, common_min)?;
+                let keep_person = app.data.find(&keep)?.clone();
+                let drop_person = app.data.find(&drop)?.clone();
+                Some((keep, drop, candidate, keep_person, drop_person))
+            });
+            if let Some((_, _, candidate, keep_person, drop_person)) = detail {
+                let total = match_total_percent(&candidate);
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} ↔ {}",
+                        keep_person.display_name(),
+                        drop_person.display_name()
+                    ))
+                    .strong(),
+                );
+                ui.small(format!(
+                    "Übereinstimmung {total} % — Vorname {:.0} % · Nachname {:.0} % · Verwandt {:.0} %{}",
+                    candidate.name_score * 100.0,
+                    candidate.family_score * 100.0,
+                    candidate.kin_score * 100.0,
+                    if candidate.birth_match {
+                        " · Geburt gleich"
+                    } else {
+                        ""
+                    },
+                ));
+                let fmt = |date: &str, place: &str| -> String {
+                    if date.trim().is_empty() {
+                        "—".to_string()
+                    } else if place.trim().is_empty() {
+                        date.to_string()
+                    } else {
+                        format!("{date}, {place}")
+                    }
+                };
+                let names_of = |ids: Vec<String>| -> String {
+                    if ids.is_empty() {
+                        "—".to_string()
+                    } else {
+                        ids.iter()
+                            .filter_map(|id| app.data.find(id))
+                            .map(|person| person.display_name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                };
+                let rel_of = |id: &str| -> [String; 4] {
+                    let ids = |people: Vec<&crate::model::Person>| {
+                        people
+                            .iter()
+                            .map(|person| person.id.clone())
+                            .collect::<Vec<_>>()
+                    };
+                    [
+                        names_of(ids(app.data.parents_of(id))),
+                        names_of(ids(app.data.siblings_of(id))),
+                        names_of(ids(app.data.partners_of(id))),
+                        names_of(ids(app.data.children_of(id))),
+                    ]
+                };
+                let keep_rel = rel_of(&keep_person.id);
+                let drop_rel = rel_of(&drop_person.id);
+                let rows: Vec<(String, bool, String, String)> = vec![
+                    (
+                        "Name".to_string(),
+                        true,
+                        drop_person.display_name().to_string(),
+                        keep_person.display_name().to_string(),
+                    ),
+                    (
+                        "Geburt".to_string(),
+                        true,
+                        fmt(&drop_person.birth, &drop_person.birth_place),
+                        fmt(&keep_person.birth, &keep_person.birth_place),
+                    ),
+                    (
+                        "Tod".to_string(),
+                        true,
+                        fmt(&drop_person.death, &drop_person.death_place),
+                        fmt(&keep_person.death, &keep_person.death_place),
+                    ),
+                    ("Eltern".to_string(), false, drop_rel[0].clone(), keep_rel[0].clone()),
+                    (
+                        "Geschwister".to_string(),
+                        false,
+                        drop_rel[1].clone(),
+                        keep_rel[1].clone(),
+                    ),
+                    (
+                        "Partner".to_string(),
+                        false,
+                        drop_rel[2].clone(),
+                        keep_rel[2].clone(),
+                    ),
+                    (
+                        "Kinder".to_string(),
+                        false,
+                        drop_rel[3].clone(),
+                        keep_rel[3].clone(),
+                    ),
+                ];
+                merge_fields_grid(
+                    ui,
+                    "person-merge-fields",
+                    &rows,
+                    &mut app.person_merge_take_name,
+                    &mut app.person_merge_take_birth,
+                    &mut app.person_merge_take_death,
+                );
+                ui.separator();
+                // Eltern mit-mergen: je Seite ein Elternteil wählen, Button
+                // fügt das Paar als Treffer hinzu (Review wird geöffnet).
+                let keep_parents: Vec<(String, String)> = app
+                    .data
+                    .parents_of(&keep_person.id)
+                    .iter()
+                    .map(|person| (person.id.clone(), person.display_name()))
+                    .collect();
+                let drop_parents: Vec<(String, String)> = app
+                    .data
+                    .parents_of(&drop_person.id)
+                    .iter()
+                    .map(|person| (person.id.clone(), person.display_name()))
+                    .collect();
+                if !keep_parents.is_empty() && !drop_parents.is_empty() {
+                    ui.small("Eltern mit-mergen (je Seite wählen):");
+                    ui.horizontal(|ui| {
+                        for (pid, pname) in &drop_parents {
+                            let picked =
+                                app.person_merge_parent_new.as_deref() == Some(pid.as_str());
+                            if ui.selectable_label(picked, pname).clicked() {
+                                app.person_merge_parent_new = if picked {
+                                    None
+                                } else {
+                                    Some(pid.clone())
+                                };
+                            }
+                        }
+                        ui.label("↔");
+                        for (pid, pname) in &keep_parents {
+                            let picked =
+                                app.person_merge_parent_old.as_deref() == Some(pid.as_str());
+                            if ui.selectable_label(picked, pname).clicked() {
+                                app.person_merge_parent_old = if picked {
+                                    None
+                                } else {
+                                    Some(pid.clone())
+                                };
+                            }
+                        }
+                        let ready = app.person_merge_parent_new.is_some()
+                            && app.person_merge_parent_old.is_some();
+                        if ui
+                            .add_enabled(ready, egui::Button::new("+ Elternpaar"))
+                            .on_hover_text("Gewählte Eltern als Mergepaar hinzufügen")
+                            .clicked()
+                            && ready
+                        {
+                            let keep_pick = app.person_merge_parent_old.clone().unwrap();
+                            let drop_pick = app.person_merge_parent_new.clone().unwrap();
+                            if app.add_parent_pair_as_match(&keep_pick, &drop_pick) {
+                                app.person_merge_parent_new = None;
+                                app.person_merge_parent_old = None;
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+                if ui
+                    .button("Zusammenführen")
+                    .on_hover_text("Gewählte Person in die aktuelle einführen und löschen.")
+                    .clicked()
+                {
+                    let (take_birth, take_death, take_name) = (
+                        app.person_merge_take_birth,
+                        app.person_merge_take_death,
+                        app.person_merge_take_name,
+                    );
+                    app.apply_person_merge(take_birth, take_death, take_name);
+                }
+            }
+        });
+    if !open {
+        app.show_person_merge = false;
+        app.person_merge_detail = None;
+    }
+}
+
 /// Schnellerfassung: geführte Eingabe an die Referenzperson.
 ///
 /// Abwärts (Standard): Partner + beliebig viele Kinder zur Referenz;
@@ -729,13 +1191,13 @@ pub fn show_quick(app: &mut MiniGramps, ctx: &egui::Context) {
     });
     let mut committed = false;
     egui::Window::new(window_title("Schnellerfassung"))
-        .id(egui::Id::new("quick-entry-v1"))
+        .id(egui::Id::new("quick-entry-v2"))
         .open(&mut open)
         .movable(false)
         .resizable(true)
         .collapsible(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .default_width(560.0)
+        .default_width(700.0)
         .max_height(ctx.content_rect().height() * 0.9)
         .show(ctx, |ui| {
             use crate::model::QuickDir;
@@ -774,6 +1236,16 @@ pub fn show_quick(app: &mut MiniGramps, ctx: &egui::Context) {
             ui.separator();
 
             let is_up = app.quick_dir == QuickDir::Up;
+            // Verwaiste Fokusziele räumen (Kopf nur abwärts, Zeilen nur
+            // existent) — sonst hängt der Tastaturfokus in der Luft.
+            let focus_ok = match app.quick_focus {
+                None => true,
+                Some((0, _)) => !is_up,
+                Some((row, _)) => row >= 1 && row <= app.quick_rows.len(),
+            };
+            if !focus_ok {
+                app.quick_focus = None;
+            }
             if !is_up {
                 // Kopfzeile nur abwärts (Partner). Aufwärts ist die Referenz
                 // selbst das Kind — das Kind spielt keine Rolle.
@@ -1080,9 +1552,11 @@ fn quick_row_fields(
     } else {
         return false;
     };
-    // Gesetzte Zeile: Felder zeigen die Personeninfos, grau + gesperrt.
+    // Gesetzte Zeile: Nachname + Geschlecht bleiben Anker (grau + gesperrt),
+    // Vorname/Geburt/Tod sind editierbar (schreibt beim Speichern zurück).
     let bound = person.bind.is_some();
     let mut unset = false;
+    let mut reset_pressed = false;
     ui.horizontal_wrapped(|ui| {
         ui.label(format!("{label}:"));
         // Textfelder (wrappen bei schmalem Fenster auf 2 Zeilen um).
@@ -1106,12 +1580,14 @@ fn quick_row_fields(
                 .id(egui::Id::new(("quick-field", row, col)))
                 .desired_width(90.0)
                 .hint_text(hint);
-            let response = if bound {
+            // Col 1 (Nachname) bleibt bei gesetzter Zeile gesperrt.
+            let locked = bound && col == 1;
+            let response = if locked {
                 ui.add_enabled(false, edit)
             } else {
                 ui.add(edit)
             };
-            if !bound && focus == Some((row, col)) {
+            if !locked && focus == Some((row, col)) {
                 response.request_focus();
                 focus_consumed = true;
             }
@@ -1167,7 +1643,9 @@ fn quick_row_fields(
                 }
             }
         });
-        // Hinten: Entsetzen-Button bei gesetzter Zeile.
+        // Am Zeilenende zwei getrennte Buttons: „entsetzen" (Text, nur
+        // gesetzt — Bindung lösen) und Reset (Unlink-Symbol, alle Zeilen —
+        // Gebundene auf Stand vor Änderungen, freie Zeile löschen).
         if bound
             && ui
                 .small_button("entsetzen")
@@ -1176,9 +1654,22 @@ fn quick_row_fields(
         {
             unset = true;
         }
+        if icon_only_button(ui, ICON_UNLINK, "quick-reset")
+            .on_hover_text(if bound {
+                "Zurücksetzen: Person auf Stand vor Änderungen"
+            } else {
+                "Zeile löschen (Kopf: leeren)"
+            })
+            .clicked()
+        {
+            reset_pressed = true;
+        }
     });
     if unset {
         unbind_quick_person(app, row);
+    }
+    if reset_pressed {
+        reset_quick_row(app, row);
     }
     if focus_consumed {
         app.quick_focus = None;
@@ -1303,6 +1794,9 @@ fn bind_quick_person(app: &mut MiniGramps, row: usize, id: &str) {
     target.birth = birth;
     target.death = death;
     target.gender = gender;
+    // Fokus zurück auf die Zeile (der +Setzen-Button verschwindet mit dem
+    // Detailfenster — sonst hängt der Tastaturfokus in der Luft).
+    app.quick_focus = Some((row, 0));
 }
 
 /// Bindung von Zeile `row` lösen (entsetzen-Button): Felder zurück auf frisch
@@ -1332,21 +1826,58 @@ fn unbind_quick_person(app: &mut MiniGramps, row: usize) {
     target.birth.clear();
     target.death.clear();
     target.gender = preset;
+    // Fokus zurück auf die Zeile (der Reset-Button bleibt, die Bindung löst sich).
+    app.quick_focus = Some((row, 0));
+}
+
+/// Reset-Button je Zeile (Unlink-Symbol, anderer Button als Entsetzen):
+/// Gebundene, existierende Person auf Stand vor Änderungen zurücksetzen
+/// (Bindung bleibt); ohne gesetzte Person die Zeile löschen (Kopf: leeren).
+fn reset_quick_row(app: &mut MiniGramps, row: usize) {
+    let bound = if row == 0 {
+        app.quick_head.bind.clone()
+    } else {
+        app.quick_rows
+            .get(row - 1)
+            .and_then(|target| target.bind.clone())
+    };
+    match bound.and_then(|id| app.data.find(&id).map(|person| (id, person.clone()))) {
+        Some((id, person)) => {
+            let target = if row == 0 {
+                &mut app.quick_head
+            } else {
+                match app.quick_rows.get_mut(row - 1) {
+                    Some(target) => target,
+                    None => return,
+                }
+            };
+            target.bind = Some(id);
+            target.given = person.given_name;
+            target.family = person.family_name;
+            target.birth = person.birth;
+            target.death = person.death;
+            target.gender = person.gender;
+            app.quick_focus = Some((row, 0));
+        }
+        None => {
+            if row == 0 {
+                app.quick_head = crate::model::QuickPerson::default();
+                app.quick_focus = Some((0, 0));
+            } else if row - 1 < app.quick_rows.len() {
+                app.quick_rows.remove(row - 1);
+                app.quick_focus = Some((row.min(app.quick_rows.len().max(1)), 0));
+            }
+        }
+    }
 }
 
 /// Übernehmen (Strg+Enter bzw. Button): Eingabe sofort speichern und mit
-/// der nächsten eingetragenen Person weitermachen (neu oder gesetzt — alle
-/// landen in Zeilenreihenfolge auf der FIFO-`quick_queue`, außer bereits
-/// abgearbeiteten; die Referenz springt der Reihe nach darauf, ohne
-/// Baum-Umweg). Leere Eingabe springt nur weiter; ohne Warteschlange wird
-/// der Referenzstand neu geladen.
+/// dem nächsten Stack-Eintrag weitermachen (Kombis und Singles in
+/// Auswahl-/Zeilenreihenfolge; die Referenz springt der Reihe nach darauf,
+/// ohne Baum-Umweg). Leere Eingabe springt nur weiter; ohne Warteschlange
+/// wird der Referenzstand neu geladen.
 fn commit_quick_block(app: &mut MiniGramps) {
-    let (processed, created, touched) = app.persist_quick_form();
-    for id in touched {
-        if !app.quick_visited.contains(&id) && !app.quick_queue.contains(&id) {
-            app.quick_queue.push(id);
-        }
-    }
+    let (processed, created) = app.persist_quick_form(true);
     if !processed && app.quick_queue.is_empty() {
         app.status = "Nichts zu übernehmen".to_string();
         return;
@@ -1355,15 +1886,10 @@ fn commit_quick_block(app: &mut MiniGramps) {
 }
 
 /// Neuer Partner (Umsch+Strg+Enter bzw. Button): Eingabe sofort speichern
-/// und auf die nächste neue Partner-Seite derselben Referenz wechseln.
-/// Eingetragene IDs landen trotzdem auf der FIFO-Queue.
+/// und auf die nächste neue Partner-Seite derselben Referenz wechseln
+/// (Queue läuft daneben weiter).
 fn commit_quick_partner(app: &mut MiniGramps) {
-    let (processed, created, touched) = app.persist_quick_form();
-    for id in touched {
-        if !app.quick_visited.contains(&id) && !app.quick_queue.contains(&id) {
-            app.quick_queue.push(id);
-        }
-    }
+    let (processed, created) = app.persist_quick_form(true);
     if !processed {
         app.status = "Nichts zu übernehmen".to_string();
         return;
@@ -1384,7 +1910,7 @@ fn commit_quick_partner(app: &mut MiniGramps) {
 /// Partner-Seite (mehrere Partner nacheinander), aufwärts Stand neu laden.
 fn commit_quick_skip(app: &mut MiniGramps) {
     use crate::model::QuickDir;
-    let (processed, created, _) = app.persist_quick_form();
+    let (processed, created) = app.persist_quick_form(false);
     let mut advanced = false;
     if app.quick_dir == QuickDir::Down {
         let pages = app
@@ -1411,13 +1937,15 @@ fn commit_quick_skip(app: &mut MiniGramps) {
     }
 }
 
-/// Referenz auf die nächste Person der FIFO-Queue setzen (bereits
-/// abgearbeitete und verschwundene überspringen), Referenzstand laden.
+/// Referenz auf den nächsten Stack-Eintrag setzen: (Person, Partner?) —
+/// Kombis springen exakt auf die Partner-Seite (Kinder dort sind die des
+/// angegebenen Partners), Singles laden normal. Verschwundene überspringen.
 /// `created` = Anzahl neu angelegter Personen dieses Schritts.
 fn advance_quick_ref(app: &mut MiniGramps, created: usize) {
-    while let Some(next) = app.quick_queue.first().cloned() {
+    use crate::model::QuickDir;
+    while let Some((next, partner)) = app.quick_queue.first().cloned() {
         app.quick_queue.remove(0);
-        if app.quick_visited.contains(&next) || app.data.find(&next).is_none() {
+        if app.data.find(&next).is_none() {
             continue;
         }
         let name = app
@@ -1427,12 +1955,33 @@ fn advance_quick_ref(app: &mut MiniGramps, created: usize) {
             .unwrap_or_else(|| next.clone());
         app.quick_ref_id = Some(next.clone());
         app.quick_visited.insert(next);
-        app.quick_partner_idx = 0;
+        // Kombi-Partner-Seite anspringen (abwärts), sonst erste Seite.
+        app.quick_partner_idx = if app.quick_dir == QuickDir::Down {
+            partner
+                .as_deref()
+                .and_then(|pid| {
+                    app.data
+                        .partners_of(app.quick_ref_id.as_deref().unwrap_or(""))
+                        .iter()
+                        .position(|person| person.id == pid)
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
         quick_load_reference(app);
-        app.status = if created > 0 {
+        let status = if created > 0 {
             format!("Schnellerfassung: {created} neue Personen — weiter mit {name}")
         } else {
             format!("Weiter mit {name}")
+        };
+        app.status = match partner
+            .as_deref()
+            .and_then(|pid| app.data.find(pid))
+            .map(|person| person.display_name())
+        {
+            Some(partner_name) => format!("{status} (+ {partner_name})"),
+            None => status,
         };
         app.log(app.status.clone());
         return;
@@ -1632,13 +2181,80 @@ pub fn show_export(app: &mut MiniGramps, ctx: &egui::Context) {
                 )
                 .clicked()
             {
-                app.export_mfg_dialog();
+                app.export_mfg_dialog(ctx);
             }
             ui.add_enabled(false, egui::Button::new("MiniGramps Mini (.mmg)"));
             ui.separator();
             ui.small("Gramps-, GEDCOM- und Mini-Formate folgen in den nächsten Schritten.");
         });
     app.show_export = app.show_export && open;
+}
+
+/// Ladebildschirm für den laufenden MFG-Export (Hintergrundthread): Spinner
+/// + Dateiname, blockiert wie andere Modals. Pro Frame wird der
+/// Ergebniskanal gepollt (`try_recv` — kein Blockieren); fertig → aufräumen
+/// + Status/Log, danach schließt das Fenster von selbst.
+pub fn show_export_progress(app: &mut MiniGramps, ctx: &egui::Context) {
+    enum Poll {
+        Pending,
+        Done(Result<(), String>),
+        Gone,
+    }
+    let poll = match app.export_progress.as_ref() {
+        None => return,
+        Some(progress) => match progress.rx.try_recv() {
+            Ok(result) => Poll::Done(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Poll::Pending,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Poll::Gone,
+        },
+    };
+    match poll {
+        Poll::Done(result) => {
+            let file_name = app
+                .export_progress
+                .as_ref()
+                .map(|progress| progress.file_name.clone())
+                .unwrap_or_default();
+            app.export_progress = None;
+            match result {
+                Ok(()) => {
+                    app.status = format!("Exportiert: {file_name}");
+                    app.log(format!("Exportiert: {file_name}"));
+                }
+                Err(error) => {
+                    app.status = format!("Export fehlgeschlagen: {error}");
+                    app.log(format!("Export fehlgeschlagen: {error}"));
+                }
+            }
+        }
+        Poll::Gone => {
+            app.export_progress = None;
+            app.status = "Export fehlgeschlagen: Hintergrundthread abgebrochen".into();
+        }
+        Poll::Pending => {
+            let file_name = app
+                .export_progress
+                .as_ref()
+                .map(|progress| progress.file_name.clone())
+                .unwrap_or_default();
+            egui::Window::new(window_title("Export läuft"))
+                .movable(false)
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .default_width(360.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(28.0));
+                        ui.vertical(|ui| {
+                            ui.label("Komplettpaket wird geschrieben …");
+                            ui.small(&file_name);
+                        });
+                    });
+                    ui.small("Bitte warten — das Fenster schließt automatisch.");
+                });
+        }
+    }
 }
 
 pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
@@ -1777,6 +2393,30 @@ pub fn show_settings(app: &mut MiniGramps, ctx: &egui::Context) {
                      0 schaltet das Extra ab.",
                 );
             });
+            ui.horizontal(|ui| {
+                ui.label("Warnstufe");
+                ui.selectable_value(&mut app.warn_certainty, None, "Aus");
+                ui.selectable_value(
+                    &mut app.warn_certainty,
+                    Some(crate::model::Certainty::Unset),
+                    "Ungesetzt",
+                );
+                ui.selectable_value(
+                    &mut app.warn_certainty,
+                    Some(crate::model::Certainty::Oral),
+                    "Mündliche Info",
+                );
+                ui.selectable_value(
+                    &mut app.warn_certainty,
+                    Some(crate::model::Certainty::Document),
+                    "Dokument",
+                );
+            })
+            .response
+            .on_hover_text(
+                "Sicherheit bis zu dieser Stufe wird in Baum und Seitenleiste \
+                 farblich hervorgehoben (Handlungsbedarf).",
+            );
             ui.separator();
             ui.label(
                 egui::RichText::new("SPEICHERORT")
@@ -1924,29 +2564,76 @@ pub fn show_pending_select_confirm(app: &mut MiniGramps, ctx: &egui::Context) {
                 "Es gibt ungespeicherte Änderungen an „{name}“. Vor dem Wechsel speichern?"
             ));
             ui.add_space(6.0);
+            // Auswahl per Links/Rechts (Buttons liegen horizontal, zyklisch),
+            // Enter bestätigt. Default 0 = Speichern und wechseln
+            // (hervorgehoben). Hover folgt der Auswahl.
+            let choice = app.pending_select_choice.min(2);
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                app.pending_select_choice = (choice + 1) % 3;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                app.pending_select_choice = (choice + 2) % 3;
+            }
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter))
+                && !ui.input(|i| i.modifiers.command || i.modifiers.shift);
+            let mut activated: Option<usize> = None;
             ui.horizontal(|ui| {
-                if ui.button("Speichern und wechseln").clicked() {
-                    app.commit_draft();
-                    app.inline_edit = false;
-                    app.status = "Profil gespeichert".into();
-                    app.save();
-                    let ctx = ui.ctx().clone();
-                    app.apply_pending_select(&ctx);
-                }
-                if ui.button("Verwerfen und wechseln").clicked() {
-                    app.inline_edit = false;
-                    app.relation_picker = None;
-                    app.status = "Änderungen verworfen".into();
-                    let ctx = ui.ctx().clone();
-                    app.apply_pending_select(&ctx);
-                }
-                if ui.button("Abbrechen").clicked() {
-                    app.pending_select = None;
+                for (index, label) in [
+                    "Speichern und wechseln",
+                    "Verwerfen und wechseln",
+                    "Abbrechen",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let active = app.pending_select_choice == index;
+                    let response =
+                        ui.add(egui::Button::new(label).selected(active));
+                    if response.hovered() {
+                        app.pending_select_choice = index;
+                    }
+                    if response.clicked() {
+                        activated = Some(index);
+                    }
                 }
             });
+            // Klick (auch nativ per Enter auf fokussiertem Button) schlägt die
+            // manuelle Enter-Bestätigung (keine Doppel-Ausführung).
+            if activated.is_none() && enter {
+                activated = Some(app.pending_select_choice.min(2));
+            }
+            if let Some(index) = activated {
+                let ctx = ui.ctx().clone();
+                activate_pending_select(app, &ctx, index);
+            }
         });
     if !open {
         app.pending_select = None;
+    }
+}
+
+/// Wechsel-Dialog-Option ausführen (Button-Klick oder Enter auf Auswahl).
+fn activate_pending_select(app: &mut MiniGramps, ctx: &egui::Context, choice: usize) {
+    match choice {
+        // Speichern und wechseln → Ziel gleich wieder im Bearbeitenmodus.
+        0 => {
+            app.commit_draft();
+            app.inline_edit = false;
+            app.status = "Profil gespeichert".into();
+            app.save();
+            app.apply_pending_select(ctx, true);
+        }
+        // Verwerfen und wechseln → Ziel in der Ansicht.
+        1 => {
+            app.inline_edit = false;
+            app.relation_picker = None;
+            app.status = "Änderungen verworfen".into();
+            app.apply_pending_select(ctx, false);
+        }
+        // Abbrechen.
+        _ => {
+            app.pending_select = None;
+        }
     }
 }
 
@@ -2532,4 +3219,1248 @@ fn open_in_default_viewer(path: &std::path::Path) -> std::io::Result<()> {
         std::process::Command::new("xdg-open").arg(path).spawn()?;
     }
     Ok(())
+}
+
+/// Geführter Import-Abgleich (Fixpunkt-Wizard): 1 Fixpunkt → 2 Overlay →
+/// 3 Ergänzung → 4 Prüfen → 5 Fertig. Ein Modal, das sauber durchführt:
+/// Fixpunkt setzen, Baum automatisch darüberlegen, sichere Infos automatisch
+/// ergänzen, nur Unterschiede paarweise entscheiden.
+pub fn show_import_wizard(app: &mut MiniGramps, ctx: &egui::Context) {
+    if app.import_wizard.is_none() {
+        return;
+    }
+    let step = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| wizard.step)
+        .unwrap_or(WizardStep::Anchor);
+    egui::Window::new(window_title("Import-Abgleich"))
+        .id(egui::Id::new("import-wizard-v1"))
+        .movable(false)
+        .resizable(true)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .default_width(880.0)
+        .max_height(ctx.content_rect().height() * 0.92)
+        .show(ctx, |ui| {
+            wizard_step_header(ui, step);
+            ui.separator();
+            match step {
+                WizardStep::Anchor => wizard_anchor(app, ui),
+                WizardStep::Overlay => wizard_overlay(app, ui),
+                WizardStep::Supplement => wizard_supplement(app, ui),
+                WizardStep::Review => wizard_review(app, ui),
+                WizardStep::Done => wizard_done(app, ui),
+            }
+        });
+}
+
+/// Schritt-Leiste oben im Wizard (aktiver Schritt hervorgehoben).
+fn wizard_step_header(ui: &mut egui::Ui, step: WizardStep) {
+    let steps = [
+        (WizardStep::Anchor, "1 Fixpunkt"),
+        (WizardStep::Overlay, "2 Overlay"),
+        (WizardStep::Supplement, "3 Ergänzung"),
+        (WizardStep::Review, "4 Prüfen"),
+        (WizardStep::Done, "5 Fertig"),
+    ];
+    ui.horizontal(|ui| {
+        for (index, (kind, label)) in steps.iter().enumerate() {
+            if index > 0 {
+                ui.label("→");
+            }
+            let text = if *kind == step {
+                egui::RichText::new(*label).strong()
+            } else {
+                egui::RichText::new(*label).color(crate::ui::panels::dim_text(ui))
+            };
+            ui.label(text);
+        }
+    });
+}
+
+/// Personen-Kurzlabel für den Wizard (Name + Geburtsjahr, falls bekannt).
+fn wiz_person_label(app: &MiniGramps, id: &str) -> String {
+    match app.data.find(id) {
+        Some(person) => {
+            let birth = person.birth.trim();
+            if birth.is_empty() {
+                person.display_name()
+            } else {
+                format!("{} · {birth}", person.display_name())
+            }
+        }
+        None => id.to_string(),
+    }
+}
+
+/// Score-Zeile eines Kandidaten (Name/Nachname/Verwandtschaft in Prozent).
+fn wiz_scores_line(name: f32, family: f32, kin: f32) -> String {
+    format!(
+        "Name {:.0} % · Nachname {:.0} % · Verwandt {:.0} %",
+        name * 100.0,
+        family * 100.0,
+        kin * 100.0
+    )
+}
+
+/// Abbrechen-Button (Anhang verwerfen, Stand davor wiederherstellen).
+fn wizard_discard_button(app: &mut MiniGramps, ui: &mut egui::Ui) {
+    if ui
+        .button("Abbrechen (Anhang verwerfen)")
+        .on_hover_text(
+            "Angehängte Personen samt Einbettungen verwerfen und schließen.",
+        )
+        .clicked()
+    {
+        app.wizard_discard();
+    }
+}
+
+/// Schritt 1: Fixpunkt wählen (Vorschlag vorausgewählt, Suche + Top-Liste).
+fn wizard_anchor(app: &mut MiniGramps, ui: &mut egui::Ui) {
+    ui.label(
+        "Fixpunkt: An welcher Person soll der angehängte Baum ausgerichtet werden? \
+         Der Vorschlag ist der sicherste Treffer — oder manuell wählen.",
+    );
+    ui.add_space(4.0);
+    // Suche (filtert die Vorschlagsliste).
+    let mut query = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| wizard.anchor_query.clone())
+        .unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label("Suche");
+        if ui.text_edit_singleline(&mut query).changed() {
+            if let Some(wizard) = app.import_wizard.as_mut() {
+                wizard.anchor_query = query.clone();
+            }
+        }
+    });
+    // Optionen lesen (gefiltert), Auswahl als IDs.
+    let needle = query.trim().to_lowercase();
+    let options: Vec<(String, String, String)> = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| {
+            wizard
+                .anchor_options
+                .iter()
+                .filter(|candidate| {
+                    if needle.is_empty() {
+                        return true;
+                    }
+                    let keep = app
+                        .data
+                        .find(&candidate.keep_id)
+                        .map(|person| person.display_name().to_lowercase())
+                        .unwrap_or_default();
+                    let drop = app
+                        .data
+                        .find(&candidate.drop_id)
+                        .map(|person| person.display_name().to_lowercase())
+                        .unwrap_or_default();
+                    keep.contains(&needle) || drop.contains(&needle)
+                })
+                .take(12)
+                .map(|candidate| {
+                    let label = format!(
+                        "{}  ↔  {}   ({})",
+                        wiz_person_label(app, &candidate.keep_id),
+                        wiz_person_label(app, &candidate.drop_id),
+                        wiz_scores_line(
+                            candidate.name_score,
+                            candidate.family_score,
+                            candidate.kin_score
+                        )
+                    );
+                    (
+                        candidate.keep_id.clone(),
+                        candidate.drop_id.clone(),
+                        label,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if options.is_empty() {
+        ui.label(
+            egui::RichText::new("Keine Treffer — alles wird als neu angehängt.")
+                .italics()
+                .color(crate::ui::panels::dim_text(ui)),
+        );
+    } else {
+        let selected = app
+            .import_wizard
+            .as_ref()
+            .and_then(|wizard| {
+                wizard
+                    .anchor_keep
+                    .clone()
+                    .zip(wizard.anchor_drop.clone())
+            });
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for (keep, drop, label) in &options {
+                    let is_selected =
+                        selected.as_ref().is_some_and(|(k, d)| k == keep && d == drop);
+                    if ui.selectable_label(is_selected, label).clicked() {
+                        if let Some(wizard) = app.import_wizard.as_mut() {
+                            wizard.anchor_keep = Some(keep.clone());
+                            wizard.anchor_drop = Some(drop.clone());
+                        }
+                    }
+                }
+            });
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let has_anchor = app
+            .import_wizard
+            .as_ref()
+            .is_some_and(|wizard| wizard.anchor_keep.is_some() && wizard.anchor_drop.is_some());
+        if ui
+            .add_enabled(has_anchor, egui::Button::new("Weiter: Baum abgleichen"))
+            .on_hover_text("Fixpunkt übernehmen und 1:1-Overlay aufbauen.")
+            .clicked()
+            && has_anchor
+        {
+            app.wizard_confirm_anchor();
+        }
+        if options.is_empty() && ui.button("Weiter ohne Fixpunkt").clicked() {
+            app.wizard_skip_anchor();
+        }
+        wizard_discard_button(app, ui);
+    });
+}
+
+/// Schritt 2: Overlay prüfen (1:1-Mapping ab Fixpunkt, Status je Paar).
+fn wizard_overlay(app: &mut MiniGramps, ui: &mut egui::Ui) {
+    let (exact, unsure, fresh_total, fresh_mapped) = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| {
+            (
+                wizard.mappings.iter().filter(|entry| entry.exact).count(),
+                wizard.mappings.iter().filter(|entry| !entry.exact).count(),
+                wizard.fresh_total,
+                wizard
+                    .mappings
+                    .iter()
+                    .map(|entry| entry.drop_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or_default();
+    let fresh_new = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| {
+            wizard
+                .fresh_ids
+                .iter()
+                .filter(|id| !fresh_mapped.contains(id))
+                .count()
+        })
+        .unwrap_or(0);
+    ui.label(format!(
+        "{exact} sicher (automatisch) · {unsure} zu prüfen · {fresh_new} neu von {fresh_total} — \
+         jede Person höchstens einmal zugeordnet."
+    ));
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .max_height(300.0)
+        .show(ui, |ui| {
+            let rows: Vec<(bool, String, String)> = app
+                .import_wizard
+                .as_ref()
+                .map(|wizard| {
+                    wizard
+                        .mappings
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.exact,
+                                wiz_person_label(app, &entry.keep_id),
+                                wiz_person_label(app, &entry.drop_id),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (exact, keep_label, drop_label) in &rows {
+                ui.horizontal(|ui| {
+                    let chip = if *exact { "Sicher" } else { "Prüfen" };
+                    ui.label(
+                        egui::RichText::new(chip)
+                            .small()
+                            .color(crate::ui::panels::dim_text(ui)),
+                    );
+                    ui.label(format!("{keep_label}  ↔  {drop_label}"));
+                });
+            }
+            if rows.is_empty() {
+                ui.label(
+                    egui::RichText::new("Keine Zuordnungen — alles bleibt neu.")
+                        .italics()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+            }
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Zurück").clicked() {
+            if let Some(wizard) = app.import_wizard.as_mut() {
+                wizard.step = WizardStep::Anchor;
+            }
+        }
+        if ui
+            .button("Weiter: automatisch ergänzen")
+            .on_hover_text("Sichere Paare einbetten (nur Lücken füllen, mit Protokoll).")
+            .clicked()
+        {
+            app.wizard_run_supplement();
+        }
+        wizard_discard_button(app, ui);
+    });
+}
+
+/// Schritt 3: Auto-Ergänzung prüfen (Protokoll der übernommenen Infos).
+fn wizard_supplement(app: &mut MiniGramps, ui: &mut egui::Ui) {
+    let (auto_count, protocol, unsure) = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| {
+            (
+                wizard.auto_count,
+                wizard.protocol.clone(),
+                wizard.mappings.len(),
+            )
+        })
+        .unwrap_or_default();
+    ui.label(format!(
+        "{auto_count} Paare automatisch eingebettet — nur Lücken gefüllt, nichts überschrieben."
+    ));
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .max_height(300.0)
+        .show(ui, |ui| {
+            if protocol.is_empty() {
+                ui.label(
+                    egui::RichText::new("Nichts zu ergänzen.")
+                        .italics()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+            } else {
+                for line in &protocol {
+                    ui.small(format!("• {line}"));
+                }
+            }
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if unsure > 0 {
+            if ui
+                .button(format!("Weiter: Unterschiede prüfen ({unsure})"))
+                .on_hover_text("Unsichere Paare einzeln durchgehen und entscheiden.")
+                .clicked()
+            {
+                if let Some(wizard) = app.import_wizard.as_mut() {
+                    wizard.review_index = 0;
+                    wizard.step = WizardStep::Review;
+                }
+            }
+        } else if ui.button("Fertig").clicked() {
+            app.wizard_finish();
+        }
+        wizard_discard_button(app, ui);
+    });
+}
+
+/// Rel-Schlüssel für Überspringen (Behalten): stabil je Unterschied.
+fn wiz_rel_key(kind: &RelDiffKind, family_drop_id: &str) -> String {
+    match kind {
+        RelDiffKind::PartnerRelation { .. } => format!("{family_drop_id}:partner"),
+        RelDiffKind::RelationEvent { event, .. } => format!(
+            "{family_drop_id}:event:{}:{}:{}",
+            event.kind.label(),
+            event.date,
+            event.place
+        ),
+        RelDiffKind::FamilyNote { .. } => format!("{family_drop_id}:famnote"),
+        RelDiffKind::FamilySources { .. } => format!("{family_drop_id}:famsources"),
+        RelDiffKind::ChildMissing { child_id, .. } => {
+            format!("{family_drop_id}:child:{child_id}")
+        }
+        RelDiffKind::ChildRelation { child_id, .. } => {
+            format!("{family_drop_id}:childrel:{child_id}")
+        }
+        RelDiffKind::NewFamily => format!("{family_drop_id}:newfamily"),
+    }
+}
+
+/// Schritt 4: Unterschiede paarweise prüfen — Person für Person, nur
+/// Unterschiede; jede Änderung einzeln annehmen oder ablehnen.
+/// Beziehungsunterschiede bieten Ersetzen/Ergänzen/Zusammenführen.
+fn wizard_review(app: &mut MiniGramps, ui: &mut egui::Ui) {
+    let order = app.wizard_review_order();
+    if order.is_empty() {
+        ui.label("Keine unsicheren Paare — alles eingebettet oder neu.");
+        ui.horizontal(|ui| {
+            if ui.button("Fertig").clicked() {
+                app.wizard_finish();
+            }
+            wizard_discard_button(app, ui);
+        });
+        return;
+    }
+    let len = order.len();
+    let index = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| wizard.review_index.min(len - 1))
+        .unwrap_or(0);
+    if app
+        .import_wizard
+        .as_ref()
+        .is_some_and(|wizard| wizard.review_index != index)
+    {
+        app.import_wizard.as_mut().unwrap().review_index = index;
+    }
+    let (keep_id, drop_id) = order[index].clone();
+    let (keep, drop) = match (
+        app.data.find(&keep_id).cloned(),
+        app.data.find(&drop_id).cloned(),
+    ) {
+        (Some(keep), Some(drop)) => (keep, drop),
+        _ => {
+            ui.label("Paar aufgelöst — weiter.");
+            ui.horizontal(|ui| {
+                if ui.button("Weiter →").clicked() {
+                    wizard_review_advance(app, len);
+                }
+                wizard_discard_button(app, ui);
+            });
+            return;
+        }
+    };
+    // Scores für die Kopfzeile.
+    let scores = app
+        .import_wizard
+        .as_ref()
+        .and_then(|wizard| {
+            wizard
+                .mappings
+                .iter()
+                .find(|entry| entry.keep_id == keep_id && entry.drop_id == drop_id)
+        })
+        .map(|entry| wiz_scores_line(entry.name_score, entry.family_score, entry.kin_score))
+        .unwrap_or_default();
+    ui.label(
+        egui::RichText::new(format!(
+            "Paar {} von {} — {}  ↔  {}",
+            index + 1,
+            len,
+            keep.display_name(),
+            drop.display_name()
+        ))
+        .strong(),
+    );
+    ui.small(&scores);
+    // Diffs berechnen (Eigentum für borrow-freies Rendern).
+    let scalars = crate::model::TreeData::person_scalar_diffs(&keep, &drop);
+    let missing_events: Vec<crate::model::Event> = drop
+        .events
+        .iter()
+        .filter(|event| {
+            !keep.events.iter().any(|own| {
+                own.kind == event.kind && own.date == event.date && own.place == event.place
+            })
+        })
+        .cloned()
+        .collect();
+    let keep_only_events = keep
+        .events
+        .iter()
+        .filter(|event| {
+            !drop.events.iter().any(|other| {
+                other.kind == event.kind
+                    && other.date == event.date
+                    && other.place == event.place
+            })
+        })
+        .count();
+    let missing_gallery: Vec<String> = drop
+        .gallery
+        .iter()
+        .filter(|path| !keep.gallery.iter().any(|own| own == *path))
+        .cloned()
+        .collect();
+    let missing_docs: Vec<crate::model::DocumentEntry> = drop
+        .documents
+        .iter()
+        .filter(|document| {
+            !keep
+                .documents
+                .iter()
+                .any(|own| own.path == document.path)
+        })
+        .cloned()
+        .collect();
+    let missing_sources: Vec<crate::model::SourceEntry> = drop
+        .sources
+        .iter()
+        .filter(|source| !keep.sources.contains(source))
+        .cloned()
+        .collect();
+    let missing_alts: Vec<crate::model::AlternativeName> = drop
+        .alt_names
+        .iter()
+        .filter(|alt| !alt.is_empty() && !keep.alt_names.contains(alt))
+        .cloned()
+        .collect();
+    let drop_to_keep = app.wizard_drop_to_keep();
+    let fresh_ids = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| wizard.fresh_ids.clone())
+        .unwrap_or_default();
+    let rels = app
+        .data
+        .relation_diffs(&keep_id, &drop_id, &drop_to_keep, &fresh_ids);
+    // Übersprungene ausblenden (Behalten).
+    let skipped_scalars: Vec<(String, String)> = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| {
+            wizard
+                .skipped_scalars
+                .iter()
+                .filter(|(drop, _)| drop == &drop_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let skipped_lists: Vec<(String, String, String)> = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| {
+            wizard
+                .skipped_lists
+                .iter()
+                .filter(|(drop, _, _)| drop == &drop_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let skipped_rels: Vec<String> = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| wizard.skipped_rels.clone())
+        .unwrap_or_default();
+    // Offene zählen (ohne reine Anzeige-Zeilen).
+    let open_scalars = scalars
+        .iter()
+        .filter(|diff| {
+            !diff.new_text.trim().is_empty()
+                && !skipped_scalars
+                    .iter()
+                    .any(|(_, key)| key == diff.key)
+        })
+        .count();
+    let open_lists = missing_events.len()
+        + missing_gallery.len()
+        + missing_docs.len()
+        + missing_sources.len()
+        + missing_alts.len()
+        - skipped_lists.len().min(
+            missing_events.len()
+                + missing_gallery.len()
+                + missing_docs.len()
+                + missing_sources.len()
+                + missing_alts.len(),
+        );
+    let open_rels = rels
+        .iter()
+        .filter(|diff| {
+            !matches!(diff.kind, RelDiffKind::NewFamily)
+                && !skipped_rels.contains(&wiz_rel_key(&diff.kind, &diff.family_drop_id))
+        })
+        .count();
+    ui.small(format!(
+        "{} offen (Person: {open_scalars}, Listen: {open_lists}, Beziehung: {open_rels})",
+        open_scalars + open_lists + open_rels
+    ));
+    egui::ScrollArea::vertical()
+        .max_height(380.0)
+        .show(ui, |ui| {
+            wizard_person_diffs(app, ui, &keep_id, &drop_id, &keep, &scalars, &skipped_scalars);
+            wizard_list_diffs(
+                app,
+                ui,
+                &keep_id,
+                &drop_id,
+                &keep,
+                &missing_events,
+                keep_only_events,
+                &missing_gallery,
+                &missing_docs,
+                &missing_sources,
+                &missing_alts,
+                &skipped_lists,
+            );
+            wizard_rel_diffs(
+                app,
+                ui,
+                &keep_id,
+                &drop_id,
+                &rels,
+                &skipped_rels,
+            );
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(index > 0, egui::Button::new("← Zurück"))
+            .clicked()
+            && index > 0
+        {
+            if let Some(wizard) = app.import_wizard.as_mut() {
+                wizard.review_index = index - 1;
+            }
+        }
+        if index + 1 < len {
+            if ui.button("Weiter →").clicked() {
+                if let Some(wizard) = app.import_wizard.as_mut() {
+                    wizard.review_index = index + 1;
+                }
+            }
+        } else if ui.button("Fertig").clicked() {
+            if let Some(wizard) = app.import_wizard.as_mut() {
+                wizard.step = WizardStep::Done;
+            }
+        }
+        wizard_discard_button(app, ui);
+    });
+}
+
+/// Review fortsetzen (nach aufgelöstem Paar).
+fn wizard_review_advance(app: &mut MiniGramps, len: usize) {
+    let next = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| wizard.review_index + 1)
+        .unwrap_or(0);
+    if next >= len {
+        if let Some(wizard) = app.import_wizard.as_mut() {
+            wizard.step = WizardStep::Done;
+        }
+    } else if let Some(wizard) = app.import_wizard.as_mut() {
+        wizard.review_index = next;
+    }
+}
+
+/// Personen-Felder: nur Unterschiede, je Zeile Übernehmen/Behalten (leeres
+/// Neu = nur Anzeige, Übernehmen würde sonst löschen).
+#[allow(clippy::too_many_arguments)]
+fn wizard_person_diffs(
+    app: &mut MiniGramps,
+    ui: &mut egui::Ui,
+    keep_id: &str,
+    drop_id: &str,
+    keep: &crate::model::Person,
+    scalars: &[crate::model::ScalarDiff],
+    skipped: &[(String, String)],
+) {
+    ui.label(egui::RichText::new("PERSON").strong());
+    let mut shown = false;
+    for diff in scalars {
+        if skipped.iter().any(|(_, key)| key == diff.key) {
+            continue;
+        }
+        shown = true;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(diff.label).strong());
+            ui.label(&diff.keep_text);
+            ui.label("→");
+            ui.label(&diff.new_text);
+            if diff.new_text.trim().is_empty() {
+                ui.small("(nur im Bestand)");
+            } else {
+                if ui.small_button("Übernehmen").clicked() {
+                    app.data
+                        .apply_scalar_diff(keep_id, diff.key, &diff.new_text);
+                    wizard_protocol(
+                        app,
+                        format!(
+                            "{}: {} übernommen ({})",
+                            keep.display_name(),
+                            diff.label,
+                            diff.new_text.trim()
+                        ),
+                    );
+                }
+                if ui.small_button("Behalten").clicked() {
+                    if let Some(wizard) = app.import_wizard.as_mut() {
+                        wizard
+                            .skipped_scalars
+                            .push((drop_id.to_string(), diff.key.to_string()));
+                    }
+                }
+            }
+        });
+    }
+    if !shown {
+        ui.small("Keine Feldunterschiede.");
+    }
+}
+
+/// Listen-Diffs: fehlende Ereignisse/Medien/Dokumente/Quellen/Namen je
+/// Eintrag Hinzufügen/Behalten; reine Bestands-Einträge nur als Hinweis.
+#[allow(clippy::too_many_arguments)]
+fn wizard_list_diffs(
+    app: &mut MiniGramps,
+    ui: &mut egui::Ui,
+    keep_id: &str,
+    drop_id: &str,
+    keep: &crate::model::Person,
+    missing_events: &[crate::model::Event],
+    keep_only_events: usize,
+    missing_gallery: &[String],
+    missing_docs: &[crate::model::DocumentEntry],
+    missing_sources: &[crate::model::SourceEntry],
+    missing_alts: &[crate::model::AlternativeName],
+    skipped: &[(String, String, String)],
+) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("ERGÄNZUNGEN").strong());
+    let skipped_here = |kind: &str, ident: &str| {
+        skipped
+            .iter()
+            .any(|(_, kind2, ident2)| kind2 == kind && ident2 == ident)
+    };
+    let mut shown = false;
+    for event in missing_events {
+        let ident = format!(
+            "{}:{}:{}",
+            event.kind.label(),
+            event.date,
+            event.place
+        );
+        if skipped_here("event", &ident) {
+            continue;
+        }
+        shown = true;
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "Ereignis: {} {}",
+                event.kind.label(),
+                crate::ui::picker::dated_place(&event.date, &event.place)
+            ));
+            if ui.small_button("Hinzufügen").clicked() {
+                if let Some(person) = app
+                    .data
+                    .people
+                    .iter_mut()
+                    .find(|person| person.id == keep_id)
+                {
+                    person.events.push(event.clone());
+                }
+                wizard_protocol(
+                    app,
+                    format!(
+                        "{}: Ereignis {} ergänzt",
+                        keep.display_name(),
+                        event.kind.label()
+                    ),
+                );
+            }
+            if ui.small_button("Behalten").clicked() {
+                if let Some(wizard) = app.import_wizard.as_mut() {
+                    wizard.skipped_lists.push((
+                        drop_id.to_string(),
+                        "event".to_string(),
+                        ident,
+                    ));
+                }
+            }
+        });
+    }
+    for path in missing_gallery {
+        if skipped_here("gallery", path) {
+            continue;
+        }
+        shown = true;
+        ui.horizontal(|ui| {
+            ui.label(format!("Bild: {path}"));
+            if ui.small_button("Hinzufügen").clicked() {
+                if let Some(person) = app
+                    .data
+                    .people
+                    .iter_mut()
+                    .find(|person| person.id == keep_id)
+                {
+                    person.gallery.push(path.clone());
+                }
+                wizard_protocol(app, format!("{}: Bild ergänzt", keep.display_name()));
+            }
+            if ui.small_button("Behalten").clicked() {
+                if let Some(wizard) = app.import_wizard.as_mut() {
+                    wizard.skipped_lists.push((
+                        drop_id.to_string(),
+                        "gallery".to_string(),
+                        path.clone(),
+                    ));
+                }
+            }
+        });
+    }
+    for document in missing_docs {
+        if skipped_here("doc", &document.path) {
+            continue;
+        }
+        shown = true;
+        ui.horizontal(|ui| {
+            ui.label(format!("Dokument: {} ({})", document.name, document.path));
+            if ui.small_button("Hinzufügen").clicked() {
+                if let Some(person) = app
+                    .data
+                    .people
+                    .iter_mut()
+                    .find(|person| person.id == keep_id)
+                {
+                    person.documents.push(document.clone());
+                }
+                wizard_protocol(
+                    app,
+                    format!("{}: Dokument ergänzt", keep.display_name()),
+                );
+            }
+            if ui.small_button("Behalten").clicked() {
+                if let Some(wizard) = app.import_wizard.as_mut() {
+                    wizard.skipped_lists.push((
+                        drop_id.to_string(),
+                        "doc".to_string(),
+                        document.path.clone(),
+                    ));
+                }
+            }
+        });
+    }
+    for source in missing_sources {
+        if skipped_here("source", &source.title) {
+            continue;
+        }
+        shown = true;
+        ui.horizontal(|ui| {
+            ui.label(format!("Quelle: {}", source.title));
+            if ui.small_button("Hinzufügen").clicked() {
+                if let Some(person) = app
+                    .data
+                    .people
+                    .iter_mut()
+                    .find(|person| person.id == keep_id)
+                {
+                    person.sources.push(source.clone());
+                }
+                wizard_protocol(
+                    app,
+                    format!("{}: Quelle ergänzt", keep.display_name()),
+                );
+            }
+            if ui.small_button("Behalten").clicked() {
+                if let Some(wizard) = app.import_wizard.as_mut() {
+                    wizard.skipped_lists.push((
+                        drop_id.to_string(),
+                        "source".to_string(),
+                        source.title.clone(),
+                    ));
+                }
+            }
+        });
+    }
+    for alt in missing_alts {
+        let ident = alt.display();
+        if skipped_here("alt", &ident) {
+            continue;
+        }
+        shown = true;
+        ui.horizontal(|ui| {
+            ui.label(format!("Alternativname: {ident}"));
+            if ui.small_button("Hinzufügen").clicked() {
+                if let Some(person) = app
+                    .data
+                    .people
+                    .iter_mut()
+                    .find(|person| person.id == keep_id)
+                {
+                    person.alt_names.push(alt.clone());
+                }
+                wizard_protocol(
+                    app,
+                    format!("{}: Alternativname ergänzt", keep.display_name()),
+                );
+            }
+            if ui.small_button("Behalten").clicked() {
+                if let Some(wizard) = app.import_wizard.as_mut() {
+                    wizard.skipped_lists.push((
+                        drop_id.to_string(),
+                        "alt".to_string(),
+                        ident,
+                    ));
+                }
+            }
+        });
+    }
+    if keep_only_events > 0 {
+        ui.small(format!(
+            "Nur im Bestand: {keep_only_events} Ereignis(se) — bleibt unverändert."
+        ));
+    }
+    if !shown {
+        ui.small("Keine Ergänzungen.");
+    }
+}
+
+/// Beziehungs-Diffs: je Unterschied Ersetzen/Ergänzen/Zusammenführen/
+/// Hinzufügen oder Behalten (neue Familien nur Anzeige).
+fn wizard_rel_diffs(
+    app: &mut MiniGramps,
+    ui: &mut egui::Ui,
+    keep_id: &str,
+    drop_id: &str,
+    rels: &[crate::model::RelDiff],
+    skipped: &[String],
+) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("BEZIEHUNG").strong());
+    let keep_name = wiz_person_label(app, keep_id);
+    let drop_name = wiz_person_label(app, drop_id);
+    let mut shown = false;
+    for diff in rels {
+        let key = wiz_rel_key(&diff.kind, &diff.family_drop_id);
+        if skipped.contains(&key) {
+            continue;
+        }
+        match &diff.kind {
+            RelDiffKind::NewFamily => {
+                ui.small("Neue Familie im Anhang — bleibt angehängt.");
+            }
+            RelDiffKind::PartnerRelation { keep, new } => {
+                shown = true;
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "Beziehungsart: {} → {}",
+                        keep.label(),
+                        new.label()
+                    ));
+                    let can_set = *new != PartnerRelation::Unknown;
+                    let can_add = *keep == PartnerRelation::Unknown && can_set;
+                    if ui
+                        .add_enabled(can_set, egui::Button::new("Ersetzen"))
+                        .on_hover_text("Beziehungsart durch die importierte ersetzen.")
+                        .clicked()
+                        && can_set
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_family_partner_relation(&family, *new);
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!("{keep_name}: Beziehungsart → {}", new.label()),
+                            );
+                        }
+                    }
+                    if ui
+                        .add_enabled(can_add, egui::Button::new("Ergänzen"))
+                        .on_hover_text("Nur setzen, weil bisher unbekannt.")
+                        .clicked()
+                        && can_add
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_family_partner_relation(&family, *new);
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!("{keep_name}: Beziehungsart ergänzt ({})", new.label()),
+                            );
+                        }
+                    }
+                    if ui.small_button("Behalten").clicked() {
+                        wizard_hide_rel(app, &key);
+                    }
+                });
+            }
+            RelDiffKind::RelationEvent { event, keep_event } => {
+                shown = true;
+                ui.label(format!(
+                    "{}: {}",
+                    event.kind.label(),
+                    crate::ui::picker::dated_place(&event.date, &event.place)
+                ));
+                if let Some(have) = keep_event {
+                    ui.small(format!(
+                        "Bestand: {}",
+                        crate::ui::picker::dated_place(&have.date, &have.place)
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Ersetzen")
+                        .on_hover_text("Datum/Ort/Notiz/Quellen vom Import übernehmen.")
+                        .clicked()
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_relation_event(
+                                &family,
+                                keep_id,
+                                event,
+                                RelationEventMode::Replace,
+                            );
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!(
+                                    "{keep_name}: {} ersetzt ({}, {})",
+                                    event.kind.label(),
+                                    event.date,
+                                    event.place
+                                ),
+                            );
+                        }
+                    }
+                    if ui
+                        .small_button("Ergänzen")
+                        .on_hover_text("Als zusätzliches Ereignis daneben anlegen.")
+                        .clicked()
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_relation_event(
+                                &family,
+                                keep_id,
+                                event,
+                                RelationEventMode::Add,
+                            );
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!(
+                                    "{keep_name}: {} ergänzt ({}, {})",
+                                    event.kind.label(),
+                                    event.date,
+                                    event.place
+                                ),
+                            );
+                        }
+                    }
+                    if ui
+                        .small_button("Zusammenführen")
+                        .on_hover_text("Datum/Ort behalten, Notizen/Quellen vereinen.")
+                        .clicked()
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_relation_event(
+                                &family,
+                                keep_id,
+                                event,
+                                RelationEventMode::Merge,
+                            );
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!(
+                                    "{keep_name}: {} zusammengeführt",
+                                    event.kind.label()
+                                ),
+                            );
+                        }
+                    }
+                    if ui.small_button("Behalten").clicked() {
+                        wizard_hide_rel(app, &key);
+                    }
+                });
+            }
+            RelDiffKind::FamilyNote { keep, new } => {
+                shown = true;
+                ui.label(format!("Familiennotiz (Anhang): {new}"));
+                if let Some(have) = keep {
+                    ui.small(format!("Bestand: {have}"));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Ersetzen")
+                        .on_hover_text("Bestandsnotiz überschreiben.")
+                        .clicked()
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_family_note(&family, new, true);
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(app, format!("{keep_name}: Familiennotiz ersetzt"));
+                        }
+                    }
+                    if ui
+                        .small_button("Ergänzen")
+                        .on_hover_text("Anhang-Notiz dazuschreiben.")
+                        .clicked()
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_family_note(&family, new, false);
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(app, format!("{keep_name}: Familiennotiz ergänzt"));
+                        }
+                    }
+                    if ui.small_button("Behalten").clicked() {
+                        wizard_hide_rel(app, &key);
+                    }
+                });
+            }
+            RelDiffKind::FamilySources { missing } => {
+                shown = true;
+                let titles: Vec<String> =
+                    missing.iter().map(|source| source.title.clone()).collect();
+                ui.label(format!("Familienquellen (Anhang): {}", titles.join(", ")));
+                ui.horizontal(|ui| {
+                    if ui.small_button("Alle übernehmen").clicked() {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_family_sources(&family, missing);
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!("{keep_name}: Familienquellen übernommen"),
+                            );
+                        }
+                    }
+                    if ui.small_button("Behalten").clicked() {
+                        wizard_hide_rel(app, &key);
+                    }
+                });
+            }
+            RelDiffKind::ChildMissing {
+                child_id,
+                child_name,
+            } => {
+                shown = true;
+                ui.horizontal(|ui| {
+                    ui.label(format!("Kind fehlt im Bestand: {child_name}"));
+                    if ui
+                        .small_button("Hinzufügen")
+                        .on_hover_text("Kind in die Bestands-Familie aufnehmen.")
+                        .clicked()
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_add_child(
+                                &family,
+                                &diff.family_drop_id,
+                                child_id,
+                            );
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!("{keep_name}: Kind {child_name} aufgenommen"),
+                            );
+                        }
+                    }
+                    if ui.small_button("Behalten").clicked() {
+                        wizard_hide_rel(app, &key);
+                    }
+                });
+            }
+            RelDiffKind::ChildRelation {
+                child_id,
+                child_name,
+                keep,
+                new,
+            } => {
+                shown = true;
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{child_name}: {} → {}",
+                        keep.label(),
+                        new.label()
+                    ));
+                    if ui
+                        .small_button("Ersetzen")
+                        .on_hover_text("Kind-Art aus dem Anhang übernehmen.")
+                        .clicked()
+                    {
+                        if let Some(family) = diff.family_keep_id.clone() {
+                            app.data.apply_child_relation(&family, child_id, *new);
+                            wizard_hide_rel(app, &key);
+                            wizard_protocol(
+                                app,
+                                format!("{keep_name}: {child_name} → {}", new.label()),
+                            );
+                        }
+                    }
+                    if ui.small_button("Behalten").clicked() {
+                        wizard_hide_rel(app, &key);
+                    }
+                });
+            }
+        }
+    }
+    if !shown {
+        ui.small("Keine Beziehungsunterschiede.");
+    }
+    let _ = drop_name;
+}
+
+/// Rel-Diff ausblenden (Behalten oder angewandt).
+fn wizard_hide_rel(app: &mut MiniGramps, key: &str) {
+    if let Some(wizard) = app.import_wizard.as_mut() {
+        wizard.skipped_rels.push(key.to_string());
+    }
+}
+
+/// Protokollzeile für den Abschluss-Schritt anhängen.
+fn wizard_protocol(app: &mut MiniGramps, line: String) {
+    app.log(format!("Abgleich: {line}"));
+    if let Some(wizard) = app.import_wizard.as_mut() {
+        wizard.protocol.push(line);
+    }
+}
+
+/// Schritt 5: Abschluss — Zähler + Protokoll, Fertig oder Verwerfen.
+fn wizard_done(app: &mut MiniGramps, ui: &mut egui::Ui) {
+    let (auto_count, review_total, fresh_left, fresh_total, protocol) = app
+        .import_wizard
+        .as_ref()
+        .map(|wizard| {
+            (
+                wizard.auto_count,
+                wizard.mappings.len(),
+                wizard.fresh_ids.len(),
+                wizard.fresh_total,
+                wizard.protocol.clone(),
+            )
+        })
+        .unwrap_or_default();
+    ui.label(format!(
+        "{auto_count} automatisch eingebettet · {review_total} geprüft · {fresh_left} neu von {fresh_total}."
+    ));
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .max_height(300.0)
+        .show(ui, |ui| {
+            if protocol.is_empty() {
+                ui.label(
+                    egui::RichText::new("Keine Änderungen protokolliert.")
+                        .italics()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+            } else {
+                for line in &protocol {
+                    ui.small(format!("• {line}"));
+                }
+            }
+        });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Fertig & schließen").clicked() {
+            app.wizard_finish();
+        }
+        wizard_discard_button(app, ui);
+    });
 }

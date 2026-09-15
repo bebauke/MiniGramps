@@ -72,6 +72,7 @@ pub(crate) const ICON_EXTERNAL_LINK: &[u8] = include_bytes!("../../assets/icons/
 pub(crate) const ICON_CENTER: &[u8] = include_bytes!("../../assets/icons/crosshair.svg");
 pub(crate) const ICON_RESET: &[u8] = include_bytes!("../../assets/icons/refresh-cw.svg");
 pub(crate) const ICON_UNDO: &[u8] = include_bytes!("../../assets/icons/rotate-ccw.svg");
+pub(crate) const ICON_MERGE: &[u8] = include_bytes!("../../assets/icons/git-merge.svg");
 pub(crate) const ICON_REDO: &[u8] = include_bytes!("../../assets/icons/rotate-cw.svg");
 pub(crate) const ICON_POINTER: &[u8] = include_bytes!("../../assets/icons/mouse-pointer.svg");
 pub(crate) const ICON_ZOOM: &[u8] = include_bytes!("../../assets/icons/zoom-in.svg");
@@ -86,9 +87,14 @@ pub struct MergeReviewEntry {
     pub selected: bool,
     pub take_new_birth: bool,
     pub take_new_death: bool,
+    /// Name von Neu übernehmen (statt Bestand).
+    pub take_new_name: bool,
     /// Explizit manuell hinzugefügt (bleibt bei Neuaufbau der Automatik
     /// erhalten, wird nur neu bewertet).
     pub manual: bool,
+    /// Eltern-Mitmergen: gewählter Elternteil je Seite (Neu/Vorhanden).
+    pub parent_pick_new: Option<String>,
+    pub parent_pick_old: Option<String>,
 }
 
 /// Offene Duplikat-Prüfung nach angehängtem Import: Einträge mit Auswahl
@@ -108,6 +114,57 @@ pub struct MergeReview {
     /// Manuell gewählt: Bestand (links) und Neu (rechts).
     pub manual_keep: Option<String>,
     pub manual_drop: Option<String>,
+}
+
+/// Schritt im geführten Import-Abgleich: Fixpunkt wählen, Baum-Overlay
+/// prüfen, Auto-Ergänzung prüfen, Unterschiede paarweise durchgehen, fertig.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WizardStep {
+    Anchor,
+    Overlay,
+    Supplement,
+    Review,
+    Done,
+}
+
+/// Eine Zuordnung im Wizard (aus dem 1:1-Mapping): `exact` = bereits
+/// automatisch eingebettet, sonst im Review zu prüfen. `distance` =
+/// Graphdistanz zum Fixpunkt im Anhang (Review-Reihenfolge).
+pub struct WizardMapping {
+    pub keep_id: String,
+    pub drop_id: String,
+    pub exact: bool,
+    pub distance: usize,
+    pub name_score: f32,
+    pub family_score: f32,
+    pub kin_score: f32,
+}
+
+/// Zustand des geführten Import-Abgleichs (Modal, siehe
+/// `dialogs::show_import_wizard`).
+pub struct ImportWizard {
+    pub step: WizardStep,
+    pub fresh_ids: HashSet<String>,
+    pub fresh_total: usize,
+    pub pre_import: TreeData,
+    pub anchor_options: Vec<MergeCandidate>,
+    pub anchor_query: String,
+    pub anchor_keep: Option<String>,
+    pub anchor_drop: Option<String>,
+    pub mappings: Vec<WizardMapping>,
+    /// Bereits eingebettete Drops (drop→keep): für Familien-Paarung auch nach
+    /// dem Auto-Schritt noch auflösbar.
+    pub merged: HashMap<String, String>,
+    /// Übersprungene Diffs im Review (nicht übernommen = behalten):
+    /// Skalare (drop,key), Listen (drop,art,schlüssel), Beziehungen als
+    /// Rel-Schlüssel (drop-familie:art). Angewandte Diffs verschwinden von
+    /// selbst.
+    pub skipped_scalars: Vec<(String, String)>,
+    pub skipped_lists: Vec<(String, String, String)>,
+    pub skipped_rels: Vec<String>,
+    pub review_index: usize,
+    pub protocol: Vec<String>,
+    pub auto_count: usize,
 }
 
 /// Angefragter Personenwechsel während offener ungespeicherter Bearbeitung.
@@ -191,6 +248,9 @@ pub struct MiniGramps {
     pub tree_load_step: usize,
     /// Treffer-Schwelle für den Duplikat-Abgleich beim Anhängen (0–100 %).
     pub match_threshold: f32,
+    /// Warnstufe Sicherheit (aus den Optionen): Infos bis zu dieser Stufe
+    /// werden in Baum und Seitenleiste farblich hervorgehoben. None = Aus.
+    pub warn_certainty: Option<crate::model::Certainty>,
     /// Zoom-Faktor fürs Umschalten auf die Ganzfoto-Ansicht bei Personen MIT
     /// Foto (darunter Ganzfoto, darüber Avatar+Text).
     pub photo_full_zoom: f32,
@@ -203,6 +263,25 @@ pub struct MiniGramps {
     pub merge_review: Option<MergeReview>,
     /// Review-Dialog für Duplikate einblenden.
     pub show_merge_review: bool,
+    /// Geführter Import-Abgleich (Fixpunkt-Wizard): Fixpunkt → Overlay →
+    /// Auto-Ergänzung → Unterschieds-Review → Abschluss. `Some` = Modal offen.
+    pub import_wizard: Option<ImportWizard>,
+    /// Einzel-Merge-Dialog (rechte Leiste, Zusammenführen) einblenden.
+    pub show_person_merge: bool,
+    /// Suchtext im Einzel-Merge-Dialog (filtert Trefferliste zusätzlich).
+    pub person_merge_query: String,
+    /// Top-Treffer (ohne Selbst) für die aktuelle Person, nach Score sortiert.
+    pub person_merge_hits: Vec<MergeCandidate>,
+    /// Detail-Paar (keep, drop) im Einzel-Merge-Dialog.
+    pub person_merge_detail: Option<(String, String)>,
+    /// Feldwahl im Einzel-Merge-Detail (Geburt/Tod von Neu übernehmen).
+    pub person_merge_take_birth: bool,
+    pub person_merge_take_death: bool,
+    /// Feldwahl im Einzel-Merge-Detail (Name von Neu übernehmen).
+    pub person_merge_take_name: bool,
+    /// Eltern-Mitmergen im Einzel-Merge-Detail: gewählter Elternteil je Seite.
+    pub person_merge_parent_new: Option<String>,
+    pub person_merge_parent_old: Option<String>,
     /// Schnellerfassungs-Dialog einblenden (aus dem Projektmenü).
     pub show_quick: bool,
     /// Richtung der Schnellerfassung (Abwärts: Partner + Kinder zur
@@ -217,11 +296,12 @@ pub struct MiniGramps {
     /// Weitere Zeilen des aktuellen Blocks: Abwärts Kinder, Aufwärts Eltern
     /// (Elternteil 1 männlich, Elternteil 2 weiblich vorausgewählt).
     pub quick_rows: Vec<crate::model::QuickPerson>,
-    /// FIFO-Warteschlange eingetragener Personen (IDs in Zeilenreihenfolge,
-    /// neu oder gesetzt). Übernehmen setzt die Referenz der Reihe nach auf
-    /// diese Personen, damit deren Verwandte ohne Baum-Umweg direkt weiter
-    /// erfasst werden können.
-    pub quick_queue: Vec<String>,
+    /// FIFO-Warteschlange eingetragener Personen in Auswahl-/Zeilenreihenfolge:
+    /// (Person, Partner?) — Kombis (abwärts: Kopf-Partner mit Referenz als
+    /// Partner-Kontext) und Singles. Jede Person und jede Kombi liegt nur
+    /// einmal vor; Kombi vorhanden ⇒ kein Single derselben Person mehr.
+    /// Übernehmen setzt die Referenz der Reihe nach darauf.
+    pub quick_queue: Vec<(String, Option<String>)>,
     /// Abwärts-Seite: Index des geladenen Partners (0..=Anzahl; letzte Seite
     /// ohne Partner). Mehrere Partner werden nacheinander durchgeblättert.
     pub quick_partner_idx: usize,
@@ -265,6 +345,9 @@ pub struct MiniGramps {
     pub project_name_before_edit: Option<String>,
     /// Auswahl der kuenftigen Exportformate, geoeffnet aus dem Projektfenster.
     pub show_export: bool,
+    /// Laufender MFG-Export im Hintergrundthread (Ladebildschirm, siehe
+    /// `dialogs::show_export_progress`): Dateiname + Ergebniskanal.
+    pub export_progress: Option<ExportProgress>,
     /// Sortierung der Personenliste: nach Anzahl (true) oder Alphabet.
     pub group_by_count: bool,
     /// Suchtext der linken Personenliste (Sitzungszustand).
@@ -305,6 +388,8 @@ pub struct MiniGramps {
     pub inline_edit: bool,
     /// Suchtext des Beziehungspickers.
     pub relation_query: String,
+    /// Verknüpfungs-Detailmodal (Vorschlag anklicken): (Bezugsperson, Kandidat, Art).
+    pub link_detail: Option<(String, String, RelationKind)>,
     /// Nachname des Beziehungspickers.
     pub relation_family_name: String,
     /// Explizit gewähltes Geschlecht für neu anzulegende Beziehungspersonen
@@ -346,11 +431,19 @@ pub struct MiniGramps {
     pub collapsed_sections: HashSet<String>,
     /// Ausgeblendete Kategorien (Rechtsklick auf Kategorietitel → Häkchen).
     pub hidden_sections: HashSet<String>,
+    /// Eingeblendete erweiterte Namensfelder (Titel, Spitzname, Rufname,
+    /// Präfixe, Suffix) — Rechtsklick auf die Namenfelder. Befüllte Felder
+    /// werden beim Betreten des Editmodus automatisch eingeblendet.
+    pub name_fields_shown: HashSet<String>,
     /// Schließen angefordert, aber ungespeicherte Änderungen prüfen.
     pub pending_close: bool,
     /// Angefragte Personen-Auswahl bei laufender unsicherer Bearbeitung
     /// (Wechsel-Dialog in `dialogs::show_pending_select_confirm`).
     pub pending_select: Option<PendingSelect>,
+    /// Tastatur-Auswahl im Wechsel-Dialog (0 = Speichern und wechseln
+    /// [Default, hervorgehoben], 1 = Verwerfen, 2 = Abbrechen): Links/Rechts
+    /// wechseln (Buttons liegen horizontal), Enter bestätigt.
+    pub pending_select_choice: usize,
     /// Undo-Verlauf: Datenschnappschüsse VOR jeder Mutation (max. 100).
     pub undo_stack: Vec<HistoryEntry>,
     /// Redo-Verlauf: verlassene Zustände für Strg+Umschalt+Z / Strg+Y.
@@ -378,6 +471,14 @@ pub struct MiniGramps {
     started: std::time::Instant,
 }
 
+/// Laufender MFG-Export im Hintergrundthread: angezeigter Dateiname plus
+/// Kanal, über den der Thread `Ok`/`Err` meldet (`try_recv`-Polling pro
+/// Frame, kein Blockieren der UI).
+pub struct ExportProgress {
+    pub file_name: String,
+    pub rx: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
 impl MiniGramps {
     pub fn new() -> Self {
         let library = default_library();
@@ -401,11 +502,22 @@ impl MiniGramps {
             tree_initial_person_limit: 60,
             tree_load_step: 60,
             match_threshold: 80.0,
+            warn_certainty: None,
             photo_full_zoom: 0.8,
             initials_full_zoom: 0.8,
             common_given_threshold: 4,
             merge_review: None,
             show_merge_review: false,
+            import_wizard: None,
+            show_person_merge: false,
+            person_merge_query: String::new(),
+            person_merge_hits: Vec::new(),
+            person_merge_detail: None,
+            person_merge_take_birth: false,
+            person_merge_take_death: false,
+            person_merge_take_name: false,
+            person_merge_parent_new: None,
+            person_merge_parent_old: None,
             show_quick: false,
             quick_dir: crate::model::QuickDir::Down,
             quick_ref_id: None,
@@ -433,6 +545,7 @@ impl MiniGramps {
             show_project: false,
             project_name_before_edit: None,
             show_export: false,
+            export_progress: None,
             group_by_count: true,
             people_filter: String::new(),
             people_filter_was_active: false,
@@ -453,6 +566,7 @@ impl MiniGramps {
             draft: person("", "", "", "", Gender::Unknown),
             inline_edit: false,
             relation_query: String::new(),
+            link_detail: None,
             relation_family_name: String::new(),
             new_person_gender: None,
             new_person_gender_for: None,
@@ -473,8 +587,10 @@ impl MiniGramps {
             relation_editor: None,
             collapsed_sections: HashSet::new(),
             hidden_sections: HashSet::new(),
+            name_fields_shown: HashSet::new(),
             pending_close: false,
             pending_select: None,
+            pending_select_choice: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             tree_tool: TreeTool::Cursor,
@@ -496,6 +612,7 @@ impl MiniGramps {
         app.tree_initial_person_limit = settings.tree_initial_person_limit.max(1);
         app.tree_load_step = settings.tree_load_step.max(1);
         app.match_threshold = settings.match_threshold.clamp(50.0, 100.0);
+        app.warn_certainty = settings.warn_certainty;
         app.photo_full_zoom = settings.photo_full_zoom.clamp(0.2, 2.0);
         app.initials_full_zoom = settings.initials_full_zoom.clamp(0.2, 2.0);
         app.common_given_threshold = settings.common_given_threshold.clamp(2, 10);
@@ -553,6 +670,23 @@ impl MiniGramps {
         self.photo_cache.clear();
         self.status = format!("{count} Profilbilder werden neu erzeugt");
         self.log(format!("Debug: {count} Avatar-Thumbs gelöscht"));
+    }
+
+    /// Debug: doppelte Beziehungen vereinen (dieselbe Beziehung genau einmal).
+    /// Zuerst trocken zählen, dann Snapshot + Zusammenführen + Speichern.
+    pub fn debug_dedupe_relationships(&mut self) {
+        let mut probe = self.data.clone();
+        let removed = probe.dedupe_relationships();
+        if removed == 0 {
+            self.status = "Keine doppelten Beziehungen gefunden".into();
+            return;
+        }
+        self.snapshot("Doppelte Beziehungen entfernen");
+        let removed = self.data.dedupe_relationships();
+        self.people_groups_dirty = true;
+        self.save();
+        self.status = format!("Doppelte Beziehungen entfernt: {removed}");
+        self.log(format!("Debug: {removed} doppelte Beziehungen entfernt"));
     }
 
     /// Projekt in den Datenordner schreiben (`<library>/familienbaum…json`).
@@ -662,10 +796,13 @@ impl MiniGramps {
     }
 
     /// Aktuelles Projekt als Komplettpaket (.mfg) exportieren: Daten,
-    /// Layout, Manifest und Medien in einer Datei (Zieldialog).
-    pub fn export_mfg_dialog(&mut self) {
+    /// Layout, Manifest und Medien in einer Datei (Zieldialog). Der ZIP-
+    /// Aufbau läuft im Hintergrundthread — die UI zeigt solange einen
+    /// Ladebildschirm statt einzufrieren (siehe `show_export_progress`).
+    pub fn export_mfg_dialog(&mut self, ctx: &egui::Context) {
         #[cfg(any(target_arch = "wasm32", target_os = "android"))]
         {
+            let _ = ctx;
             self.status = "Export ist auf diesem Ziel noch nicht implementiert".into();
             return;
         }
@@ -676,6 +813,14 @@ impl MiniGramps {
                 self.status = "Kein geöffnetes Projekt zum Exportieren".into();
                 return;
             };
+            // Der Export liest die Dateien von der Platte: offene
+            // Bearbeitung erst übernehmen + sichern, sonst wäre das Paket
+            // veraltet (Muster wie beim Speichern-Button).
+            if self.inline_edit {
+                self.commit_draft();
+                self.inline_edit = false;
+                self.save();
+            }
             let default_name = data_path
                 .parent()
                 .and_then(|dir| dir.file_name())
@@ -687,13 +832,20 @@ impl MiniGramps {
                 .set_file_name(&default_name)
                 .save_file()
             {
-                match crate::projects::export_mfg(&data_path, &dest) {
-                    Ok(()) => {
-                        self.status = format!("Exportiert: {}", dest.display());
-                        self.log(format!("Exportiert: {}", dest.display()));
-                    }
-                    Err(error) => self.status = format!("Export fehlgeschlagen: {error}"),
-                }
+                let file_name = dest
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("projekt.mfg")
+                    .to_string();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let repaint = ctx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::projects::export_mfg(&data_path, &dest);
+                    let _ = tx.send(result);
+                    repaint.request_repaint();
+                });
+                self.export_progress = Some(ExportProgress { file_name, rx });
+                self.show_export = false;
             }
         }
     }
@@ -804,40 +956,17 @@ impl MiniGramps {
         if cleanup_temp {
             let _ = std::fs::remove_dir_all(&temp_root);
         }
-        let threshold = (self.match_threshold / 100.0).clamp(0.0, 1.0);
-        let candidates =
-            self.data.find_merge_candidates(&fresh, threshold, self.common_given_threshold);
+        // Geführter Abgleich (Fixpunkt-Wizard): Fixpunkt wählen → Overlay →
+        // Auto-Ergänzung → Unterschiede paarweise prüfen → Abschluss.
         self.people_groups_dirty = true;
         self.photo_cache.clear();
         self.fit_pending = true;
-        if candidates.is_empty() {
-            self.log(format!("Import angehängt: {} ({})", source.display(), fresh.len()));
-        }
-        // Default: nichts ausgewählt; Feldwahl bevorzugt die
-        // nicht-leere Seite (bei beidseitigem Inhalt: Vorhanden).
-        let entries = candidates
-            .into_iter()
-            .map(|candidate| self.make_review_entry(candidate))
-            .collect();
-            self.merge_review = Some(MergeReview {
-                candidates: entries,
-                rejected: Vec::new(),
-                fresh_ids: fresh.clone(),
-                pre_import: Some(pre_import),
-                manual_query: String::new(),
-                manual_keep: None,
-                manual_drop: None,
-            });
-            self.show_merge_review = true;
-            let count = self.merge_review.as_ref().map(|r| r.candidates.len()).unwrap_or(0);
-            if count == 0 {
-                self.status = format!(
-                    "Angehängt: {} Personen, keine automatischen Treffer — manuell zuordnen möglich",
-                    fresh.len()
-                );
-            } else {
-                self.status = format!("Angehängt — bitte {count} Treffer prüfen");
-            }
+        self.log(format!(
+            "Import angehängt: {} ({} neu)",
+            source.display(),
+            fresh.len()
+        ));
+        self.open_import_wizard(pre_import, fresh);
     }
 
     /// true, sobald irgendein modales Dialogfenster offen ist. Offene
@@ -849,8 +978,12 @@ impl MiniGramps {
     pub fn any_modal_open(&self) -> bool {
         self.show_quick
             || self.show_merge_review
+            || self.import_wizard.is_some()
+            || self.show_person_merge
+            || self.link_detail.is_some()
             || self.show_project
             || self.show_export
+            || self.export_progress.is_some()
             || self.show_settings
             || self.show_open
             || self.pending_close
@@ -861,30 +994,55 @@ impl MiniGramps {
     }
 
     /// Schnellerfassung öffnen (über das Projektmenü). Die Referenz ist die
-    /// aktuell gewählte Person im Baum.
+    /// aktuell gewählte Person im Baum; die Mehrfachauswahl liegt schon auf
+    /// dem Stack (pro Person Kombi mit erstem Partner + Partner-Single,
+    /// ohne Partner als Single).
     pub fn open_quick_entry(&mut self) {
         self.quick_dir = crate::model::QuickDir::Down;
-        self.quick_ref_id = self
-            .selected
-            .clone()
-            .or_else(|| self.reference.clone())
-            .filter(|id| self.data.find(id).is_some());
+        // Referenz = erste Auswahl, Rest in Auswahlreihenfolge auf den Stack —
+        // so stimmt die Abarbeitung mit der Auswahl überein (nicht invers).
+        let ordered: Vec<String> = self
+            .multi_select
+            .iter()
+            .filter(|id| self.data.find(id).is_some())
+            .cloned()
+            .collect();
+        self.quick_ref_id = ordered.first().cloned().or_else(|| {
+            self.selected
+                .clone()
+                .or_else(|| self.reference.clone())
+                .filter(|id| self.data.find(id).is_some())
+        });
         self.quick_queue = Vec::new();
         self.quick_partner_idx = 0;
         self.quick_visited.clear();
         if let Some(ref_id) = self.quick_ref_id.clone() {
             self.quick_visited.insert(ref_id);
         }
-        // Mehrfachauswahl (ohne Referenz) schon auf den Stack legen.
-        let queue: Vec<String> = self
-            .multi_select
-            .iter()
-            .filter(|id| {
-                Some(id.as_str()) != self.quick_ref_id.as_deref()
-                    && self.data.find(id).is_some()
-            })
-            .cloned()
-            .collect();
+        // Rest der Auswahl in Reihenfolge auf den Stack: pro Person Kombi
+        // (Person, erster Partner) + Partner als Single; ohne Partner als
+        // Single. Duplikate (z. B. beidseitig gewählt) einmalig.
+        let mut queue: Vec<(String, Option<String>)> = Vec::new();
+        let mut push_unique = |entry: (String, Option<String>)| {
+            if !queue.contains(&entry) {
+                queue.push(entry);
+            }
+        };
+        for pid in ordered.iter().skip(1) {
+            if let Some(first) = self
+                .data
+                .partners_of(pid)
+                .first()
+                .map(|person| person.id.clone())
+            {
+                push_unique((pid.clone(), Some(first.clone())));
+                if Some(first.as_str()) != self.quick_ref_id.as_deref() {
+                    push_unique((first, None));
+                }
+            } else {
+                push_unique((pid.clone(), None));
+            }
+        }
         self.quick_queue = queue;
         // Bestehende Kinder/Eltern der Referenz stehen gebunden in den Zeilen.
         dialogs::quick_load_reference(self);
@@ -893,11 +1051,12 @@ impl MiniGramps {
 
     /// Aktuelle Schnellerfassungs-Eingabe sofort speichern (wie Import-
     /// Verknüpfung): bestehende gebundene Personen wiederverwenden, neue
-    /// anlegen. Gibt (verarbeitet, neu angelegte IDs, betroffene IDs in
-    /// Zeilenreihenfolge) zurück — Letztere füttern die FIFO-Queue, damit auch
-    /// gesetzte Bestandspersonen weiterbearbeitet werden. Nur bei nicht-leerer
-    /// Eingabe folgen Snapshot + Speichern (ein Undo-Schritt je Aufruf).
-    pub fn persist_quick_form(&mut self) -> (bool, Vec<String>, Vec<String>) {
+    /// anlegen. Gibt (verarbeitet, neu angelegte IDs) zurück. Mit `queue`
+    /// landen die Betroffenen auf der FIFO-Queue: abwärts der Kopf als Kombi
+    /// (Referenz, Partner) plus Kopf als Single, Zeilen als Singles
+    /// (aufwärts nur Zeilen-Singles). Nur bei nicht-leerer Eingabe folgen
+    /// Snapshot + Speichern (ein Undo-Schritt je Aufruf).
+    pub fn persist_quick_form(&mut self, queue: bool) -> (bool, Vec<String>) {
         // Laufenden Block übernehmen, sofern nicht komplett leer. Aufwärts
         // gibt es keinen Kopf (die Referenz ist das Kind).
         let head_empty = self.quick_head.is_empty() && self.quick_head.bind.is_none();
@@ -906,7 +1065,7 @@ impl MiniGramps {
             .iter()
             .all(|row| row.is_empty() && row.bind.is_none());
         if head_empty && rows_empty {
-            return (false, Vec::new(), Vec::new());
+            return (false, Vec::new());
         }
         let head = if self.quick_dir == crate::model::QuickDir::Up
             || (self.quick_head.is_empty() && self.quick_head.bind.is_none())
@@ -936,35 +1095,85 @@ impl MiniGramps {
                 Slot::New
             }
         };
-        let mut slots = Vec::new();
+        let mut slots: Vec<(bool, Slot)> = Vec::new();
         if let Some(ref head_person) = head {
-            slots.push(slot_of(head_person, &self.data));
+            slots.push((true, slot_of(head_person, &self.data)));
         }
         for row in &rows {
-            slots.push(slot_of(row, &self.data));
+            slots.push((false, slot_of(row, &self.data)));
+        }
+        let is_down = self.quick_dir == crate::model::QuickDir::Down;
+        let ref_id = self.quick_ref_id.clone();
+        // Gebundene Zeilen: editierte Vorname/Geburt/Tod fürs Zurückschreiben
+        // merken (Nachname/Geschlecht bleiben Anker und unangetastet).
+        let mut write_back: Vec<(String, String, String, String)> = Vec::new();
+        if let Some(ref head_person) = head {
+            if let Some(id) = head_person.bind.as_deref() {
+                if self.data.find(id).is_some() {
+                    write_back.push((
+                        id.to_string(),
+                        head_person.given.trim().to_string(),
+                        head_person.birth.trim().to_string(),
+                        head_person.death.trim().to_string(),
+                    ));
+                }
+            }
+        }
+        for row in &rows {
+            if let Some(id) = row.bind.as_deref() {
+                if self.data.find(id).is_some() {
+                    write_back.push((
+                        id.to_string(),
+                        row.given.trim().to_string(),
+                        row.birth.trim().to_string(),
+                        row.death.trim().to_string(),
+                    ));
+                }
+            }
         }
         let created = self
             .data
             .commit_quick_blocks(self.quick_ref_id.as_deref(), vec![(self.quick_dir, head, rows)]);
-        // Neue IDs den New-Slots in Reihenfolge zuordnen (Modell legt neue
+        for (id, given, birth, death) in write_back {
+            if let Some(person) = self.data.people.iter_mut().find(|person| person.id == id) {
+                person.given_name = given;
+                person.birth = birth;
+                person.death = death;
+            }
+        }
+        // Slots auflösen: Kopf-ID + Zeilen-IDs (Modell legt neue
         // Block-Personen in Kopf→Zeilen-Reihenfolge an).
         let mut created_iter = created.iter();
-        let mut touched = Vec::new();
-        for slot in slots {
-            match slot {
-                Slot::Bound(id) => {
-                    if !touched.contains(&id) {
-                        touched.push(id);
+        let mut head_id: Option<String> = None;
+        let mut row_ids: Vec<String> = Vec::new();
+        for (is_head, slot) in slots {
+            let resolved = match slot {
+                Slot::Bound(id) => Some(id),
+                Slot::New => created_iter.next().cloned(),
+                Slot::Skip => None,
+            };
+            match (is_head, resolved) {
+                (true, Some(id)) => head_id = Some(id),
+                (false, Some(id)) => row_ids.push(id),
+                _ => {}
+            }
+        }
+        if queue {
+            // Kopf als Kombi (Referenz, Partner): Richtung exakt einmalig.
+            // Kopf zusätzlich als Single (eigene Runde), Zeilen als Singles.
+            // Ohne Referenz nur Singles (kein Kombi-Kontext).
+            if is_down {
+                match (ref_id, head_id) {
+                    (Some(ref_id), Some(head)) => {
+                        self.queue_combo(ref_id, head.clone(), &created);
+                        self.queue_single(head);
                     }
+                    (_, Some(head)) => self.queue_single(head),
+                    _ => {}
                 }
-                Slot::New => {
-                    if let Some(id) = created_iter.next() {
-                        if !touched.contains(id) {
-                            touched.push(id.clone());
-                        }
-                    }
-                }
-                Slot::Skip => {}
+            }
+            for id in row_ids {
+                self.queue_single(id);
             }
         }
         self.quick_rows.clear();
@@ -975,13 +1184,45 @@ impl MiniGramps {
         self.photo_cache.clear();
         self.snapshot("Schnellerfassung");
         self.save();
-        (true, created, touched)
+        (true, created)
+    }
+
+    /// Single (Person, None) auf den Stack: nur wenn weder besucht noch in
+    /// einer Form (Single oder Kombi) vorhanden.
+    fn queue_single(&mut self, id: String) {
+        if self.quick_visited.iter().any(|visited| visited == &id) {
+            return;
+        }
+        if self.quick_queue.iter().any(|(pid, _)| pid == &id) {
+            return;
+        }
+        self.quick_queue.push((id, None));
+    }
+
+    /// Kombi (Referenz, Partner) auf den Stack: Richtung exakt einmalig; eine
+    /// vorhandene Single derselben Referenz steigt zur Kombi auf. Bereits
+    /// abgearbeitete Referenzen mit bekanntem Partner werden übersprungen
+    /// (kein Pendeln); neuer Partner reaktiviert.
+    fn queue_combo(&mut self, person: String, partner: String, created: &[String]) {
+        if self
+            .quick_queue
+            .iter()
+            .any(|(pid, ppartner)| pid == &person && ppartner.as_deref() == Some(partner.as_str()))
+        {
+            return;
+        }
+        let partner_is_new = created.iter().any(|id| id == &partner);
+        if !partner_is_new && self.quick_visited.iter().any(|visited| visited == &person) {
+            return;
+        }
+        self.quick_queue.retain(|(pid, _)| pid != &person);
+        self.quick_queue.push((person, Some(partner)));
     }
 
     /// Schnellerfassung abschließen: Eingabe speichern und Fenster schließen.
     /// Bei leerer Eingabe (bereits per Übernehmen gespeichert) nur schließen.
     pub fn commit_quick_entry(&mut self) {
-        let (processed, created, _) = self.persist_quick_form();
+        let (processed, created) = self.persist_quick_form(false);
         if processed {
             self.status = format!("Schnellerfassung: {} neue Personen", created.len());
             self.log(format!("Schnellerfassung: {} neue Personen", created.len()));
@@ -992,7 +1233,7 @@ impl MiniGramps {
 
     /// Ausgewählte Review-Treffer zusammenführen (Daten + Layoutversatz).
     pub fn apply_merge_review(&mut self) {
-        let selected: Vec<(String, String, bool, bool)> = self
+        let selected: Vec<(String, String, bool, bool, bool)> = self
             .merge_review
             .as_ref()
             .map(|review| {
@@ -1006,6 +1247,7 @@ impl MiniGramps {
                             entry.candidate.drop_id.clone(),
                             entry.take_new_birth,
                             entry.take_new_death,
+                            entry.take_new_name,
                         )
                     })
                     .collect()
@@ -1014,28 +1256,293 @@ impl MiniGramps {
         if selected.is_empty() {
             return;
         }
-        for (keep, drop, take_birth, take_death) in &selected {
-            self.data.apply_merge_choice(keep, drop, *take_birth, *take_death);
-            if !self.manual_offsets.contains_key(keep) {
-                if let Some(offset) = self.manual_offsets.remove(drop) {
-                    self.manual_offsets.insert(keep.clone(), offset);
-                }
-            } else {
-                self.manual_offsets.remove(drop);
-            }
-            crate::media::clear_person_photo_cache(&mut self.photo_cache, keep);
+        for (keep, drop, take_birth, take_death, take_name) in &selected {
+            self.merge_one(keep, drop, *take_birth, *take_death, *take_name);
         }
         if let Some(review) = self.merge_review.as_mut() {
             let done: HashSet<String> = selected
                 .iter()
-                .map(|(_, drop, _, _)| drop.clone())
+                .map(|(_, drop, _, _, _)| drop.clone())
                 .collect();
             review
                 .candidates
                 .retain(|entry| !done.contains(&entry.candidate.drop_id));
         }
         self.people_groups_dirty = true;
-        // Verweise auf gelöschte Duplikate auf die erste Person umbiegen.
+        self.fix_selection_after_merge();
+        self.reference_history.clear();
+        self.reset_reference_navigation();
+        self.status = format!("{} Treffer zusammengeführt", selected.len());
+        self.log(format!("Merge: {} Treffer", selected.len()));
+    }
+
+    /// Einen Treffer zusammenführen (Daten + Layoutversatz + Fotocache).
+    fn merge_one(&mut self, keep: &str, drop: &str, take_birth: bool, take_death: bool, take_name: bool) {
+        self.data.apply_merge_choice(keep, drop, take_birth, take_death, take_name);
+        if !self.manual_offsets.contains_key(keep) {
+            if let Some(offset) = self.manual_offsets.remove(drop) {
+                self.manual_offsets.insert(keep.to_string(), offset);
+            }
+        } else {
+            self.manual_offsets.remove(drop);
+        }
+        crate::media::clear_person_photo_cache(&mut self.photo_cache, keep);
+    }
+
+    /// Geführten Import-Abgleich öffnen (nach dem Anhängen): Fixpunkt-Schritt
+    /// mit den besten Kandidaten (erster vorausgewählt).
+    pub fn open_import_wizard(&mut self, pre_import: TreeData, fresh: HashSet<String>) {
+        let threshold = (self.match_threshold / 100.0).clamp(0.0, 1.0);
+        let mut options = self
+            .data
+            .find_merge_candidates(&fresh, threshold, self.common_given_threshold);
+        options.truncate(30);
+        let (anchor_keep, anchor_drop) = options
+            .first()
+            .map(|candidate| {
+                (
+                    Some(candidate.keep_id.clone()),
+                    Some(candidate.drop_id.clone()),
+                )
+            })
+            .unwrap_or((None, None));
+        let fresh_total = fresh.len();
+        self.import_wizard = Some(ImportWizard {
+            step: WizardStep::Anchor,
+            fresh_ids: fresh,
+            fresh_total,
+            pre_import,
+            anchor_options: options,
+            anchor_query: String::new(),
+            anchor_keep,
+            anchor_drop,
+            mappings: Vec::new(),
+            merged: HashMap::new(),
+            skipped_scalars: Vec::new(),
+            skipped_lists: Vec::new(),
+            skipped_rels: Vec::new(),
+            review_index: 0,
+            protocol: Vec::new(),
+            auto_count: 0,
+        });
+        self.status = "Abgleich starten: Fixpunkt wählen".to_string();
+    }
+
+    /// Fixpunkt bestätigen → 1:1-Mapping aufbauen + Distanzen ab Fixpunkt,
+    /// weiter zum Overlay-Schritt.
+    pub fn wizard_confirm_anchor(&mut self) {
+        let threshold = (self.match_threshold / 100.0).clamp(0.0, 1.0);
+        let (anchor_keep, anchor_drop, fresh) = match self.import_wizard.as_ref() {
+            Some(wizard)
+                if wizard.anchor_keep.is_some() && wizard.anchor_drop.is_some() =>
+            {
+                (
+                    wizard.anchor_keep.clone().unwrap(),
+                    wizard.anchor_drop.clone().unwrap(),
+                    wizard.fresh_ids.clone(),
+                )
+            }
+            _ => return,
+        };
+        let mapping = self
+            .data
+            .build_import_mapping(&fresh, threshold, self.common_given_threshold);
+        let distances = self.data.import_distances(&anchor_drop, &fresh);
+        // Fixpunkt-Paar sicher ins Mapping (auch unter der Schwelle als
+        // manuelle Setzung möglich): vorne anstellen.
+        let mut mappings: Vec<WizardMapping> = mapping
+            .into_iter()
+            .map(|entry| {
+                let distance = distances.get(&entry.drop_id).copied().unwrap_or(usize::MAX);
+                WizardMapping {
+                    keep_id: entry.keep_id,
+                    drop_id: entry.drop_id,
+                    exact: entry.exact,
+                    distance,
+                    name_score: entry.name_score,
+                    family_score: entry.family_score,
+                    kin_score: entry.kin_score,
+                }
+            })
+            .collect();
+        if !mappings
+            .iter()
+            .any(|entry| entry.keep_id == anchor_keep && entry.drop_id == anchor_drop)
+            && self.data.find(&anchor_keep).is_some()
+            && self.data.find(&anchor_drop).is_some()
+        {
+            mappings.push(WizardMapping {
+                keep_id: anchor_keep.clone(),
+                drop_id: anchor_drop.clone(),
+                exact: false,
+                distance: 0,
+                name_score: 1.0,
+                family_score: 1.0,
+                kin_score: 1.0,
+            });
+        }
+        mappings.sort_by_key(|entry| (entry.distance, !entry.exact));
+        if let Some(wizard) = self.import_wizard.as_mut() {
+            wizard.mappings = mappings;
+            wizard.review_index = 0;
+            wizard.step = WizardStep::Overlay;
+        }
+        self.status = "Overlay aufgebaut — bitte prüfen".to_string();
+    }
+
+    /// Auto-Ergänzung: exakte Paare einbetten (nur Lücken füllen) +
+    /// Protokoll; eingebettete Drops aus der Frisch-Menge streichen.
+    pub fn wizard_run_supplement(&mut self) {
+        let exact: Vec<(String, String)> = match self.import_wizard.as_ref() {
+            Some(wizard) => wizard
+                .mappings
+                .iter()
+                .filter(|entry| entry.exact)
+                .map(|entry| (entry.keep_id.clone(), entry.drop_id.clone()))
+                .collect(),
+            None => return,
+        };
+        let mut count = 0usize;
+        for (keep, drop) in exact {
+            if self.data.find(&keep).is_none() || self.data.find(&drop).is_none() {
+                continue;
+            }
+            let mut messages = self.data.supplement_exact_pair(&keep, &drop);
+            if !self.manual_offsets.contains_key(&keep) {
+                if let Some(offset) = self.manual_offsets.remove(&drop) {
+                    self.manual_offsets.insert(keep.clone(), offset);
+                }
+            } else {
+                self.manual_offsets.remove(&drop);
+            }
+            crate::media::clear_person_photo_cache(&mut self.photo_cache, &keep);
+            if messages.is_empty() {
+                if let Some(name) = self.data.find(&keep).map(|p| p.display_name()) {
+                    messages.push(format!("{name}: bereits vollständig — nichts zu ergänzen"));
+                }
+            }
+            if let Some(wizard) = self.import_wizard.as_mut() {
+                wizard.protocol.extend(messages);
+                wizard.fresh_ids.remove(&drop);
+                wizard.merged.insert(drop, keep.clone());
+            }
+            count += 1;
+        }
+        if let Some(wizard) = self.import_wizard.as_mut() {
+            wizard.auto_count += count;
+            wizard.mappings.retain(|entry| !entry.exact);
+            // Review-Reihenfolge: Fixpunkt-nah zuerst.
+            wizard.mappings.sort_by_key(|entry| entry.distance);
+            wizard.review_index = 0;
+            wizard.step = WizardStep::Supplement;
+        }
+        self.people_groups_dirty = true;
+        self.fix_selection_after_merge();
+        self.status = format!("{count} Paare automatisch eingebettet");
+    }
+
+    /// Ohne Fixpunkt fortfahren (keine Treffer): leeres Mapping, alles Neue
+    /// bleibt angehängt — direkt zum Overlay-Schritt.
+    pub fn wizard_skip_anchor(&mut self) {
+        if let Some(wizard) = self.import_wizard.as_mut() {
+            wizard.mappings = Vec::new();
+            wizard.review_index = 0;
+            wizard.step = WizardStep::Overlay;
+        }
+        self.status = "Kein Fixpunkt — alles als neu".to_string();
+    }
+
+    /// Drop→Keep für Familien-Paarung: offene Mappings + bereits eingebettete.
+    pub fn wizard_drop_to_keep(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Some(wizard) = self.import_wizard.as_ref() {
+            for entry in &wizard.mappings {
+                map.insert(entry.drop_id.clone(), entry.keep_id.clone());
+            }
+            for (drop, keep) in &wizard.merged {
+                map.insert(drop.clone(), keep.clone());
+            }
+        }
+        map
+    }
+
+    /// Review-Paare in Durchlauf-Reihenfolge (nur unsichere, Fixpunkt-nah).
+    pub fn wizard_review_order(&self) -> Vec<(String, String)> {
+        self.import_wizard
+            .as_ref()
+            .map(|wizard| {
+                let mut pairs: Vec<(String, String, usize)> = wizard
+                    .mappings
+                    .iter()
+                    .filter(|entry| !entry.exact)
+                    .map(|entry| {
+                        (
+                            entry.keep_id.clone(),
+                            entry.drop_id.clone(),
+                            entry.distance,
+                        )
+                    })
+                    .collect();
+                pairs.sort_by_key(|(_, _, distance)| *distance);
+                pairs
+                    .into_iter()
+                    .map(|(keep, drop, _)| (keep, drop))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Wizard abschließen: Zähler-Protokoll in Status/Log, Dialog zu,
+    /// speichern. Eingebettete + bestätigte Änderungen bleiben bestehen.
+    pub fn wizard_finish(&mut self) {
+        let (auto_count, review_total, fresh_left, fresh_total, protocol) =
+            match self.import_wizard.as_ref() {
+                Some(wizard) => (
+                    wizard.auto_count,
+                    wizard.mappings.len(),
+                    wizard.fresh_ids.len(),
+                    wizard.fresh_total,
+                    wizard.protocol.clone(),
+                ),
+                None => return,
+            };
+        let new_count = fresh_left;
+        self.import_wizard = None;
+        self.people_groups_dirty = true;
+        self.photo_cache.clear();
+        self.fit_pending = true;
+        self.fix_selection_after_merge();
+        self.reference_history.clear();
+        self.reset_reference_navigation();
+        self.save();
+        self.status = format!(
+            "Abgleich fertig: {auto_count} automatisch, {review_total} geprüft, {new_count} neu von {fresh_total}"
+        );
+        self.log(format!(
+            "Import-Abgleich: auto={auto_count} review={review_total} neu={new_count}"
+        ));
+        for line in protocol {
+            self.log(format!("Abgleich: {line}"));
+        }
+    }
+
+    /// Wizard abbrechen: Stand vor dem Anhängen exakt wiederherstellen
+    /// (angehängte Personen + Einbettungen verwerfen), dann Snapshot +
+    /// Speichern (Strg+Z holt den Anhang zurück), Dialog schließen.
+    pub fn wizard_discard(&mut self) {
+        let pre_import = match self.import_wizard.as_ref() {
+            Some(wizard) => wizard.pre_import.clone(),
+            None => return,
+        };
+        self.data = pre_import;
+        self.manual_offsets
+            .retain(|id, _| self.data.find(id).is_some());
+        self.import_wizard = None;
+        self.merge_review = None;
+        self.show_merge_review = false;
+        self.people_groups_dirty = true;
+        self.photo_cache.clear();
+        self.fit_pending = true;
         if self
             .reference
             .as_deref()
@@ -1051,10 +1558,30 @@ impl MiniGramps {
         {
             self.selected = self.data.people.first().map(|person| person.id.clone());
         }
-        self.reference_history.clear();
-        self.reset_reference_navigation();
-        self.status = format!("{} Treffer zusammengeführt", selected.len());
-        self.log(format!("Merge: {} Treffer", selected.len()));
+        self.snapshot("Anhang verworfen");
+        self.save();
+        self.status = "Anhang verworfen".to_string();
+        self.log("Anhang verworfen (Abgleich abgebrochen)".to_string());
+    }
+
+    /// Auswahl nach dem Zusammenführen an die Daten angleichen (gelöschte
+    /// Duplikate auf die erste Person umbiegen).
+    fn fix_selection_after_merge(&mut self) {
+        if self
+            .reference
+            .as_deref()
+            .is_some_and(|id| self.data.find(id).is_none())
+        {
+            self.reference = self.data.people.first().map(|person| person.id.clone());
+            self.selected = self.reference.clone();
+        }
+        if self
+            .selected
+            .as_deref()
+            .is_some_and(|id| self.data.find(id).is_none())
+        {
+            self.selected = self.data.people.first().map(|person| person.id.clone());
+        }
     }
 
     /// Treffer endgültig ablehnen (kein Match — bleibt getrennt, kein
@@ -1141,11 +1668,17 @@ impl MiniGramps {
                                 entry.selected,
                                 entry.take_new_birth,
                                 entry.take_new_death,
+                                entry.take_new_name,
                                 entry.manual,
+                                entry.parent_pick_new.clone(),
+                                entry.parent_pick_old.clone(),
                             ),
                         )
                     })
-                    .collect::<HashMap<(String, String), (bool, bool, bool, bool)>>(),
+                    .collect::<HashMap<
+                        (String, String),
+                        (bool, bool, bool, bool, bool, Option<String>, Option<String>),
+                    >>(),
             ),
             None => return,
         };
@@ -1168,10 +1701,15 @@ impl MiniGramps {
             .map(|candidate| {
                 let key = (candidate.keep_id.clone(), candidate.drop_id.clone());
                 let mut entry = self.make_review_entry(candidate);
-                if let Some(&(selected, birth, death, _)) = kept.get(&key) {
-                    entry.selected = selected;
-                    entry.take_new_birth = birth;
-                    entry.take_new_death = death;
+                if let Some((selected, birth, death, name, _, pick_new, pick_old)) =
+                    kept.get(&key)
+                {
+                    entry.selected = *selected;
+                    entry.take_new_birth = *birth;
+                    entry.take_new_death = *death;
+                    entry.take_new_name = *name;
+                    entry.parent_pick_new = pick_new.clone();
+                    entry.parent_pick_old = pick_old.clone();
                 }
                 entry
             })
@@ -1180,10 +1718,10 @@ impl MiniGramps {
         // abgelehnt) mit frischen Scores erhalten.
         let mut kept_manual: Vec<((String, String), (bool, bool, bool))> = kept
             .into_iter()
-            .filter(|(key, (_, _, _, manual))| {
+            .filter(|(key, (_, _, _, _, manual, _, _))| {
                 *manual && !auto_pairs.contains(key) && !rejected.contains(key)
             })
-            .map(|(key, (selected, birth, death, _))| (key, (selected, birth, death)))
+            .map(|(key, (selected, birth, death, _, _, _, _))| (key, (selected, birth, death)))
             .collect();
         kept_manual.sort_by(|left, right| left.0.cmp(&right.0));
         for ((keep, drop), (selected, birth, death)) in kept_manual {
@@ -1254,6 +1792,57 @@ impl MiniGramps {
         self.people_groups_dirty = true;
     }
 
+    /// Elternpaar aus zwei Merge-Dialogen als Treffer übernehmen (Button in
+    /// allen Merge-Ansichten): Paar in die Review-Liste legen (Review ggf.
+    /// anlegen). Gibt true bei Aufnahme zurück.
+    pub fn add_parent_pair_as_match(&mut self, keep_parent_id: &str, drop_parent_id: &str) -> bool {
+        let review_was_open = self.show_merge_review;
+        if self.merge_review.is_none() {
+            self.merge_review = Some(MergeReview {
+                candidates: Vec::new(),
+                rejected: Vec::new(),
+                fresh_ids: HashSet::new(),
+                pre_import: None,
+                manual_query: String::new(),
+                manual_keep: None,
+                manual_drop: None,
+            });
+        }
+        let threshold = (self.match_threshold / 100.0).clamp(0.0, 1.0);
+        let common_min = self.common_given_threshold.clamp(2, 10);
+        let Some(candidate) =
+            self.data
+                .pair_match_candidate(keep_parent_id, drop_parent_id, threshold, common_min)
+        else {
+            self.status = "Elternpaar ungültig (identisch, unbekannt oder Eltern/Kind).".into();
+            return false;
+        };
+        if self.merge_review.as_ref().is_some_and(|review| {
+            review.candidates.iter().any(|entry| {
+                entry.candidate.keep_id == keep_parent_id
+                    && entry.candidate.drop_id == drop_parent_id
+            })
+        }) {
+            self.status = "Dieses Elternpaar steht bereits in der Liste.".into();
+            return false;
+        }
+        let entry = self.make_review_entry(candidate);
+        if let Some(review) = self.merge_review.as_mut() {
+            review.candidates.push(MergeReviewEntry { manual: true, ..entry });
+        }
+        self.people_groups_dirty = true;
+        // Aus dem Einzel-Dialog: dorthin wechseln (Hauptpaar dort neu wählen).
+        if !review_was_open {
+            self.show_person_merge = false;
+            self.person_merge_detail = None;
+            self.show_merge_review = true;
+            self.status = "Elternpaar übernommen — weiter im Review.".into();
+        } else {
+            self.status = "Elternpaar als Treffer hinzugefügt.".into();
+        }
+        true
+    }
+
     /// Review-Eintrag mit Standard-Feldwahl (nicht-leere Bestandsseite
     /// bevorzugt, Treffer unselektiert) — für Automatik, Manuell und Scan.
     fn make_review_entry(&self, candidate: MergeCandidate) -> MergeReviewEntry {
@@ -1261,9 +1850,12 @@ impl MiniGramps {
         MergeReviewEntry {
             take_new_birth: keep.map(|person| person.birth.trim().is_empty()).unwrap_or(true),
             take_new_death: keep.map(|person| person.death.trim().is_empty()).unwrap_or(true),
+            take_new_name: false,
             candidate,
             selected: false,
             manual: false,
+            parent_pick_new: None,
+            parent_pick_old: None,
         }
     }
 
@@ -1295,6 +1887,69 @@ impl MiniGramps {
         } else {
             self.status = format!("{count} mögliche Duplikate im Projekt — bitte prüfen");
         }
+    }
+
+    /// Einzel-Merge-Dialog öffnen (rechte Leiste, Zusammenführen): Top-5
+    /// Treffer zur gewählten Person (ohne Selbst) mit Scores berechnen.
+    pub fn open_person_merge(&mut self) {
+        let Some(target) = self.selected.clone().filter(|id| self.data.find(id).is_some())
+        else {
+            self.status = "Keine Person ausgewählt".into();
+            return;
+        };
+        let threshold = (self.match_threshold / 100.0).clamp(0.0, 1.0);
+        let common_min = self.common_given_threshold.clamp(2, 10);
+        let mut hits: Vec<(u32, MergeCandidate)> = self
+            .data
+            .people
+            .iter()
+            .filter(|person| person.id != target)
+            .filter_map(|person| {
+                let candidate =
+                    self.data
+                        .pair_match_candidate(&target, &person.id, threshold, common_min)?;
+                let total = ((candidate.name_score + candidate.family_score + candidate.kin_score)
+                    / 3.0
+                    * 100.0)
+                    .round()
+                    .clamp(0.0, 100.0) as u32;
+                Some((total, candidate))
+            })
+            .collect();
+        hits.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.drop_id.cmp(&right.1.drop_id))
+        });
+        hits.truncate(5);
+        self.person_merge_hits = hits.into_iter().map(|(_, candidate)| candidate).collect();
+        self.person_merge_query = String::new();
+        self.person_merge_detail = None;
+        self.person_merge_take_birth = false;
+        self.person_merge_take_death = false;
+        self.person_merge_take_name = false;
+        self.person_merge_parent_new = None;
+        self.person_merge_parent_old = None;
+        self.show_person_merge = true;
+    }
+
+    /// Einzel-Merge anwenden (Detail-Paar zusammenführen wie im Review).
+    pub fn apply_person_merge(&mut self, take_birth: bool, take_death: bool, take_name: bool) {
+        let (keep, drop) = match self.person_merge_detail.clone() {
+            Some(pair) => pair,
+            None => return,
+        };
+        if self.data.find(&keep).is_none() || self.data.find(&drop).is_none() {
+            return;
+        }
+        self.merge_one(&keep, &drop, take_birth, take_death, take_name);
+        self.people_groups_dirty = true;
+        self.fix_selection_after_merge();
+        self.show_person_merge = false;
+        self.person_merge_detail = None;
+        self.status = "Personen zusammengeführt".into();
+        self.log(format!("Einzel-Merge: {keep} + {drop}"));
     }
 
     /// Ordner des aktuell geöffneten Projekts (für Sicherung/Wiederherstellung).
@@ -1748,6 +2403,7 @@ impl MiniGramps {
     /// wird gesichert). Gemeinsame Logik von Diskette, Editor und
     /// Personenwechsel-Dialog.
     pub fn commit_draft(&mut self) {
+        self.draft.strip_names();
         let name = self.draft.display_name();
         let is_new = self
             .data
@@ -1789,6 +2445,7 @@ impl MiniGramps {
                 set_reference,
                 image: None,
             });
+            self.pending_select_choice = 0;
             return;
         }
         self.apply_select(id, set_reference);
@@ -1860,13 +2517,65 @@ impl MiniGramps {
 
     /// Vom Wechsel-Dialog bestätigten Zielwechsel ausführen. War ein
     /// Bild-Drop der Auslöser, wird danach der Editor mit dem Bild in der
-    /// Galerie geöffnet (Profilbild bleibt unverändert).
-    pub(crate) fn apply_pending_select(&mut self, ctx: &egui::Context) {
+    /// Galerie geöffnet (Profilbild bleibt unverändert). Mit `edit_after`
+    /// (Speichern-und-wechseln) öffnet das Ziel gleich wieder im
+    /// Bearbeitenmodus.
+    pub(crate) fn apply_pending_select(&mut self, ctx: &egui::Context, edit_after: bool) {
         if let Some(pending) = self.pending_select.take() {
             self.apply_select(&pending.target, pending.set_reference);
             if let Some(image) = pending.image {
                 self.open_draft_with_image(ctx, &pending.target, &image);
+            } else if edit_after {
+                if let Some(person) = self.data.find(&pending.target).cloned() {
+                    self.draft = person;
+                    self.draft.ensure_standard_events();
+                    self.seed_shown_name_fields();
+                    self.inline_edit = true;
+                }
             }
+        }
+    }
+
+    /// Quellmedium öffnen (aus dem Quellen-Kontextmenü, separat von der
+    /// Galerie): Bilder in der Lightbox, sonst im System-Betrachter (nur
+    /// Desktop).
+    pub fn open_source_media(&mut self, relative: &str) {
+        let path = self.library.join(relative);
+        if !path.is_file() {
+            self.status = "Mediendatei fehlt".into();
+            return;
+        }
+        if crate::media::is_image_file(&path) {
+            self.lightbox_image = Some(relative.to_string());
+            return;
+        }
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+        {
+            #[cfg(target_os = "windows")]
+            let result = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path.to_string_lossy().to_string()])
+                .spawn();
+            #[cfg(target_os = "macos")]
+            let result = std::process::Command::new("open").arg(&path).spawn();
+            #[cfg(all(
+                not(target_os = "windows"),
+                not(target_os = "macos"),
+                not(target_arch = "wasm32"),
+                not(target_os = "android")
+            ))]
+            let result = std::process::Command::new("xdg-open").arg(&path).spawn();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(relative);
+            match result {
+                Ok(_) => self.status = format!("Geöffnet: {name}"),
+                Err(_) => self.status = "Konnte Datei nicht öffnen".into(),
+            }
+        }
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        {
+            self.status = "Öffnen auf diesem Ziel nicht unterstützt".into();
         }
     }
 
@@ -1888,6 +2597,7 @@ impl MiniGramps {
                 set_reference: false,
                 image: Some(path.to_path_buf()),
             });
+            self.pending_select_choice = 0;
             return;
         }
         self.apply_select(id, false);
@@ -1901,6 +2611,7 @@ impl MiniGramps {
         };
         self.draft = person;
         self.draft.ensure_standard_events();
+        self.seed_shown_name_fields();
         self.inline_edit = true;
         if let Some(relative) = crate::media::import_media_file_async(ctx, &self.library, path) {
             if !self.draft.gallery.iter().any(|entry| entry == &relative) {
@@ -1930,7 +2641,26 @@ impl MiniGramps {
             if let Some(person) = self.data.find(&id).cloned() {
                 self.draft = person;
                 self.draft.ensure_standard_events();
+                self.seed_shown_name_fields();
                 self.inline_edit = true;
+            }
+        }
+    }
+
+    /// Befüllte erweiterte Namensfelder beim Betreten des Editmodus einblenden
+    /// (einmalig; danach toggelt nur das Rechtsklick-Menü — Ausblenden bei
+    /// vollem Feld bleibt möglich, Daten bleiben erhalten).
+    pub(crate) fn seed_shown_name_fields(&mut self) {
+        for (key, field) in [
+            ("title", self.draft.title.as_str()),
+            ("nick_name", self.draft.nick_name.as_str()),
+            ("call_name", self.draft.call_name.as_str()),
+            ("name_prefix", self.draft.name_prefix.as_str()),
+            ("surname_prefix", self.draft.surname_prefix.as_str()),
+            ("suffix", self.draft.suffix.as_str()),
+        ] {
+            if !field.trim().is_empty() {
+                self.name_fields_shown.insert(key.to_string());
             }
         }
     }
@@ -2380,6 +3110,7 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
                     &self.multi_select,
                     self.photo_full_zoom,
                     self.initials_full_zoom,
+                    self.warn_certainty,
                 );
                 if more_people_available
                     && self.max_generations == 0
@@ -2584,9 +3315,13 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
         dialogs::show_settings(self, ctx);
         dialogs::show_project(self, ctx);
         dialogs::show_export(self, ctx);
+        dialogs::show_export_progress(self, ctx);
         dialogs::show_image_intent(self, ctx);
         dialogs::show_photo_chooser(self, ctx);
         dialogs::show_merge_review(self, ctx);
+        dialogs::show_import_wizard(self, ctx);
+        dialogs::show_person_merge(self, ctx);
+        picker::show_link_detail(self, ctx);
         dialogs::show_quick(self, ctx);
         dialogs::show_quick_detail(self, ctx);
         dialogs::show_lightbox(self, ctx);
@@ -2622,6 +3357,7 @@ let log_layout = self.fit_pending || drag_ended || log_layout_request;
             tree_initial_person_limit: self.tree_initial_person_limit,
             tree_load_step: self.tree_load_step,
             match_threshold: self.match_threshold,
+            warn_certainty: self.warn_certainty,
             photo_full_zoom: self.photo_full_zoom,
             initials_full_zoom: self.initials_full_zoom,
             common_given_threshold: self.common_given_threshold,

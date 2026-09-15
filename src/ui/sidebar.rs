@@ -17,11 +17,13 @@ use std::collections::HashMap;
 use crate::media::{
     avatar_ui_live, avatar_ui_preview, clear_person_photo_cache, gallery_thumbnail_ui,
 };
-use crate::model::{ChildRelation, Gender, Person, parse_birth_date, person};
+use crate::model::{
+    AlternativeName, Certainty, ChildRelation, Gender, Person, parse_birth_date, person,
+};
 use crate::ui::{
-    ICON_ADD_PERSON, ICON_CHILD, ICON_CLOSE, ICON_EDIT, ICON_PARENT, ICON_PARTNER, ICON_REFERENCE,
-    ICON_SAVE, ICON_SETTINGS, ICON_SIBLING, ICON_TRASH, ICON_UNLINK, MiniGramps, icon_button,
-    icon_only_button, panels::palette, picker,
+    ICON_ADD_PERSON, ICON_CHILD, ICON_CLOSE, ICON_EDIT, ICON_MERGE, ICON_PARENT, ICON_PARTNER,
+    ICON_REFERENCE, ICON_SAVE, ICON_SETTINGS, ICON_SIBLING, ICON_TRASH, ICON_UNLINK, MiniGramps,
+    icon_button, icon_only_button, panels::palette, picker,
 };
 
 /// Linke Seitenleiste: Personen nach Nachnamen gruppiert.
@@ -344,6 +346,16 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
                     {
                         app.toggle_inline_edit();
                     }
+                    // Zusammenführen-Dialog (nur Ansicht): Top-Treffer mit
+                    // Prozenten, Detail mit Vergleich + Button (Symbol).
+                    if !app.inline_edit
+                        && app.selected.is_some()
+                        && icon_only_button(ui, ICON_MERGE, "person-merge")
+                            .on_hover_text("Person zusammenführen")
+                            .clicked()
+                    {
+                        app.open_person_merge();
+                    }
                 });
             });
             // Personenwechsel: Profil ans Anfang scrollen, sonst bleibt ein
@@ -382,14 +394,40 @@ pub fn show_right(app: &mut MiniGramps, ctx: &egui::Context) {
 }
 
 /// Nur-Lesen-Darstellung der Ereignisse (Geburt/Tod + weitere + Partner-Heirat).
-fn events_readonly(ui: &mut egui::Ui, p: &Person, partners: &[Person]) {
+/// Werte unter der Warnstufe werden amber getönt (Handlungsbedarf).
+fn events_readonly(
+    ui: &mut egui::Ui,
+    p: &Person,
+    partners: &[Person],
+    warn_certainty: Option<Certainty>,
+) {
+    let warns = |level: Certainty| crate::model::certainty_warns(level, warn_certainty);
+    let field_warn = |person: &Person, key: &str| {
+        warns(
+            person
+                .field_certainty
+                .get(key)
+                .copied()
+                .unwrap_or(Certainty::Unset),
+        )
+    };
     let mut has_any = false;
     if !p.birth.is_empty() || !p.birth_place.is_empty() {
-        picker::info_row(ui, "Geburt", &picker::dated_place(&p.birth, &p.birth_place));
+        picker::info_row_warn(
+            ui,
+            "Geburt",
+            &picker::dated_place(&p.birth, &p.birth_place),
+            field_warn(p, "birth"),
+        );
         has_any = true;
     }
     if !p.death.is_empty() || !p.death_place.is_empty() {
-        picker::info_row(ui, "Tod", &picker::dated_place(&p.death, &p.death_place));
+        picker::info_row_warn(
+            ui,
+            "Tod",
+            &picker::dated_place(&p.death, &p.death_place),
+            field_warn(p, "death"),
+        );
         has_any = true;
     }
     for event in &p.events {
@@ -397,7 +435,13 @@ fn events_readonly(ui: &mut egui::Ui, p: &Person, partners: &[Person]) {
             && event.kind != crate::model::EventKind::Death
         {
             let value = picker::dated_place(&event.date, &event.place);
-            picker::info_row(ui, event.kind.label(), &value);
+            picker::info_row_warn(ui, event.kind.label(), &value, warns(event.certainty));
+            picker::entry_extras_view(
+                ui,
+                event.notes.as_deref(),
+                &event.sources,
+                event.certainty,
+            );
             has_any = true;
         }
     }
@@ -407,7 +451,13 @@ fn events_readonly(ui: &mut egui::Ui, p: &Person, partners: &[Person]) {
                 || event.kind == crate::model::EventKind::Divorce
             {
                 let value = picker::dated_place(&event.date, &event.place);
-                picker::info_row(ui, event.kind.label(), &value);
+                picker::info_row_warn(ui, event.kind.label(), &value, warns(event.certainty));
+                picker::entry_extras_view(
+                    ui,
+                    event.notes.as_deref(),
+                    &event.sources,
+                    event.certainty,
+                );
                 has_any = true;
             }
         }
@@ -419,6 +469,118 @@ fn events_readonly(ui: &mut egui::Ui, p: &Person, partners: &[Person]) {
                 .color(crate::ui::panels::dim_text(ui)),
         );
     }
+}
+
+/// Erweiterte Namensteile (Schlüssel, Menü-Label) für Editor + Kontextmenü.
+const NAME_PARTS: [(&str, &str); 6] = [
+    ("title", "Titel"),
+    ("nick_name", "Spitzname"),
+    ("call_name", "Rufname"),
+    ("name_prefix", "Vornamenspräfix"),
+    ("surname_prefix", "Nachnamenspräfix"),
+    ("suffix", "Suffix"),
+];
+
+/// Namensfeld per Schlüssel lesen/schreiben (Entwurf).
+fn name_part_mut<'a>(person: &'a mut Person, key: &str) -> Option<&'a mut String> {
+    Some(match key {
+        "title" => &mut person.title,
+        "nick_name" => &mut person.nick_name,
+        "call_name" => &mut person.call_name,
+        "name_prefix" => &mut person.name_prefix,
+        "surname_prefix" => &mut person.surname_prefix,
+        "suffix" => &mut person.suffix,
+        _ => return None,
+    })
+}
+
+/// Kontextmenü: erweiterte Namensfelder ein-/ausblenden (Häkchen). Daten
+/// bleiben beim Ausblenden erhalten.
+fn show_name_fields_menu(ui: &mut egui::Ui, app: &mut MiniGramps) {
+    ui.label(egui::RichText::new("Namensfelder").strong());
+    ui.separator();
+    for (key, label) in NAME_PARTS {
+        let mut shown = app.name_fields_shown.contains(key);
+        if ui.checkbox(&mut shown, label).changed() {
+            if shown {
+                app.name_fields_shown.insert(key.to_string());
+            } else {
+                app.name_fields_shown.remove(key);
+            }
+        }
+    }
+}
+
+/// Map-gestütztes Eintrags-Menü (Namensteile): Slot lokal spiegeln (kein
+/// Borrow-Konflikt mit dem Entwurf), Menü ausführen, zurückschreiben.
+/// Gibt (Warnung, zu öffnendes Medium) zurück.
+fn field_entry_menu(ui: &mut egui::Ui, app: &mut MiniGramps, key: &str) -> (bool, Option<String>) {
+    let mut note = app.draft.field_notes.remove(key);
+    let mut sources = app.draft.field_sources.remove(key).unwrap_or_default();
+    let mut certainty = app
+        .draft
+        .field_certainty
+        .get(key)
+        .copied()
+        .unwrap_or(Certainty::Unset);
+    let (warn, open) = picker::entry_menu(ui, &mut note, &mut sources, &mut certainty);
+    if let Some(note) = note {
+        app.draft.field_notes.insert(key.to_string(), note);
+    }
+    if !sources.is_empty() {
+        app.draft.field_sources.insert(key.to_string(), sources);
+    }
+    if certainty != Certainty::Unset {
+        app.draft
+            .field_certainty
+            .insert(key.to_string(), certainty);
+    } else {
+        app.draft.field_certainty.remove(key);
+    }
+    (warn, open)
+}
+
+/// Alternativnamen-Editor (Entwurf): kompakte Felder je Eintrag; gibt true
+/// zurück, wenn der Eintrag gelöscht werden soll.
+fn edit_alt_name(ui: &mut egui::Ui, alt: &mut AlternativeName, index: usize) -> bool {
+    let mut remove = false;
+    let header = {
+        let display = alt.display();
+        if display.is_empty() {
+            format!("Alternativname {}", index + 1)
+        } else if alt.name_type.trim().is_empty() {
+            display
+        } else {
+            format!("{} ({})", display, alt.name_type.trim())
+        }
+    };
+    egui::CollapsingHeader::new(header)
+        .id_salt(("alt-name", index))
+        .show(ui, |ui| {
+            for (label, field) in [
+                ("Vorname", &mut alt.given_name),
+                ("Nachname", &mut alt.family_name),
+                ("Titel", &mut alt.title),
+                ("Spitzname", &mut alt.nick_name),
+                ("Rufname", &mut alt.call_name),
+                ("Vornamenspräfix", &mut alt.name_prefix),
+                ("Nachnamenspräfix", &mut alt.surname_prefix),
+                ("Suffix", &mut alt.suffix),
+                ("Namensart", &mut alt.name_type),
+                ("Herkunft", &mut alt.name_origin),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    ui.add(
+                        egui::TextEdit::singleline(field).desired_width(ui.available_width()),
+                    );
+                });
+            }
+            if ui.small_button("Alternativnamen entfernen").clicked() {
+                remove = true;
+            }
+        });
+    remove
 }
 
 /// Profilinhalt (Avatar, Daten, Familie, Galerie) der angezeigten Person.
@@ -531,6 +693,7 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
                     // Projektbildern (oder neuer Datei) anbieten.
                     app.draft = p.clone();
                     app.draft.ensure_standard_events();
+                    app.seed_shown_name_fields();
                     app.inline_edit = true;
                     app.photo_chooser_gallery = false;
                     app.photo_chooser =
@@ -540,8 +703,22 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
             // Größerer Abstand zwischen Profilbild und Name.
             ui.add_space(8.0);
             let name = p.display_name();
-            // Profilname bricht um statt zu kürzen (kein Tooltip nötig).
-            picker::left_label_wrapped(ui, &name, 18.0, ui.visuals().text_color());
+            // Profilname bricht um statt zu kürzen (kein Tooltip nötig);
+            // warntönung bei Sicherheit unter Warnstufe (Vor-/Nachname).
+            let name_warn = ["given_name", "family_name"].iter().any(|key| {
+                let level = p
+                    .field_certainty
+                    .get(*key)
+                    .copied()
+                    .unwrap_or(Certainty::Unset);
+                crate::model::certainty_warns(level, app.warn_certainty)
+            });
+            let name_color = if name_warn {
+                picker::warn_color()
+            } else {
+                ui.visuals().text_color()
+            };
+            picker::left_label_wrapped(ui, &name, 18.0, name_color);
             ui.add(egui::Label::new(picker::gender_label(p.gender)).halign(egui::Align::LEFT));
         }
         ui.add_space(12.0);
@@ -571,41 +748,156 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
         ui.separator();
         section_title(ui, "NAMEN", section_accent, app);
         if !app.collapsed_sections.contains("NAMEN") {
-            let mut name_entries: Vec<(String, String)> = Vec::new();
-            if !p.title.is_empty() {
-                name_entries.push(("Titel".into(), p.title.clone()));
-            }
-            if !p.nick_name.is_empty() {
-                name_entries.push(("Spitzname".into(), p.nick_name.clone()));
-            }
-            if !p.call_name.is_empty() {
-                name_entries.push(("Rufname".into(), p.call_name.clone()));
-            }
-            if !p.suffix.is_empty() {
-                name_entries.push(("Namenszusatz".into(), p.suffix.clone()));
-            }
-            if !p.name_prefix.is_empty() {
-                name_entries.push(("Namenspräfix".into(), p.name_prefix.clone()));
-            }
-            if !p.surname_prefix.is_empty() {
-                name_entries.push(("Namenspräfix".into(), p.surname_prefix.clone()));
-            }
-            if !p.name_type.is_empty() {
-                name_entries.push(("Namensart".into(), p.name_type.clone()));
-            }
-            if !p.name_origin.is_empty() {
-                name_entries.push(("Herkunft".into(), p.name_origin.clone()));
-            }
-            if name_entries.is_empty() {
+            if app.inline_edit {
+                // Editierbare erweiterte Teile (sichtbar ⟺ aktiviert);
+                // Rechtsklick auf ein Label blendet ein/aus, „…" öffnet das
+                // Eintrags-Menü (Notiz, Quellen, Sicherheit).
+                let mut any_shown = false;
+                let mut menu_warned = false;
+                for (key, label) in NAME_PARTS {
+                    if !app.name_fields_shown.contains(key) {
+                        continue;
+                    }
+                    any_shown = true;
+                    ui.horizontal(|ui| {
+                        let label_response = ui
+                            .add(egui::Label::new(label).sense(Sense::click()))
+                            .on_hover_text("Rechtsklick: weitere Namensfelder ein-/ausblenden");
+                        if let Some(field) = name_part_mut(&mut app.draft, key) {
+                            ui.add(
+                                egui::TextEdit::singleline(field)
+                                    .desired_width(ui.available_width()),
+                            );
+                        }
+                        let entry_button = ui.small_button("…").on_hover_text(
+                            "Eintrags-Menü: Notiz, Quellen, Sicherheit",
+                        );
+                        let mut open_media: Option<String> = None;
+                        egui::Popup::menu(&entry_button).show(|ui| {
+                            let (warn, open) = field_entry_menu(ui, app, key);
+                            if warn {
+                                menu_warned = true;
+                            }
+                            if open.is_some() {
+                                open_media = open;
+                            }
+                        });
+                        egui::Popup::context_menu(&entry_button).show(|ui| {
+                            let (warn, open) = field_entry_menu(ui, app, key);
+                            if warn {
+                                menu_warned = true;
+                            }
+                            if open.is_some() {
+                                open_media = open;
+                            }
+                        });
+                        if let Some(relative) = open_media {
+                            app.open_source_media(&relative);
+                        }
+                        egui::Popup::context_menu(&label_response).show(|ui| {
+                            show_name_fields_menu(ui, app);
+                        });
+                    });
+                    // Zusatzinfos darunter (Notiz, Quellen).
+                    picker::entry_extras_editor(
+                        ui,
+                        app.draft.field_notes.get_mut(key),
+                        app.draft.field_sources.get_mut(key).filter(|v| !v.is_empty()),
+                        &app.library,
+                    );
+                }
+                if menu_warned {
+                    app.status = "Achtung: Beglaubigt ohne Quelle!".into();
+                }
+                if !any_shown {
+                    let placeholder = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(
+                                    "Keine weiteren Namen (Rechtsklick: Felder einblenden)",
+                                )
+                                .italics()
+                                .color(crate::ui::panels::dim_text(ui)),
+                            )
+                            .sense(Sense::click()),
+                        )
+                        .on_hover_text("Rechtsklick: weitere Namensfelder ein-/ausblenden");
+                    egui::Popup::context_menu(&placeholder).show(|ui| {
+                        show_name_fields_menu(ui, app);
+                    });
+                }
+                // Alternative Namen (Alias-/Geburts-/Ehenamen): anlegen,
+                // bearbeiten, entfernen — leere Einträge fallen beim
+                // Speichern weg (`Person::strip_names`).
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("ALTERNATIVE NAMEN")
+                        .small()
+                        .color(crate::ui::panels::dim_text(ui)),
+                );
+                let mut remove_alt: Option<usize> = None;
+                for (index, alt) in app.draft.alt_names.iter_mut().enumerate() {
+                    if edit_alt_name(ui, alt, index) {
+                        remove_alt = Some(index);
+                    }
+                }
+                if let Some(index) = remove_alt {
+                    app.draft.alt_names.remove(index);
+                }
+                if ui.small_button("+ Alternativen Namen").clicked() {
+                    app.draft.alt_names.push(AlternativeName::default());
+                }
+            } else {
+            // (Schlüssel, Label, Wert) mit Zusatzinfos aus den Maps.
+            let parts: Vec<(&str, &str, String)> = vec![
+                ("title", "Titel", p.title.clone()),
+                ("nick_name", "Spitzname", p.nick_name.clone()),
+                ("call_name", "Rufname", p.call_name.clone()),
+                ("suffix", "Namenszusatz", p.suffix.clone()),
+                ("name_prefix", "Vornamenspräfix", p.name_prefix.clone()),
+                ("surname_prefix", "Nachnamenspräfix", p.surname_prefix.clone()),
+                ("name_type", "Namensart", p.name_type.clone()),
+                ("name_origin", "Herkunft", p.name_origin.clone()),
+            ];
+            let shown: Vec<(&str, &str, String)> = parts
+                .into_iter()
+                .filter(|(_, _, value)| !value.is_empty())
+                .collect();
+            if shown.is_empty() && p.alt_names.iter().all(|alt| alt.is_empty()) {
                 ui.label(
                     egui::RichText::new("Keine weiteren Namen")
                         .italics()
                         .color(crate::ui::panels::dim_text(ui)),
                 );
             } else {
-                for (label, value) in name_entries {
-                    picker::info_row(ui, &label, &value);
+                for (key, label, value) in &shown {
+                    let warn = {
+                        let level = p
+                            .field_certainty
+                            .get(*key)
+                            .copied()
+                            .unwrap_or(Certainty::Unset);
+                        crate::model::certainty_warns(level, app.warn_certainty)
+                    };
+                    picker::info_row_warn(ui, label, value, warn);
+                    picker::entry_extras_view(
+                        ui,
+                        p.field_notes.get(*key).map(String::as_str),
+                        p.field_sources.get(*key).map(Vec::as_slice).unwrap_or(&[]),
+                        p.field_certainty.get(*key).copied().unwrap_or(Certainty::Unset),
+                    );
                 }
+                for alt in &p.alt_names {
+                    if alt.is_empty() {
+                        continue;
+                    }
+                    let mut label = alt.display();
+                    if !alt.name_type.trim().is_empty() {
+                        label = format!("{} ({})", label, alt.name_type.trim());
+                    }
+                    picker::info_row(ui, "Alternativname", &label);
+                }
+            }
             }
         }
     }
@@ -614,9 +906,16 @@ fn profile(app: &mut MiniGramps, ui: &mut egui::Ui, section_accent: Color32, p: 
         section_title(ui, "EREIGNISSE", section_accent, app);
         if !app.collapsed_sections.contains("EREIGNISSE") {
             if app.inline_edit {
-                picker::events_editor(ui, &mut app.draft);
+                let (warned, open_media) =
+                    picker::events_editor(ui, &mut app.draft, &app.library);
+                if warned {
+                    app.status = "Achtung: Beglaubigt ohne Quelle!".into();
+                }
+                if let Some(relative) = open_media {
+                    app.open_source_media(&relative);
+                }
             } else {
-                events_readonly(ui, p, &partners);
+                events_readonly(ui, p, &partners, app.warn_certainty);
             }
         }
     }
@@ -937,6 +1236,20 @@ fn relation_section(
     for entry in entries {
         // Zeile + (im Bearbeitungsmodus) Löschen-Knopf; Klick auf den Namen
         // öffnet dann den Beziehungseditor statt der Person.
+        let selected_id = app.selected.clone().unwrap_or_default();
+        // Beziehungs-Menü (Notiz, Quellen, Sicherheit je Familie).
+        let mut menu_warned = false;
+        // Reserve je nach Trailer-Buttons (Menü + Entfernen vs. nur Entfernen).
+        let has_menu = app.inline_edit
+            && app
+                .data
+                .relation_family_id(&selected_id, &entry.id)
+                .is_some();
+        let trailing = if has_menu {
+            picker::TRAILING_TWO_ICON_RESERVE
+        } else {
+            picker::TRAILING_ICON_RESERVE
+        };
         ui.horizontal(|ui| {
             if app.inline_edit {
                 let clicked = picker::relationship_row(
@@ -946,7 +1259,7 @@ fn relation_section(
                     entry,
                     &mut app.photo_cache,
                     &app.library,
-                    picker::TRAILING_ICON_RESERVE,
+                    trailing,
                 );
                 if clicked && kind != crate::ui::tree::RelationKind::Sibling {
                     // Geschwister haben keine Beziehungsoptionen -> nicht aufklappbar.
@@ -956,6 +1269,51 @@ fn relation_section(
                         }
                         _ => Some((kind, entry.id.clone())),
                     };
+                }
+                if let Some(fid) = app.data.relation_family_id(&selected_id, &entry.id) {
+                    let menu_button = ui
+                        .small_button("…")
+                        .on_hover_text("Beziehungs-Menü: Notiz, Quellen, Sicherheit");
+                    let mut open_media: Option<String> = None;
+                    egui::Popup::menu(&menu_button).show(|ui| {
+                        if let Some(family) =
+                            app.data.families.iter_mut().find(|family| family.id == fid)
+                        {
+                            let (warn, open) = picker::entry_menu(
+                                ui,
+                                &mut family.notes,
+                                &mut family.sources,
+                                &mut family.certainty,
+                            );
+                            if warn {
+                                menu_warned = true;
+                            }
+                            if open.is_some() {
+                                open_media = open;
+                            }
+                        }
+                    });
+                    egui::Popup::context_menu(&menu_button).show(|ui| {
+                        if let Some(family) =
+                            app.data.families.iter_mut().find(|family| family.id == fid)
+                        {
+                            let (warn, open) = picker::entry_menu(
+                                ui,
+                                &mut family.notes,
+                                &mut family.sources,
+                                &mut family.certainty,
+                            );
+                            if warn {
+                                menu_warned = true;
+                            }
+                            if open.is_some() {
+                                open_media = open;
+                            }
+                        }
+                    });
+                    if let Some(relative) = open_media {
+                        app.open_source_media(&relative);
+                    }
                 }
                 if icon_only_button(ui, ICON_UNLINK, "unlink-relation")
                     .on_hover_text("Verknüpfung lösen (Person bleibt erhalten)")
@@ -998,6 +1356,31 @@ fn relation_section(
                 }
             }
         });
+        if menu_warned {
+            app.status = "Achtung: Beglaubigt ohne Quelle!".into();
+        }
+        // Zusatzinfos unter der Zeile (Editor: bearbeiten, Ansicht: lesen).
+        if let Some(fid) = app.data.relation_family_id(&selected_id, &entry.id) {
+            if app.inline_edit {
+                if let Some(family) = app.data.families.iter_mut().find(|family| family.id == fid)
+                {
+                    picker::entry_extras_editor(
+                        ui,
+                        family.notes.as_mut(),
+                        Some(&mut family.sources),
+                        &app.library,
+                    );
+                }
+            } else if let Some(family) = app.data.families.iter().find(|family| family.id == fid)
+            {
+                picker::entry_extras_view(
+                    ui,
+                    family.notes.as_deref(),
+                    &family.sources,
+                    family.certainty,
+                );
+            }
+        }
         if app
             .relation_editor
             .as_ref()

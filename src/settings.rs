@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use crate::import::default_library;
+use crate::model::Certainty;
 use crate::ui::CardLayout;
 use crate::ui::tree::TreeOrientation;
 
@@ -20,6 +21,9 @@ pub struct AppSettings {
     pub tree_load_step: usize,
     /// Treffer-Schwelle für den Duplikat-Abgleich beim Anhängen (0–100 %).
     pub match_threshold: f32,
+    /// Warnstufe Sicherheit: Infos bis zu dieser Stufe werden in Baum und
+    /// Seitenleiste farblich hervorgehoben (Handlungsbedarf). None = Aus.
+    pub warn_certainty: Option<Certainty>,
     /// Zoom-Faktor fürs Umschalten auf die Ganzfoto-Ansicht bei Personen
     /// MIT Foto (darunter Ganzfoto, darüber Avatar+Text).
     #[serde(default = "default_full_zoom")]
@@ -83,6 +87,7 @@ impl Default for AppSettings {
             tree_initial_person_limit: 60,
             tree_load_step: 60,
             match_threshold: 80.0,
+            warn_certainty: None,
             photo_full_zoom: default_full_zoom(),
             initials_full_zoom: default_full_zoom(),
             common_given_threshold: default_common_given_threshold(),
